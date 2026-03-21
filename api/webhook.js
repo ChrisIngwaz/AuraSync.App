@@ -13,40 +13,27 @@ export default async function handler(req, res) {
   const userPhone = From.replace('whatsapp:', '');
 
   try {
-    // 1. MEMORIA: Buscar o Crear en la tabla "clientes" (corregido)
-    let { data: client, error: fetchError } = await supabase
-      .from('clientes')
-      .select('*')
-      .eq('telefono', userPhone)
-      .single();
+    // 1. OBTENER CONTEXTO (Clientes y SERVICIOS REALES)
+    const { data: cliente } = await supabase.from('clientes').select('*').eq('telefono', userPhone).single();
+    const { data: serviciosReal } = await supabase.from('servicios').select('*');
+    const { data: especialistas } = await supabase.from('especialistas').select('*');
 
-    if (!client) {
-      const { data: newClient } = await supabase
-        .from('clientes')
-        .insert([{ telefono: userPhone }])
-        .select()
-        .single();
-      client = newClient;
-    }
+    // 2. SMART PROMPT ORIGINAL BLINDADO CON CATÁLOGO
+    const systemPrompt = `Eres la Asistente de AuraSync. Coordinadora digital, no IA. Tono humano y profesional.
 
-    // 2. INTELIGENCIA: Perfil Original de AuraSync
-    const systemPrompt = `Eres la Asistente de Ventas y Agendamiento de AuraSync. Tu objetivo es gestionar citas para salones de belleza con una eficiencia impecable y un tono humano, profesional y persuasivo.
+CATÁLOGO DE SERVICIOS OFICIAL (Úsalos EXACTAMENTE así):
+${serviciosReal?.map(s => `- ${s.nombre} (Duración: ${s.duracion}min): $${s.precio}`).join('\n')}
 
-REGLAS DE INTERACCIÓN:
-1. IDENTIDAD: Nunca digas que eres una inteligencia artificial. Eres la coordinadora digital del local.
-2. CLIENTES NUEVOS: Si el sistema indica que es un cliente nuevo, saluda con calidez y solicita obligatoriamente: Nombre, Apellido y Fecha de Nacimiento. No agendes nada sin estos datos.
-3. CLIENTES EXISTENTES: Saluda por su nombre (${client?.nombre || 'cliente'}) y ofrece servicios basados en su historial si está disponible.
-4. CIERRE DE VENTAS: Si el cliente duda, resalta los beneficios de los servicios (calidad, experiencia, bienestar). 
-5. MANEJO DE CITAS: Usa un lenguaje claro para confirmar día, hora, servicio y profesional encargado.
-6. CONCISIÓN: Mantén las respuestas breves y directas para WhatsApp. No uses párrafos largos.
+EQUIPO:
+${especialistas?.map(e => `- ${e.nombre} (${e.especialidad})`).join('\n')}
 
-CONTEXTO DE NEGOCIO:
-- Los servicios incluyen cortes, color, manicura y tratamientos estéticos.
-- La política de cancelación es de mínimo 4 horas de anticipación.
-- Si un cliente cancela a tiempo, sé comprensiva. Si cancela tarde, menciona amablemente la política pero ofrece reprogramar para no perder la venta.
+REGLAS DE ORO:
+1. Si el cliente es nuevo (${cliente?.nombre ? 'Ya lo conoces: ' + cliente.nombre : 'Es nuevo'}), pide obligatoriamente Nombre, Apellido y Fecha de Nacimiento. No agendes sin esto.
+2. Solo ofrece y acepta agendar los servicios del "CATÁLOGO OFICIAL". No inventes servicios.
+3. Para agendar necesitas: Servicio, Especialista, Fecha y Hora.
 
-INSTRUCCIÓN TÉCNICA: Al final de tu respuesta, añade SIEMPRE este bloque JSON con los datos detectados:
-DATA_JSON:{"nombre": "...", "fecha_nacimiento": "...", "email": "...", "notas_bienestar": "..."}:DATA_JSON`;
+INSTRUCCIÓN TÉCNICA: Al final, añade SIEMPRE este JSON si detectas intención o datos:
+DATA_JSON:{"nombre": "...", "servicio_id": "...", "especialista_id": "...", "fecha_cita": "YYYY-MM-DD HH:mm"}:DATA_JSON`;
 
     const aiResponse = await openai.chat.completions.create({
       model: "gpt-4o",
@@ -58,24 +45,36 @@ DATA_JSON:{"nombre": "...", "fecha_nacimiento": "...", "email": "...", "notas_bi
 
     let fullReply = aiResponse.choices[0].message.content;
     
-    // 3. EXTRACCIÓN Y ACTUALIZACIÓN EN "clientes"
+    // 3. EXTRACCIÓN Y AGENDAMIENTO
     const match = fullReply.match(/DATA_JSON:({.*?}):DATA_JSON/s);
 
     if (match) {
       const extracted = JSON.parse(match[1]);
       fullReply = fullReply.replace(/DATA_JSON:.*?:DATA_JSON/s, '').trim();
 
-      const updates = {};
-      if (extracted.nombre && extracted.nombre !== "...") updates.nombre = extracted.nombre;
-      if (extracted.fecha_nacimiento && extracted.fecha_nacimiento !== "...") updates.fecha_nacimiento = extracted.fecha_nacimiento;
-      if (extracted.email && extracted.email !== "...") updates.email = extracted.email;
+      // Guardar nombre si es nuevo
+      if (extracted.nombre && extracted.nombre !== "...") {
+        await supabase.from('clientes').update({ nombre: extracted.nombre }).eq('telefono', userPhone);
+      }
 
-      if (Object.keys(updates).length > 0) {
-        await supabase.from('clientes').update(updates).eq('telefono', userPhone);
+      // INSERTAR CITA SI ESTÁ COMPLETA
+      if (extracted.servicio_id !== "..." && extracted.fecha_cita !== "...") {
+        // Buscamos el ID real del servicio basado en el nombre que detectó la IA
+        const servicioSolicitado = serviciosReal.find(s => s.id === extracted.servicio_id);
+        
+        if (servicioSolicitado) {
+          await supabase.from('citas').insert([{
+            cliente_id: cliente?.id,
+            servicio_id: servicioSolicitado.id,
+            especialista_id: extracted.especialista_id !== "..." ? extracted.especialista_id : null,
+            fecha_hora: extracted.fecha_cita,
+            estado: 'programada'
+          }]);
+        }
       }
     }
 
-    // 4. ENVÍO A WHATSAPP
+    // 4. ENVÍO
     await twilioClient.messages.create({
       from: `whatsapp:${process.env.TWILIO_NUMBER}`,
       to: From,
@@ -84,7 +83,7 @@ DATA_JSON:{"nombre": "...", "fecha_nacimiento": "...", "email": "...", "notas_bi
 
     return res.status(200).send('OK');
   } catch (error) {
-    console.error("Error:", error);
+    console.error("Error AuraSync:", error);
     return res.status(200).send('OK');
   }
 }
