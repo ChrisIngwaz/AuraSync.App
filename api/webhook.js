@@ -1,61 +1,83 @@
-// Este es el "Cerebro" de AuraSync que conecta Twilio, Deepgram, Supabase y OpenAI
-const { Deepgram } = require('@deepgram/sdk');
 const { createClient } = require('@supabase/supabase-js');
 const { OpenAI } = require('openai');
 const twilio = require('twilio');
 
-// Conectamos las herramientas usando tus "llaves" secretas
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-const deepgram = new Deepgram(process.env.DEEPGRAM_API_KEY);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
 export default async function handler(req, res) {
-  // Solo aceptamos mensajes que vienen de Twilio (POST)
   if (req.method !== 'POST') return res.status(405).send('Método no permitido');
 
-  const { From, Body, MediaUrl0 } = req.body; 
-  const userPhone = From.replace('whatsapp:', ''); // Quitamos el texto extra del número
+  const { From, Body, MediaUrl0 } = req.body;
+  const userPhone = From.replace('whatsapp:', '');
 
   try {
-    // PASO A: ¿El cliente envió un audio? (Oído del asistente)
-    let textToProcess = Body || "";
-    if (MediaUrl0) {
-      // Deepgram escucha el audio y lo escribe por nosotros
-      const response = await deepgram.transcription.preRecorded({ url: MediaUrl0 }, { language: 'es', punctuate: true });
-      textToProcess = response.results.channels[0].alternatives[0].transcript;
+    let userText = Body || "";
+
+    // 1. MEMORIA: Buscar o Crear cliente
+    let { data: client } = await supabase.from('clients').select('*').eq('telefono', userPhone).single();
+    
+    if (!client) {
+      const { data: newClient } = await supabase.from('clients').insert([{ telefono: userPhone }]).select().single();
+      client = newClient;
     }
 
-    // PASO B: Buscar al cliente en tu base de datos (Memoria)
-    let { data: client } = await supabase.from('clients').select('*').eq('phone', userPhone).single();
+    // 2. INTELIGENCIA: Smart Prompt de AuraSync + Extracción de Datos
+    const systemPrompt = `Eres la Asistente de Ventas y Agendamiento de AuraSync. Tu objetivo es gestionar citas para salones de belleza con una eficiencia impecable y un tono humano, profesional y persuasivo.
 
-    // PASO C: Consultar al "Smart Prompt" (Personalidad Humana)
-    // Aquí es donde la IA decide qué decir basándose en si es nuevo o antiguo
-    const systemInstruction = client 
-      ? `Eres la asistente de AuraSync. Saluda a ${client.name}. Revisa sus citas y ayúdale a agendar una nueva con nuestro staff.` 
-      : `Eres la asistente de AuraSync. Este es un CLIENTE NUEVO. Preséntate con calidez, NO digas que eres una IA, y pide su Nombre, Apellido y Fecha de Nacimiento.`;
+REGLAS DE INTERACCIÓN:
+1. IDENTIDAD: Nunca digas que eres una inteligencia artificial. Eres la coordinadora digital del local.
+2. CLIENTES NUEVOS: Si faltan datos (nombre, fecha_nacimiento, email), saluda con calidez y solicítalos obligatoriamente. No agendes nada sin estos datos.
+3. CLIENTES EXISTENTES: Saluda por su nombre (${client?.nombre || 'cliente'}) y ofrece servicios.
+4. CIERRE DE VENTAS: Si el cliente duda, resalta beneficios (calidad, experiencia, bienestar).
+5. MANEJO DE CITAS: Confirma día, hora, servicio y profesional.
+6. CONCISIÓN: Respuestas breves para WhatsApp.
 
-    const aiCompletion = await openai.chat.completions.create({
-      model: "gpt-4",
+CONTEXTO DE NEGOCIO:
+- Servicios: cortes, color, manicura y tratamientos estéticos.
+- Cancelación: mínimo 4 horas de anticipación.
+
+INSTRUCCIÓN TÉCNICA: Al final de tu respuesta, añade SIEMPRE este bloque JSON con los datos que detectes en el mensaje del usuario:
+DATA_START{"nombre": "...", "fecha_nacimiento": "...", "email": "...", "notas_bienestar": "..."}DATA_END`;
+
+    const aiResponse = await openai.chat.completions.create({
+      model: "gpt-4o",
       messages: [
-        { role: "system", content: systemInstruction },
-        { role: "user", content: textToProcess }
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userText }
       ],
     });
 
-    const finalResponse = aiCompletion.choices[0].message.content;
+    let fullReply = aiResponse.choices[0].message.content;
+    
+    // 3. ACCIÓN: Extraer JSON y actualizar Supabase
+    const dataMatch = fullReply.match(/DATA_START({.*?})DATA_END/s);
+    if (dataMatch) {
+      const extractedData = JSON.parse(dataMatch[1]);
+      fullReply = fullReply.replace(/DATA_START.*?DATA_END/s, '').trim();
 
-    // PASO D: Enviar la respuesta de vuelta a WhatsApp
+      const updates = {};
+      if (extractedData.nombre && extractedData.nombre !== "...") updates.nombre = extractedData.nombre;
+      if (extractedData.fecha_nacimiento && extractedData.fecha_nacimiento !== "...") updates.fecha_nacimiento = extractedData.fecha_nacimiento;
+      if (extractedData.email && extractedData.email !== "...") updates.email = extractedData.email;
+      if (extractedData.notas_bienestar && extractedData.notas_bienestar !== "...") updates.notas_bienestar = extractedData.notas_bienestar;
+
+      if (Object.keys(updates).length > 0) {
+        await supabase.from('clients').update(updates).eq('telefono', userPhone);
+      }
+    }
+
+    // 4. ENVÍO: Respuesta limpia a WhatsApp
     await twilioClient.messages.create({
       from: `whatsapp:${process.env.TWILIO_NUMBER}`,
       to: From,
-      body: finalResponse
+      body: fullReply
     });
 
-    return res.status(200).send('Mensaje procesado');
-
+    return res.status(200).send('OK');
   } catch (error) {
-    console.error("Error en el flujo:", error);
-    return res.status(500).send('Error interno');
+    console.error("Error en AuraSync:", error);
+    return res.status(500).send('Error');
   }
 }
