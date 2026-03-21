@@ -7,20 +7,29 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
 export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
+  if (req.method !== 'POST') return res.status(200).send('OK'); // Evita errores de método
 
   const { From, Body } = req.body;
   const userPhone = From.replace('whatsapp:', '');
 
   try {
-    // 1. MEMORIA: Buscar o crear cliente
-    let { data: client } = await supabase.from('clients').select('*').eq('telefono', userPhone).single();
+    // 1. MEMORIA: Buscar o Crear (La lógica que sí te funcionó)
+    let { data: client, error: fetchError } = await supabase
+      .from('clients')
+      .select('*')
+      .eq('telefono', userPhone)
+      .single();
+
     if (!client) {
-      const { data: newClient } = await supabase.from('clients').insert([{ telefono: userPhone }]).select().single();
+      const { data: newClient } = await supabase
+        .from('clients')
+        .insert([{ telefono: userPhone }])
+        .select()
+        .single();
       client = newClient;
     }
 
-    // 2. INTELIGENCIA: Perfil Original de AuraSync
+    // 2. INTELIGENCIA: Tu Perfil Original de AuraSync
     const systemPrompt = `Eres la Asistente de Ventas y Agendamiento de AuraSync. Tu objetivo es gestionar citas para salones de belleza con una eficiencia impecable y un tono humano, profesional y persuasivo.
 
 REGLAS DE INTERACCIÓN:
@@ -49,30 +58,25 @@ DATA_JSON:{"nombre": "...", "fecha_nacimiento": "...", "email": "...", "notas_bi
 
     let fullReply = aiResponse.choices[0].message.content;
     
-    // 3. EXTRACCIÓN Y ACTUALIZACIÓN EN SUPABASE
-    const jsonRegex = /DATA_JSON:({.*?}):DATA_JSON/s;
-    const match = fullReply.match(jsonRegex);
+    // 3. EXTRACCIÓN: Aquí es donde antes fallaba el guardado
+    const match = fullReply.match(/DATA_JSON:({.*?}):DATA_JSON/s);
 
     if (match) {
-      try {
-        const extracted = JSON.parse(match[1]);
-        fullReply = fullReply.replace(jsonRegex, '').trim();
+      const extracted = JSON.parse(match[1]);
+      fullReply = fullReply.replace(/DATA_JSON:.*?:DATA_JSON/s, '').trim();
 
-        const updates = {};
-        if (extracted.nombre && extracted.nombre !== "...") updates.nombre = extracted.nombre;
-        if (extracted.fecha_nacimiento && extracted.fecha_nacimiento !== "...") updates.fecha_nacimiento = extracted.fecha_nacimiento;
-        if (extracted.email && extracted.email !== "...") updates.email = extracted.email;
-        if (extracted.notas_bienestar && extracted.notas_bienestar !== "...") updates.notas_bienestar = extracted.notas_bienestar;
+      const updates = {};
+      if (extracted.nombre && extracted.nombre !== "...") updates.nombre = extracted.nombre;
+      if (extracted.fecha_nacimiento && extracted.fecha_nacimiento !== "...") updates.fecha_nacimiento = extracted.fecha_nacimiento;
+      if (extracted.email && extracted.email !== "...") updates.email = extracted.email;
 
-        if (Object.keys(updates).length > 0) {
-          await supabase.from('clients').update(updates).eq('telefono', userPhone);
-        }
-      } catch (e) {
-        console.error("Error en parseo:", e);
+      if (Object.keys(updates).length > 0) {
+        // Actualizamos la fila que acabamos de encontrar o crear
+        await supabase.from('clients').update(updates).eq('telefono', userPhone);
       }
     }
 
-    // 4. ENVÍO A WHATSAPP
+    // 4. ENVÍO
     await twilioClient.messages.create({
       from: `whatsapp:${process.env.TWILIO_NUMBER}`,
       to: From,
@@ -81,7 +85,7 @@ DATA_JSON:{"nombre": "...", "fecha_nacimiento": "...", "email": "...", "notas_bi
 
     return res.status(200).send('OK');
   } catch (error) {
-    console.error("Error Crítico:", error);
-    return res.status(500).send('Error');
+    console.error("Error:", error);
+    return res.status(200).send('OK'); // Mandamos 200 para que Twilio no reintente infinitamente
   }
 }
