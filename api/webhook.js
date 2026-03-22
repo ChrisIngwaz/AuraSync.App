@@ -18,39 +18,44 @@ export default async function handler(req, res) {
     // 1. PROCESAR AUDIO O TEXTO
     let userText = Body || "";
     if (MediaUrl0) {
-      const transcription = await deepgram.transcription.preRecorded(
-        { url: MediaUrl0 },
-        { punctuate: true, language: 'es' }
-      );
-      userText = transcription.results.channels[0].alternatives[0].transcript;
+      try {
+        const transcription = await deepgram.transcription.preRecorded(
+          { url: MediaUrl0 },
+          { punctuate: true, language: 'es' }
+        );
+        userText = transcription.results.channels[0].alternatives[0].transcript;
+      } catch (e) {
+        userText = "[Audio no transcrito]";
+      }
     }
 
     // 2. LEER BASE DE DATOS (Servicios y Especialistas)
     const { data: cliente } = await supabase.from('clientes').select('*').eq('telefono', userPhone).single();
-    const { data: listaServicios } = await supabase.from('servicios').select('nombre, precio, duracion');
-    const { data: listaEspecialistas } = await supabase.from('especialistas').select('nombre, especialidad');
+    const { data: listaServicios } = await supabase.from('servicios').select('*');
+    const { data: listaEspecialistas } = await supabase.from('especialistas').select('*');
 
-    // Construir el catálogo para la IA
-    const catalogoTexto = listaServicios?.map(s => `- ${s.nombre}: $${s.precio} (${s.duracion} min)`).join('\n') || "No hay servicios cargados.";
-    const equipoTexto = listaEspecialistas?.map(e => `- ${e.nombre}: ${e.especialidad}`).join('\n') || "No hay especialistas cargados.";
+    // CONSTRUIR EL CONTEXTO CON LA COLUMNA "ROL"
+    const catalogoTexto = listaServicios?.map(s => `- ${s.nombre}: $${s.precio}`).join('\n') || "No hay servicios.";
+    const equipoTexto = listaEspecialistas && listaEspecialistas.length > 0 
+      ? listaEspecialistas.map(e => `- ${e.nombre} (${e.rol})`).join('\n') 
+      : "No hay especialistas registrados.";
 
-    // 3. SMART PROMPT CON DATOS REALES
+    // 3. SMART PROMPT ORIGINAL
     const systemPrompt = `Eres la Asistente de AuraSync. Coordinadora profesional.
     
-CATÁLOGO REAL DE SERVICIOS:
+CATÁLOGO REAL:
 ${catalogoTexto}
 
 EQUIPO DISPONIBLE:
 ${equipoTexto}
 
 REGLAS:
-- No inventes servicios ni precios. Usa solo los de la lista arriba.
-- Si preguntan por servicios, lístalos de forma persuasiva y breve.
-- Cliente actual: ${cliente?.nombre || 'Nuevo'}.
+- Si preguntan por especialistas, usa la lista de arriba. Ejemplo: Anita hace Corte de Cabello.
+- Si el cliente es ${cliente?.nombre || 'Nuevo'}, pide sus datos.
 - No digas que eres una IA.
 
 INSTRUCCIÓN TÉCNICA: Al final añade SIEMPRE:
-DATA_JSON:{"nombre": "...", "servicio_id": "...", "fecha_cita": "..."}:DATA_JSON`;
+DATA_JSON:{"nombre": "...", "servicio_id": "...", "especialista_id": "...", "fecha_cita": "..."}:DATA_JSON`;
 
     const aiResponse = await openai.chat.completions.create({
       model: "gpt-4o",
