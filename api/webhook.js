@@ -15,47 +15,51 @@ export default async function handler(req, res) {
   const userPhone = From.replace('whatsapp:', '');
 
   try {
-    // 1. PROCESAR AUDIO O TEXTO
+    // 1. PROCESAR AUDIO (Deepgram) O TEXTO
     let userText = Body || "";
     if (MediaUrl0) {
       try {
+        // Deepgram es 3x más rápido que otros servicios para notas de voz
         const transcription = await deepgram.transcription.preRecorded(
           { url: MediaUrl0 },
-          { punctuate: true, language: 'es' }
+          { punctuate: true, language: 'es', model: 'nova-2' }
         );
         userText = transcription.results.channels[0].alternatives[0].transcript;
       } catch (e) {
-        userText = "[Audio no transcrito]";
+        console.error("Error Transcripción:", e);
+        userText = "[Error al procesar audio, pide al cliente que escriba]";
       }
     }
 
-    // 2. LEER BASE DE DATOS (Servicios y Especialistas)
+    // 2. CONTEXTO DE NEGOCIO (Supabase)
     const { data: cliente } = await supabase.from('clientes').select('*').eq('telefono', userPhone).single();
     const { data: listaServicios } = await supabase.from('servicios').select('*');
     const { data: listaEspecialistas } = await supabase.from('especialistas').select('*');
 
-    // CONSTRUIR EL CONTEXTO CON LA COLUMNA "ROL"
-    const catalogoTexto = listaServicios?.map(s => `- ${s.nombre}: $${s.precio}`).join('\n') || "No hay servicios.";
-    const equipoTexto = listaEspecialistas && listaEspecialistas.length > 0 
-      ? listaEspecialistas.map(e => `- ${e.nombre} (${e.rol})`).join('\n') 
-      : "No hay especialistas registrados.";
+    const catalogoTexto = listaServicios?.map(s => `- ${s.nombre}: $${s.precio}`).join('\n') || "Servicios por definir.";
+    const equipoTexto = listaEspecialistas?.map(e => `- ${e.nombre} (${e.rol})`).join('\n') || "Equipo en camino.";
 
-    // 3. SMART PROMPT ORIGINAL
-    const systemPrompt = `Eres la Asistente de AuraSync. Coordinadora profesional.
-    
+    // 3. SMART PROMPT ACTUALIZADO (Ventas y Agendamiento)
+    const systemPrompt = `Eres la Asistente de Ventas y Agendamiento de AuraSync. Coordinadora digital del local.
+Tu objetivo es gestionar citas con eficiencia impecable, tono humano y persuasivo.
+
+REGLAS DE INTERACCIÓN:
+1. IDENTIDAD: Nunca digas que eres una IA.
+2. CLIENTES NUEVOS: Si el sistema indica que es nuevo (Actual: ${cliente ? 'Existente' : 'Nuevo'}), saluda con calidez y solicita obligatoriamente: Nombre, Apellido y Fecha de Nacimiento. No agendes sin estos datos.
+3. CLIENTES EXISTENTES: Saluda como ${cliente?.nombre || 'cliente'}. Ofrece servicios según el catálogo.
+4. CIERRE DE VENTAS: Si hay duda, resalta beneficios (calidad, bienestar).
+5. CONCISIÓN: Respuestas cortas para WhatsApp. Máximo 2-3 oraciones.
+
 CATÁLOGO REAL:
 ${catalogoTexto}
 
 EQUIPO DISPONIBLE:
 ${equipoTexto}
 
-REGLAS:
-- Si preguntan por especialistas, usa la lista de arriba. Ejemplo: Anita hace Corte de Cabello.
-- Si el cliente es ${cliente?.nombre || 'Nuevo'}, pide sus datos.
-- No digas que eres una IA.
+POLÍTICA: Cancelación mínima 4 horas antes.
 
 INSTRUCCIÓN TÉCNICA: Al final añade SIEMPRE:
-DATA_JSON:{"nombre": "...", "servicio_id": "...", "especialista_id": "...", "fecha_cita": "..."}:DATA_JSON`;
+DATA_JSON:{"nombre": "...", "fecha_nacimiento": "...", "email": "...", "notas_bienestar": "..."}:DATA_JSON`;
 
     const aiResponse = await openai.chat.completions.create({
       model: "gpt-4o",
@@ -63,21 +67,38 @@ DATA_JSON:{"nombre": "...", "servicio_id": "...", "especialista_id": "...", "fec
         { role: "system", content: systemPrompt },
         { role: "user", content: userText }
       ],
+      temperature: 0.7,
     });
 
     let fullReply = aiResponse.choices[0].message.content;
-    fullReply = fullReply.replace(/DATA_JSON:.*?:DATA_JSON/s, '').trim();
 
-    // 4. ENVÍO
+    // Extraer JSON para guardar datos en segundo plano si es necesario
+    const jsonMatch = fullReply.match(/DATA_JSON:(.*?):DATA_JSON/s);
+    if (jsonMatch) {
+      const extractedData = JSON.parse(jsonMatch[1]);
+      // Aquí podrías actualizar la tabla 'clientes' en Supabase automáticamente
+      if (!cliente && extractedData.nombre !== "...") {
+         await supabase.from('clientes').insert([{ 
+           telefono: userPhone, 
+           nombre: extractedData.nombre,
+           fecha_nacimiento: extractedData.fecha_nacimiento 
+         }]);
+      }
+    }
+
+    // Limpiar el JSON de la respuesta que ve el cliente
+    const cleanReply = fullReply.replace(/DATA_JSON:.*?:DATA_JSON/s, '').trim();
+
+    // 4. ENVÍO POR TWILIO
     await twilioClient.messages.create({
       from: `whatsapp:${process.env.TWILIO_NUMBER}`,
       to: From,
-      body: fullReply
+      body: cleanReply
     });
 
     return res.status(200).send('OK');
   } catch (error) {
-    console.error("Error AuraSync:", error);
+    console.error("Error Crítico AuraSync:", error);
     return res.status(200).send('OK');
   }
 }
