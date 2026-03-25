@@ -4,9 +4,10 @@ const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 const AIRTABLE_CONFIG = {
+  // Asegúrate de que el token en Vercel tenga los permisos: data.records:read y data.records:write
   token: (process.env.AIRTABLE_TOKEN || 'pat5n8fpBVuBZMC1n.15953e94ccf9...').trim(), 
   baseId: 'appvuzv3szWik7kn7',
-  tableName: 'Citas' 
+  tableName: 'Citas' // Si tu tabla en Airtable tiene otro nombre, cámbialo aquí
 };
 
 export default async function handler(req, res) {
@@ -15,16 +16,16 @@ export default async function handler(req, res) {
   const userPhone = From.replace('whatsapp:', '');
 
   try {
-    // 1. CONTEXTO DESDE SUPABASE
+    // 1. DATOS DE SUPABASE
     const { data: serviciosDB } = await supabase.from('servicios').select('nombre');
     const { data: equipoDB } = await supabase.from('especialistas').select('nombre, rol');
     const { data: cliente } = await supabase.from('clientes').select('*').eq('telefono', userPhone).single();
     
     const nombreCliente = cliente?.nombre || "amigo/a";
-    const catalogoTexto = serviciosDB?.map(s => `- ${s.nombre}`).join('\n') || "- Tratamientos de Bienestar";
-    const equipoTexto = equipoDB?.map(e => `- ${e.nombre} (${e.rol})`).join('\n') || "- Anita (Coherencia Capilar)";
+    const catalogoTexto = serviciosDB?.map(s => `- ${s.nombre}`).join('\n') || "- Bienestar";
+    const equipoTexto = equipoDB?.map(e => `- ${e.nombre} (${e.rol})`).join('\n') || "- Elena";
 
-    // 2. AUDIO (DEEPGRAM)
+    // 2. AUDIO
     let textoFinal = Body || "";
     if (MediaUrl0) {
       const audioRes = await axios.post("https://api.deepgram.com/v1/listen?model=nova-2&language=es", 
@@ -34,7 +35,7 @@ export default async function handler(req, res) {
       textoFinal = audioRes.data.results.channels[0].alternatives[0].transcript;
     }
 
-    // 3. SYSTEM PROMPT: EL GUARDIÁN DE LA COHERENCIA (RESTAURADO ÍNTEGRO)
+    // 3. SYSTEM PROMPT (ÍNTEGRO)
     const systemPrompt = `Eres la Coordinadora de AuraSync, reconocida como "El 1er mentor 24/7 en el mundo para el bienestar" y "El Guardian de la Coherencia del cuerpo humano". 
 
 Tu misión es facilitar que el usuario recupere su bienestar a través de un proceso de "Ingeniería Humana", gestionando su agenda con una eficiencia y calidez que lo haga sentir comprendido y apoyado.
@@ -57,7 +58,7 @@ INSTRUCCIÓN TÉCNICA (INVISIBLE):
 Al final de tu respuesta, genera SIEMPRE este bloque para el sistema:
 DATA_JSON:{"nombre": "${nombreCliente}", "servicio": "...", "fecha": "YYYY-MM-DD", "especialista": "..."}:DATA_JSON`;
 
-    // 4. PROCESAMIENTO AI
+    // 4. GPT-4O
     const aiResponse = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: "gpt-4o",
       messages: [{ role: "system", content: systemPrompt }, { role: "user", content: textoFinal }]
@@ -66,28 +67,21 @@ DATA_JSON:{"nombre": "${nombreCliente}", "servicio": "...", "fecha": "YYYY-MM-DD
     const fullReply = aiResponse.data.choices[0].message.content;
     const cleanReply = fullReply.split('DATA_JSON')[0].trim();
 
-    // 5. REGISTRO EN AIRTABLE (MAPEADO A TUS 13 COLUMNAS)
+    // 5. AIRTABLE CON MANEJO DE PERMISOS
     const jsonMatch = fullReply.match(/DATA_JSON:(.*?):DATA_JSON/s);
     if (jsonMatch) {
       try {
         const ext = JSON.parse(jsonMatch[1]);
         const fechaFinal = (ext.fecha && ext.fecha.includes('-')) ? ext.fecha : new Date().toISOString().split('T')[0];
 
-        await axios.post(`https://api.airtable.com/v0/${AIRTABLE_CONFIG.baseId}/${AIRTABLE_CONFIG.tableName}`, 
+        await axios.post(`https://api.airtable.com/v0/${AIRTABLE_CONFIG.baseId}/${encodeURIComponent(AIRTABLE_CONFIG.tableName)}`, 
           { fields: {
             "Cliente": String(nombreCliente),
-            "Servicio": ext.servicio !== "..." ? ext.servicio : "Manicura Aura Express",
+            "Servicio": ext.servicio !== "..." ? ext.servicio : "Consulta",
             "Fecha": fechaFinal,
             "Especialista": ext.especialista !== "..." ? ext.especialista : "Elena",
             "Teléfono": String(userPhone),
-            "Estado": "Pendiente",
-            "Notas de la cita": "Agendado por voz vía Anesi",
-            "¿Es primera vez?": cliente ? "No" : "Sí",
-            "Email de cliente": cliente?.email || "",
-            "Cliente VIP": "No",
-            "Duración estimada (minutos)": 60,
-            "Importe estimado": 0,
-            "Observaciones de confirmación": "Pendiente validar"
+            "Estado": "Pendiente"
           }}, 
           { headers: { 
             'Authorization': `Bearer ${AIRTABLE_CONFIG.token}`, 
@@ -95,7 +89,7 @@ DATA_JSON:{"nombre": "${nombreCliente}", "servicio": "...", "fecha": "YYYY-MM-DD
           }}
         );
       } catch (err) {
-        console.error("DETALLE ERROR AIRTABLE:", JSON.stringify(err.response?.data));
+        console.error("ERROR CRÍTICO AIRTABLE:", err.response?.data || err.message);
       }
     }
 
@@ -104,6 +98,6 @@ DATA_JSON:{"nombre": "${nombreCliente}", "servicio": "...", "fecha": "YYYY-MM-DD
 
   } catch (error) {
     res.setHeader('Content-Type', 'text/xml');
-    return res.status(200).send("<Response><Message>Te pido una disculpa, Chris. Tuve un pequeño contratiempo con la agenda. ¿Podrías repetirme lo último?</Message></Response>");
+    return res.status(200).send("<Response><Message>Te pido una disculpa, Chris. Tuve un pequeño inconveniente con la agenda. ¿Podrías repetirme qué necesitas?</Message></Response>");
   }
 }
