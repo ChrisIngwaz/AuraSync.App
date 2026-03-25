@@ -15,11 +15,18 @@ export default async function handler(req, res) {
   const { Body, From, MediaUrl0 } = req.body;
   const userPhone = From.replace('whatsapp:', '');
   
-  // Logs de debugging esenciales
-  console.log('📞 Webhook recibido:', { userPhone, hasAudio: !!MediaUrl0, textLength: Body?.length });
+  console.log('📞 Webhook:', { userPhone, hasAudio: !!MediaUrl0 });
 
   try {
-    // 1. CONTEXTO DE SUPABASE
+    // 1. CARGAR HISTORIAL DE CONVERSACIÓN (últimos 10 mensajes)
+    const { data: historial } = await supabase
+      .from('conversaciones')
+      .select('rol, contenido')
+      .eq('telefono', userPhone)
+      .order('created_at', { ascending: true })
+      .limit(10);
+
+    // 2. CONTEXTO DE BASE DE DATOS
     const [{ data: serviciosDB }, { data: equipoDB }, { data: cliente }] = await Promise.all([
       supabase.from('servicios').select('nombre'),
       supabase.from('especialistas').select('nombre, rol'),
@@ -30,140 +37,153 @@ export default async function handler(req, res) {
     const catalogoTexto = serviciosDB?.map(s => `- ${s.nombre}`).join('\n') || "- Bienestar";
     const equipoTexto = equipoDB?.map(e => `- ${e.nombre} (${e.rol})`).join('\n') || "- Elena";
 
-    // 2. PROCESAMIENTO DE VOZ
-    let textoFinal = Body || "";
+    // 3. PROCESAR AUDIO
+    let textoUsuario = Body || "";
+    let tipoEntrada = 'texto';
+    
     if (MediaUrl0) {
       try {
-        console.log('🎵 Procesando audio:', MediaUrl0);
+        console.log('🎵 Procesando audio...');
         const audioRes = await axios.post(
-          "https://api.deepgram.com/v1/listen?model=nova-2&language=es", 
+          "https://api.deepgram.com/v1/listen?model=nova-2&language=es&smart_format=true", 
           { url: MediaUrl0 }, 
           { headers: { 
-            'Authorization': `Token ${process.env.DEEPGRAM_API_KEY}`, // Mejor usar env var
+            'Authorization': `Token ${process.env.DEEPGRAM_API_KEY}`, 
             'Content-Type': 'application/json' 
           }}
         );
-        textoFinal = audioRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
-        console.log('📝 Transcripción:', textoFinal);
+        textoUsuario = audioRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
+        tipoEntrada = 'audio';
+        console.log('📝 Transcripción:', textoUsuario);
       } catch (e) { 
         console.error("Error Deepgram:", e.message); 
       }
     }
 
-    // 3. SYSTEM PROMPT MEJORADO
-    const systemPrompt = `Eres la Coordinadora de AuraSync, reconocida como "El 1er mentor 24/7 en el mundo para el bienestar" y "El Guardian de la Coherencia del cuerpo humano". 
+    if (!textoUsuario.trim()) {
+      textoUsuario = "No se pudo transcribir el audio";
+    }
 
-Tu misión es facilitar que el usuario recupere su bienestar a través de un proceso de "Ingeniería Humana", gestionando su agenda con una eficiencia y calidez que lo haga sentir comprendido y apoyado.
+    // 4. CONSTRUIR MENSAJES PARA OPENAI (CON MEMORIA)
+    const systemPrompt = `Eres Chris, la Coordinadora de AuraSync. Estás en medio de una conversación continua con ${nombreCliente}.
 
-REGLAS DE ORO DE IDENTIDAD:
-1. NUNCA digas que eres una inteligencia artificial. Eres una persona, la coordinadora del centro.
-2. IDENTIDAD: ¡NUNCA te presentes! No digas "Hola soy Chris" ni nada parecido.
-3. TRATO: Saluda directamente por el nombre del cliente si ya lo conoces (Actual: ${nombreCliente}).
-4. LENGUAJE: Siempre usa un lenguaje que el usuario pueda perfectamente entender, para que pueda captar su situación y las herramientas que tiene dentro de sí mismo y su cuerpo para sanar y encontrar calma y paz interior.
-5. BREVEDAD: Máximo 2 oraciones.
+CONTEXTO DEL NEGOCIO:
+- Servicios disponibles: ${catalogoTexto}
+- Equipo: ${equipoTexto}
 
-CATÁLOGO DE SERVICIOS:
-${catalogoTexto}
+REGLAS CRÍTICAS:
+1. NUNCA digas que eres IA. Eres Chris, la coordinadora humana.
+2. MANTÉN EL CONTEXTO: Revisa el historial de conversación. Si ya ofreciste una cita y el usuario confirma (dice "sí", "ok", "perfecto", "confirmo", etc), CONFIRMA esa misma cita, no preguntes de nuevo.
+3. Si el usuario confirma una cita propuesta anteriormente, usa los datos de esa propuesta (servicio, fecha, especialista) para generar el JSON.
+4. Si el usuario quiere cambiar algo, aclara amablemente.
+5. BREVEDAD: Máximo 2 oraciones, lenguaje cálido y humano.
 
-EQUIPO:
-${equipoTexto}
+FORMATO DE RESPUESTA:
+- Si se confirma cita: responde normalmente y al final incluye: DATA_JSON{"servicio": "...", "fecha": "YYYY-MM-DD", "especialista": "..."}DATA_JSON
+- Si no hay cita confirmada: NO incluyas el bloque DATA_JSON`;
 
-INSTRUCCIÓN CRÍTICA PARA REGISTRO:
-Si el usuario confirma o solicita una cita, al final de tu respuesta DEBES incluir EXACTAMENTE este bloque (sin saltos de línea adicionales entre las etiquetas):
-DATA_JSON{"servicio": "Nombre exacto del servicio", "fecha": "2024-03-26", "especialista": "Nombre del especialista"}DATA_JSON
+    const messages = [
+      { role: "system", content: systemPrompt }
+    ];
 
-Ejemplo real:
-DATA_JSON{"servicio": "Masaje Terapéutico", "fecha": "2024-03-28", "especialista": "Elena"}DATA_JSON
+    // Agregar historial previo
+    if (historial && historial.length > 0) {
+      historial.forEach(msg => {
+        messages.push({ role: msg.rol, content: msg.contenido });
+      });
+    }
 
-Si no hay cita confirmada, NO incluyas el bloque DATA_JSON.`;
+    // Agregar mensaje actual del usuario
+    messages.push({ role: "user", content: textoUsuario });
 
-    // 4. GENERACIÓN DE RESPUESTA
-    console.log('🤖 Enviando a OpenAI...');
+    console.log('🤖 Enviando a OpenAI:', messages.length, 'mensajes');
+
+    // 5. LLAMADA A OPENAI
     const aiResponse = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: "gpt-4o",
-      messages: [
-        { role: "system", content: systemPrompt }, 
-        { role: "user", content: textoFinal }
-      ],
-      temperature: 0.7
+      messages: messages,
+      temperature: 0.7,
+      max_tokens: 300
     }, { headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` } });
 
     const fullReply = aiResponse.data.choices[0].message.content;
-    console.log('💬 Respuesta completa:', fullReply);
-    
-    // Extracción más robusta del JSON
+    console.log('💬 Respuesta:', fullReply);
+
+    // 6. GUARDAR EN HISTORIAL (usuario y asistente)
+    await supabase.from('conversaciones').insert([
+      { telefono: userPhone, rol: 'user', contenido: textoUsuario, tipo: tipoEntrada },
+      { telefono: userPhone, rol: 'assistant', contenido: fullReply, tipo: 'texto' }
+    ]);
+
+    // 7. EXTRAER JSON Y REGISTRAR EN AIRTABLE
     const jsonMatch = fullReply.match(/DATA_JSON\s*([\s\S]*?)\s*DATA_JSON/);
-    let cleanReply = fullReply;
+    let cleanReply = fullReply.replace(/DATA_JSON[\s\S]*?DATA_JSON/, '').trim();
     
     if (jsonMatch && jsonMatch[1]) {
       try {
-        // Limpiar posibles caracteres problemáticos
         const jsonStr = jsonMatch[1]
-          .replace(/[\u201C\u201D]/g, '"') // Comillas tipográficas a rectas
+          .replace(/[\u201C\u201D]/g, '"')
           .replace(/[\u2018\u2019]/g, "'")
           .trim();
           
-        console.log('🔧 JSON extraído:', jsonStr);
         const ext = JSON.parse(jsonStr);
-        
-        // Validar que tenemos datos mínimos
+        console.log('🔧 Datos cita:', ext);
+
         if (ext.servicio && ext.servicio !== "...") {
-          const fechaCita = (ext.fecha && ext.fecha.includes('-')) 
-            ? ext.fecha 
-            : new Date().toISOString().split('T')[0];
+          // Verificar si ya existe una cita idéntica pendiente (evitar duplicados)
+          const { data: existente } = await supabase
+            .from('conversaciones')
+            .select('*')
+            .eq('telefono', userPhone)
+            .ilike('contenido', `%${ext.servicio}%`)
+            .gte('created_at', new Date(Date.now() - 5*60000).toISOString()) // últimos 5 min
+            .limit(1);
 
-          const airtableData = {
-            fields: {
-              "Cliente": String(nombreCliente),
-              "Servicio": String(ext.servicio),
-              "Fecha": fechaCita,
-              "Especialista": String(ext.especialista || "Elena"),
-              "Teléfono": String(userPhone),
-              "Estado": "Pendiente",
-              "Notas": `Cita solicitada vía WhatsApp el ${new Date().toLocaleString('es-ES')}`
-            }
-          };
-          
-          console.log('📤 Enviando a Airtable:', JSON.stringify(airtableData, null, 2));
-          console.log('🔗 URL:', `https://api.airtable.com/v0/${AIRTABLE_CONFIG.baseId}/${AIRTABLE_CONFIG.tableName}`);
+          if (!existente || existente.length === 0) {
+            const fechaCita = (ext.fecha && ext.fecha.includes('-')) 
+              ? ext.fecha 
+              : new Date().toISOString().split('T')[0];
 
-          const airtableRes = await axios.post(
-            `https://api.airtable.com/v0/${AIRTABLE_CONFIG.baseId}/${encodeURIComponent(AIRTABLE_CONFIG.tableName)}`, 
-            airtableData,
-            { headers: { 
-              'Authorization': `Bearer ${AIRTABLE_CONFIG.token}`, 
-              'Content-Type': 'application/json' 
-            }}
-          );
-          
-          console.log('✅ Éxito Airtable:', airtableRes.data.id);
-          
-          // Limpiar la respuesta para el usuario (quitar el bloque JSON)
-          cleanReply = fullReply.replace(/DATA_JSON[\s\S]*?DATA_JSON/, '').trim();
-        } else {
-          console.log('ℹ️ No hay datos de cita válidos en el JSON');
+            const airtableData = {
+              fields: {
+                "Cliente": String(nombreCliente),
+                "Servicio": String(ext.servicio),
+                "Fecha": fechaCita,
+                "Especialista": String(ext.especialista || "Elena"),
+                "Teléfono": String(userPhone),
+                "Estado": "Pendiente",
+                "Notas": `Confirmado vía WhatsApp el ${new Date().toLocaleString('es-ES')}`
+              }
+            };
+
+            console.log('📤 Guardando en Airtable:', airtableData);
+            
+            await axios.post(
+              `https://api.airtable.com/v0/${AIRTABLE_CONFIG.baseId}/${encodeURIComponent(AIRTABLE_CONFIG.tableName)}`, 
+              airtableData,
+              { headers: { 
+                'Authorization': `Bearer ${AIRTABLE_CONFIG.token}`, 
+                'Content-Type': 'application/json' 
+              }}
+            );
+            
+            console.log('✅ Cita registrada');
+          } else {
+            console.log('⚠️ Cita ya registrada recientemente');
+          }
         }
-      } catch (airtableErr) {
-        console.error("❌ ERROR AIRTABLE COMPLETO:", {
-          message: airtableErr.message,
-          status: airtableErr.response?.status,
-          statusText: airtableErr.response?.statusText,
-          data: airtableErr.response?.data,
-          requestData: airtableErr.config?.data
-        });
-        // Opcional: Notificar al usuario que hubo un problema técnico
-        cleanReply = fullReply.replace(/DATA_JSON[\s\S]*?DATA_JSON/, '').trim() + "\n\n(Nota: Tu cita está confirmada, pero estamos teniendo problemas técnicos para registrarla en el sistema. Por favor confirma con nosotros mañana.)";
+      } catch (err) {
+        console.error("❌ Error procesando cita:", err.message);
+        // No fallar la respuesta al usuario por error de backend
       }
-    } else {
-      console.log('⚠️ No se encontró bloque DATA_JSON en la respuesta');
     }
 
     res.setHeader('Content-Type', 'text/xml');
     return res.status(200).send(`<Response><Message>${cleanReply}</Message></Response>`);
 
   } catch (error) {
-    console.error("💥 Error General:", error);
+    console.error("💥 Error:", error);
     res.setHeader('Content-Type', 'text/xml');
-    return res.status(200).send("<Response><Message>Disculpa el inconveniente, estamos ajustando los últimos detalles de la agenda. ¿Podrías repetirme tu solicitud?</Message></Response>");
+    return res.status(200).send("<Response><Message>Disculpa, tuve un pequeño problema técnico. ¿Podemos continuar?</Message></Response>");
   }
 }
