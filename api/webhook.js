@@ -1,14 +1,16 @@
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 
-// Configuración de Clientes (Asegúrate de tener estas variables en Vercel)
+// Configuración de Clientes
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 const AIRTABLE_CONFIG = {
-  token: 'pat5n8fpBVuBZMC1n.15953e94ccf9...', // Tu Token de acceso personal
+  token: 'pat5n8fpBVuBZMC1n.15953e94ccf9...', 
   baseId: 'appvuzv3szWik7kn7',
   tableName: 'Citas' 
 };
+
+const DEEPGRAM_API_KEY = '5f828847255723d84684d7c468240295cc9e0736';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
@@ -17,15 +19,36 @@ export default async function handler(req, res) {
   const userPhone = From.replace('whatsapp:', '');
 
   try {
-    // 1. RECUPERAR DATOS DEL CLIENTE (Memoria de Supabase)
+    // 1. RECUPERAR DATOS DEL CLIENTE
     const { data: cliente } = await supabase.from('clientes').select('*').eq('telefono', userPhone).single();
     const nombreCliente = cliente?.nombre || "amigo/a";
 
-    // 2. DEFINICIÓN DE CATÁLOGO Y EQUIPO (Activos de Ingeniería Humana)
+    // 2. PROCESAMIENTO DE AUDIO (DEEPGRAM) O TEXTO
+    let textoFinal = Body || "";
+
+    if (MediaUrl0) {
+      try {
+        const deepgramUrl = "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&language=es";
+        const audioResponse = await axios.post(deepgramUrl, 
+          { url: MediaUrl0 }, 
+          { headers: { 
+              'Authorization': `Token ${DEEPGRAM_API_KEY}`, 
+              'Content-Type': 'application/json' 
+            } 
+          }
+        );
+        textoFinal = audioResponse.data.results.channels[0].alternatives[0].transcript;
+      } catch (e) {
+        console.error("Error Deepgram:", e.message);
+        textoFinal = "El usuario envió un audio pero hubo un error al procesarlo.";
+      }
+    }
+
+    // 3. DEFINICIÓN DE CATÁLOGO Y EQUIPO
     const catalogoTexto = "- Corte de Cabello (Cuidado y Coherencia)\n- Tratamientos de Bienestar Capilar\n- Asesoría de Imagen Holística";
     const equipoTexto = "- Anita (Especialista en Coherencia Capilar)\n- Chris (Mentor de Bienestar)";
 
-    // 3. SYSTEM PROMPT: EL GUARDIÁN DE LA COHERENCIA (SIN RECORTES)
+    // 4. SYSTEM PROMPT: EL GUARDIÁN DE LA COHERENCIA (SIN RECORTES)
     const systemPrompt = `Eres la Coordinadora de AuraSync, reconocida como "El 1er mentor 24/7 en el mundo para el bienestar" y "El Guardian de la Coherencia del cuerpo humano". 
 
 Tu misión es facilitar que el usuario recupere su bienestar a través de un proceso de "Ingeniería Humana", gestionando su agenda con una eficiencia y calidez que lo haga sentir comprendido y apoyado.
@@ -48,25 +71,23 @@ INSTRUCCIÓN TÉCNICA (INVISIBLE):
 Al final de tu respuesta, genera SIEMPRE este bloque para el sistema:
 DATA_JSON:{"nombre": "${nombreCliente}", "servicio": "...", "fecha": "YYYY-MM-DD", "especialista": "..."}:DATA_JSON`;
 
-    // 4. PROCESAMIENTO CON GPT-4O
+    // 5. PROCESAMIENTO CON GPT-4O
     const aiResponse = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: "gpt-4o",
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: Body || "Audio recibido" } // Aquí se integraría Deepgram para MediaUrl0
+        { role: "user", content: textoFinal }
       ]
     }, { headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` } });
 
     const fullReply = aiResponse.data.choices[0].message.content;
     const cleanReply = fullReply.split('DATA_JSON')[0].trim();
 
-    // 5. SINCRONIZACIÓN PROFESIONAL CON AIRTABLE
+    // 6. SINCRONIZACIÓN CON AIRTABLE
     const jsonMatch = fullReply.match(/DATA_JSON:(.*?):DATA_JSON/s);
     if (jsonMatch) {
       try {
         const extracted = JSON.parse(jsonMatch[1]);
-        
-        // Mapeo exacto a tus columnas de Airtable
         const fields = {
           "Cliente": nombreCliente,
           "Servicio": extracted.servicio !== "..." ? extracted.servicio : "Corte de Cabello",
@@ -90,7 +111,7 @@ DATA_JSON:{"nombre": "${nombreCliente}", "servicio": "...", "fecha": "YYYY-MM-DD
       }
     }
 
-    // 6. RESPUESTA DE TWILIO
+    // 7. RESPUESTA DE TWILIO
     res.setHeader('Content-Type', 'text/xml');
     return res.status(200).send(`<Response><Message>${cleanReply}</Message></Response>`);
 
