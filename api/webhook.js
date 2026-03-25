@@ -1,5 +1,5 @@
 const axios = require('axios');
-const { createClient } = require('@supabase/supabase-client');
+const { createClient } = require('@supabase/supabase-js');
 
 // Configuración de Clientes (Asegúrate de tener estas variables en Vercel)
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
