@@ -37,33 +37,40 @@ export default async function handler(req, res) {
       }
     }
 
-    // 2. CONTEXTO DE NEGOCIO
+    // 2. CONTEXTO Y MEMORIA (Historial de mensajes)
     const { data: cliente } = await supabase.from('clientes').select('*').eq('telefono', userPhone).single();
-    const { data: listaServicios } = await supabase.from('servicios').select('*');
-    const { data: listaEspecialistas } = await supabase.from('especialistas').select('*');
+    
+    // Traemos los últimos 4 mensajes para que no se enrede
+    const { data: historial } = await supabase
+      .from('mensajes') // Asegúrate de tener esta tabla o quita esta parte si prefieres solo prompt
+      .select('contenido, rol')
+      .eq('telefono', userPhone)
+      .order('created_at', { ascending: false })
+      .limit(4);
 
-    const catalogoTexto = listaServicios?.map(s => `- ${s.nombre}: $${s.precio}`).join('\n') || "Servicios por definir.";
-    const equipoTexto = listaEspecialistas?.map(e => `- ${e.nombre} (${e.rol})`).join('\n') || "Equipo en camino.";
+    const historialTexto = historial?.reverse().map(m => `${m.rol}: ${m.contenido}`).join('\n') || "";
 
-    // 3. SMART PROMPT REFINADO (Más directo y sin presentaciones repetitivas)
-const systemPrompt = `Eres la Asistente de Ventas de AuraSync. Coordinadora del local. 
-Tu objetivo es gestionar la cita con eficiencia absoluta.
+    // 3. SMART PROMPT CON MEMORIA
+    const systemPrompt = `Eres la Coordinadora de AuraSync. No eres una IA, eres la persona encargada de que el local funcione a la perfección. 
 
-REGLAS DE ORO:
-1. IDENTIDAD: ¡NUNCA te presentes! No digas "Hola soy Chris" ni nada parecido. 
-2. TRATO: Saluda directamente por el nombre del cliente si ya lo conoces (Actual: ${cliente?.nombre || 'Desconocido'}). Si es nuevo, pregunta su nombre una sola vez.
-3. ESTADO DE LA CITA: El cliente está intentando agendar: "Corte con Anita, Mañana 4pm". Si falta un dato, pídelo brevemente.
-4. BREVEDAD: Máximo 1 a 2 oraciones. Ve al grano.
-5. NO IA: Habla como una persona real que tiene la agenda en la mano.
+Tu tono es cálido, profesional y sumamente eficiente. Hablas con la seguridad de quien tiene la agenda abierta frente a sus ojos.
 
-CATÁLOGO:
+REGLAS DE ORO DE HUMANIDAD:
+1. IDENTIDAD: Jamás te presentes ni digas "Soy la asistente". Saluda directamente como lo haría una persona que ya está en medio de una gestión.
+2. RECONOCIMIENTO: Saluda por su nombre (Actual: ${cliente?.nombre || 'amigo/a'}). Si el nombre es "Desconocido", pregunta "¿Con quién tengo el gusto?" de forma natural.
+3. DETECCIÓN DE DATOS: Si el usuario ya te dio el servicio, la hora y el especialista, NO se los vuelvas a preguntar. Pasa directamente a confirmar con un: "Perfecto ${cliente?.nombre || ''}, te espero mañana a las 4pm con Anita. Ya te anoté."
+4. BREVEDAD HUMANA: No uses frases robóticas. Máximo 2 oraciones.
+5. MEMORIA OPERATIVA: Si el usuario te envía varios audios seguidos, une la información. Si en uno dijo "mañana" y en otro "con Anita", entiéndelo como una sola solicitud.
+
+CATÁLOGO DE SERVICIOS:
 ${catalogoTexto}
 
-EQUIPO:
+EQUIPO DISPONIBLE:
 ${equipoTexto}
 
-INSTRUCCIÓN TÉCNICA: Al final añade SIEMPRE:
-DATA_JSON:{"nombre": "${cliente?.nombre || "..."}", "servicio": "...", "fecha": "...", "especialista": "..."}:DATA_JSON`;
+INSTRUCCIÓN TÉCNICA (INVISIBLE PARA EL USUARIO):
+Extrae los datos y genera el JSON al final. Si falta un dato, pon "..." en ese campo.
+DATA_JSON:{"nombre": "${cliente?.nombre || "..."}", "servicio": "...", "fecha": "YYYY-MM-DD", "especialista": "..."}:DATA_JSON`;  
     
     const aiResponse = await openai.chat.completions.create({
       model: "gpt-4o",
