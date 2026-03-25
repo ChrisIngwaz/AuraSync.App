@@ -4,7 +4,8 @@ const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 const AIRTABLE_CONFIG = {
-  token: 'pat5n8fpBVuBZMC1n.15953e94ccf9...', 
+  // Asegúrate de que en Vercel la variable se llame exactamente AIRTABLE_TOKEN
+  token: process.env.AIRTABLE_TOKEN || 'pat5n8fpBVuBZMC1n.15953e94ccf9...', 
   baseId: 'appvuzv3szWik7kn7',
   tableName: 'Citas' 
 };
@@ -15,13 +16,13 @@ export default async function handler(req, res) {
   const userPhone = From.replace('whatsapp:', '');
 
   try {
-    // 1. RECUPERAR DATOS DE SUPABASE
+    // 1. DATOS DE SUPABASE
     const { data: serviciosDB } = await supabase.from('servicios').select('nombre');
     const { data: equipoDB } = await supabase.from('especialistas').select('nombre, rol');
     const { data: cliente } = await supabase.from('clientes').select('*').eq('telefono', userPhone).single();
     
     const nombreCliente = cliente?.nombre || "amigo/a";
-    const catalogoTexto = serviciosDB?.map(s => `- ${s.nombre}`).join('\n') || "- Corte de Cabello\n- Tratamientos de Bienestar";
+    const catalogoTexto = serviciosDB?.map(s => `- ${s.nombre}`).join('\n') || "- Tratamientos de Bienestar";
     const equipoTexto = equipoDB?.map(e => `- ${e.nombre} (${e.rol})`).join('\n') || "- Anita (Coherencia Capilar)";
 
     // 2. AUDIO
@@ -34,7 +35,7 @@ export default async function handler(req, res) {
       textoFinal = audioRes.data.results.channels[0].alternatives[0].transcript;
     }
 
-    // 3. SYSTEM PROMPT (SIN ACORTAR)
+    // 3. SYSTEM PROMPT (ÍNTEGRO)
     const systemPrompt = `Eres la Coordinadora de AuraSync, reconocida como "El 1er mentor 24/7 en el mundo para el bienestar" y "El Guardian de la Coherencia del cuerpo humano". 
 
 Tu misión es facilitar que el usuario recupere su bienestar a través de un proceso de "Ingeniería Humana", gestionando su agenda con una eficiencia y calidez que lo haga sentir comprendido y apoyado.
@@ -66,44 +67,42 @@ DATA_JSON:{"nombre": "${nombreCliente}", "servicio": "...", "fecha": "YYYY-MM-DD
     const fullReply = aiResponse.data.choices[0].message.content;
     const cleanReply = fullReply.split('DATA_JSON')[0].trim();
 
-    // 5. AIRTABLE (MAPEADO COMPLETO DE TUS 13 COLUMNAS)
+    // 5. INTENTO DE AIRTABLE (SI FALLA, EL BOT NO SE TRABA)
     const jsonMatch = fullReply.match(/DATA_JSON:(.*?):DATA_JSON/s);
     if (jsonMatch) {
-      const ext = JSON.parse(jsonMatch[1]);
-      const hoy = new Date();
-      hoy.setDate(hoy.getDate() + 1);
-      const fechaFinal = (ext.fecha && ext.fecha.includes('-')) ? ext.fecha : hoy.toISOString().split('T')[0];
+      try {
+        const ext = JSON.parse(jsonMatch[1]);
+        const hoy = new Date();
+        hoy.setDate(hoy.getDate() + 1);
+        const fechaFinal = (ext.fecha && ext.fecha.includes('-')) ? ext.fecha : hoy.toISOString().split('T')[0];
 
-      await axios.post(`https://api.airtable.com/v0/${AIRTABLE_CONFIG.baseId}/${AIRTABLE_CONFIG.tableName}`, 
-        { fields: {
-          "Cliente": String(nombreCliente),
-          "Servicio": ext.servicio !== "..." ? ext.servicio : "Manicura Aura Express",
-          "Fecha": fechaFinal,
-          "Especialista": ext.especialista !== "..." ? ext.especialista : "Elena",
-          "Teléfono": String(userPhone),
-          "Estado": "Pendiente",
-          "Notas de la cita": "Agendado por voz vía Anesi",
-          "Email de cliente": cliente?.email || "",
-          "¿Es primera vez?": cliente ? "No" : "Sí",
-          "Cliente VIP": "No",
-          "Duración estimada (minutos)": 60,
-          "Importe estimado": 0,
-          "Observaciones de confirmación": "Validar en agenda"
-        }}, 
-        { headers: { 
-          'Authorization': `Bearer ${AIRTABLE_CONFIG.token.trim()}`, 
-          'Content-Type': 'application/json' 
-        }}
-      );
+        await axios.post(`https://api.airtable.com/v0/${AIRTABLE_CONFIG.baseId}/${AIRTABLE_CONFIG.tableName}`, 
+          { fields: {
+            "Cliente": String(nombreCliente),
+            "Servicio": ext.servicio !== "..." ? ext.servicio : "Consulta",
+            "Fecha": fechaFinal,
+            "Especialista": ext.especialista !== "..." ? ext.especialista : "Elena",
+            "Teléfono": String(userPhone),
+            "Estado": "Pendiente"
+          }}, 
+          { headers: { 
+            'Authorization': `Bearer ${AIRTABLE_CONFIG.token.trim()}`, 
+            'Content-Type': 'application/json' 
+          }}
+        );
+      } catch (airtableError) {
+        // Logueamos el error pero NO lanzamos el catch principal
+        console.error("ERROR CRÍTICO AIRTABLE:", airtableError.response?.data || airtableError.message);
+      }
     }
 
+    // El bot siempre responde aunque Airtable falle
     res.setHeader('Content-Type', 'text/xml');
     return res.status(200).send(`<Response><Message>${cleanReply}</Message></Response>`);
 
   } catch (error) {
-    // Este log te dirá en Vercel exactamente qué columna está mal nombrada
-    console.error("DETALLE DEL ERROR:", error.response?.data || error.message);
+    console.error("ERROR GENERAL:", error.message);
     res.setHeader('Content-Type', 'text/xml');
-    return res.status(200).send("<Response><Message>Te pido una disculpa, tuve un pequeño contratiempo con la agenda. ¿Me podrías repetir lo último?</Message></Response>");
+    return res.status(200).send("<Response><Message>Te pido una disculpa, me ha costado procesar eso último. ¿Podrías repetirlo?</Message></Response>");
   }
 }
