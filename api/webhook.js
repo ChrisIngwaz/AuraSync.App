@@ -76,30 +76,40 @@ DATA_JSON:{"nombre": "${cliente?.nombre || "..."}", "servicio": "...", "fecha": 
 
     let fullReply = aiResponse.choices[0].message.content;
 
-    // 4. SINCRONIZACIÓN CON AIRTABLE (LA APP DEL DUEÑO)
+    // 4. SINCRONIZACIÓN CON AIRTABLE (Mapeo Exacto de Columnas)
     const jsonMatch = fullReply.match(/DATA_JSON:(.*?):DATA_JSON/s);
     if (jsonMatch) {
       try {
         const extractedData = JSON.parse(jsonMatch[1]);
         
-        // Solo enviamos a Airtable si detectamos que se está agendando algo (nombre o servicio presente)
-        if (extractedData.servicio !== "..." || extractedData.nombre !== "...") {
-          await axios.post(`https://api.airtable.com/v0/${AIRTABLE_CONFIG.baseId}/${AIRTABLE_CONFIG.tableName}`, {
-            fields: {
-              "Cliente": extractedData.nombre !== "..." ? extractedData.nombre : (cliente?.nombre || "Cliente WhatsApp"),
-              "Servicio": extractedData.servicio !== "..." ? extractedData.servicio : "Consulta General",
-              "Fecha": extractedData.fecha !== "..." ? extractedData.fecha : new Date().toISOString().split('T')[0],
-              "Teléfono": userPhone,
-              "Especialista": extractedData.especialista !== "..." ? extractedData.especialista : "Por asignar",
-              "Estado": "Pendiente"
-            }
-          }, {
-            headers: { 'Authorization': `Bearer ${AIRTABLE_CONFIG.token}`, 'Content-Type': 'application/json' }
-          });
-          console.log("✅ Datos sincronizados en la App de Airtable");
-        }
+        // Mapeo exacto a tus columnas de Airtable
+        const fields = {
+          "Cliente": cliente?.nombre || extractedData.nombre || "Cliente WhatsApp",
+          "Servicio": extractedData.servicio !== "..." ? extractedData.servicio : "Consulta",
+          "Fecha": extractedData.fecha.includes("-") ? extractedData.fecha : new Date().toISOString().split('T')[0],
+          "Especialista": extractedData.especialista !== "..." ? extractedData.especialista : "Por asignar",
+          "Teléfono": userPhone,
+          "Estado": "Pendiente",
+          "Notas de la cita": extractedData.notas_bienestar || "Agendado por AuraSync",
+          "Email de cliente": cliente?.email || "",
+          "¿Es primera vez?": cliente ? "No" : "Sí",
+          "Cliente VIP": "No", // Por defecto
+          "Duración estimada (minutos)": 60, // Valor base
+          "Importe estimado": 0, // Se llena manualmente o por catálogo
+          "Observaciones de confirmación": "Esperando validación del administrador"
+        };
+
+        await axios.post(`https://api.airtable.com/v0/${AIRTABLE_CONFIG.baseId}/${AIRTABLE_CONFIG.tableName}`, 
+          { fields }, 
+          { headers: { 
+              'Authorization': `Bearer ${AIRTABLE_CONFIG.token}`, 
+              'Content-Type': 'application/json' 
+            } 
+          }
+        );
+        console.log("✅ Cita registrada exitosamente en Airtable");
       } catch (err) {
-        console.error("Error al sincronizar con Airtable:", err.response?.data || err.message);
+        console.error("❌ Error de Registro en Airtable:", err.response?.data || err.message);
       }
     }
 
