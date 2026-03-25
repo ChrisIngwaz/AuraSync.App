@@ -4,10 +4,9 @@ const { createClient } = require('@supabase/supabase-js');
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 const AIRTABLE_CONFIG = {
-  // Asegúrate de que el token en Vercel tenga los permisos: data.records:read y data.records:write
-  token: (process.env.AIRTABLE_TOKEN || 'pat5n8fpBVuBZMC1n.15953e94ccf9...').trim(), 
+  token: (process.env.AIRTABLE_TOKEN || '').trim(), 
   baseId: 'appvuzv3szWik7kn7',
-  tableName: 'Citas' // Si tu tabla en Airtable tiene otro nombre, cámbialo aquí
+  tableName: 'Citas' 
 };
 
 export default async function handler(req, res) {
@@ -16,7 +15,7 @@ export default async function handler(req, res) {
   const userPhone = From.replace('whatsapp:', '');
 
   try {
-    // 1. DATOS DE SUPABASE
+    // 1. CONTEXTO DE SUPABASE
     const { data: serviciosDB } = await supabase.from('servicios').select('nombre');
     const { data: equipoDB } = await supabase.from('especialistas').select('nombre, rol');
     const { data: cliente } = await supabase.from('clientes').select('*').eq('telefono', userPhone).single();
@@ -25,14 +24,16 @@ export default async function handler(req, res) {
     const catalogoTexto = serviciosDB?.map(s => `- ${s.nombre}`).join('\n') || "- Bienestar";
     const equipoTexto = equipoDB?.map(e => `- ${e.nombre} (${e.rol})`).join('\n') || "- Elena";
 
-    // 2. AUDIO
+    // 2. PROCESAMIENTO DE VOZ
     let textoFinal = Body || "";
     if (MediaUrl0) {
-      const audioRes = await axios.post("https://api.deepgram.com/v1/listen?model=nova-2&language=es", 
-        { url: MediaUrl0 }, 
-        { headers: { 'Authorization': `Token 5f828847255723d84684d7c468240295cc9e0736`, 'Content-Type': 'application/json' } }
-      );
-      textoFinal = audioRes.data.results.channels[0].alternatives[0].transcript;
+      try {
+        const audioRes = await axios.post("https://api.deepgram.com/v1/listen?model=nova-2&language=es", 
+          { url: MediaUrl0 }, 
+          { headers: { 'Authorization': `Token 5f828847255723d84684d7c468240295cc9e0736`, 'Content-Type': 'application/json' } }
+        );
+        textoFinal = audioRes.data.results.channels[0].alternatives[0].transcript;
+      } catch (e) { console.error("Error Deepgram:", e.message); }
     }
 
     // 3. SYSTEM PROMPT (ÍNTEGRO)
@@ -42,23 +43,22 @@ Tu misión es facilitar que el usuario recupere su bienestar a través de un pro
 
 REGLAS DE ORO DE IDENTIDAD:
 1. NUNCA digas que eres una inteligencia artificial. Eres una persona, la coordinadora del centro.
-2. IDENTIDAD: ¡NUNCA te presentes! No digas "Hola soy Chris" ni nada parecido. La tecnología debe ser invisible.
-3. TRATO: Saluda directamente por el nombre del cliente si ya lo conoces (Actual: ${nombreCliente}). Si es nuevo, pregunta su nombre una sola vez de forma muy natural.
-4. EFICIENCIA: Tienes la agenda en la mano. Si el cliente ya te dio el servicio, la hora y el especialista (Ej: "Corte con Anita mañana a las 4"), NO se lo vuelvas a preguntar. Confirma con seguridad: "Perfecto ${nombreCliente}, ya te anoté con Anita para mañana a las 4:00 PM. ¡Te esperamos!"
-5. LENGUAJE: Siempre usa un lenguaje que el usuario pueda perfectamente entender, para que pueda captar su situación y las herramientas que tiene dentro de sí mismo y su cuerpo para sanar y encontrar calma y paz interior.
-6. BREVEDAD: Máximo 2 oraciones. Ve al grano pero con una calidez humana genuina.
+2. IDENTIDAD: ¡NUNCA te presentes! No digas "Hola soy Chris" ni nada parecido.
+3. TRATO: Saluda directamente por el nombre del cliente si ya lo conoces (Actual: ${nombreCliente}).
+4. LENGUAJE: Siempre usa un lenguaje que el usuario pueda perfectamente entender, para que pueda captar su situación y las herramientas que tiene dentro de sí mismo y su cuerpo para sanar y encontrar calma y paz interior.
+5. BREVEDAD: Máximo 2 oraciones.
 
-CATÁLOGO DE SERVICIOS DE BIENESTAR:
+CATÁLOGO DE SERVICIOS:
 ${catalogoTexto}
 
-EQUIPO DE INGENIERÍA HUMANA (ESPECIALISTAS):
+EQUIPO:
 ${equipoTexto}
 
 INSTRUCCIÓN TÉCNICA (INVISIBLE):
-Al final de tu respuesta, genera SIEMPRE este bloque para el sistema:
-DATA_JSON:{"nombre": "${nombreCliente}", "servicio": "...", "fecha": "YYYY-MM-DD", "especialista": "..."}:DATA_JSON`;
+Al final de tu respuesta, genera SIEMPRE este bloque:
+DATA_JSON:{"servicio": "...", "fecha": "YYYY-MM-DD", "especialista": "..."}:DATA_JSON`;
 
-    // 4. GPT-4O
+    // 4. GENERACIÓN DE RESPUESTA
     const aiResponse = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: "gpt-4o",
       messages: [{ role: "system", content: systemPrompt }, { role: "user", content: textoFinal }]
@@ -67,18 +67,18 @@ DATA_JSON:{"nombre": "${nombreCliente}", "servicio": "...", "fecha": "YYYY-MM-DD
     const fullReply = aiResponse.data.choices[0].message.content;
     const cleanReply = fullReply.split('DATA_JSON')[0].trim();
 
-    // 5. AIRTABLE CON MANEJO DE PERMISOS
+    // 5. REGISTRO EN AIRTABLE (ULTRA-COMPATIBLE)
     const jsonMatch = fullReply.match(/DATA_JSON:(.*?):DATA_JSON/s);
     if (jsonMatch) {
       try {
-        const ext = JSON.parse(jsonMatch[1]);
-        const fechaFinal = (ext.fecha && ext.fecha.includes('-')) ? ext.fecha : new Date().toISOString().split('T')[0];
+        const ext = JSON.parse(jsonMatch[1].trim());
+        const fechaCita = (ext.fecha && ext.fecha !== "YYYY-MM-DD") ? ext.fecha : new Date().toISOString().split('T')[0];
 
-        await axios.post(`https://api.airtable.com/v0/${AIRTABLE_CONFIG.baseId}/${encodeURIComponent(AIRTABLE_CONFIG.tableName)}`, 
+        await axios.post(`https://api.airtable.com/v0/${AIRTABLE_CONFIG.baseId}/${AIRTABLE_CONFIG.tableName}`, 
           { fields: {
             "Cliente": String(nombreCliente),
-            "Servicio": ext.servicio !== "..." ? ext.servicio : "Consulta",
-            "Fecha": fechaFinal,
+            "Servicio": ext.servicio !== "..." ? ext.servicio : "Consulta de Bienestar",
+            "Fecha": fechaCita,
             "Especialista": ext.especialista !== "..." ? ext.especialista : "Elena",
             "Teléfono": String(userPhone),
             "Estado": "Pendiente"
@@ -88,8 +88,9 @@ DATA_JSON:{"nombre": "${nombreCliente}", "servicio": "...", "fecha": "YYYY-MM-DD
             'Content-Type': 'application/json' 
           }}
         );
-      } catch (err) {
-        console.error("ERROR CRÍTICO AIRTABLE:", err.response?.data || err.message);
+      } catch (airtableErr) {
+        // Log detallado para ver exactamente qué columna rechaza Airtable
+        console.error("DETALLE ERROR AIRTABLE:", JSON.stringify(airtableErr.response?.data));
       }
     }
 
@@ -97,7 +98,8 @@ DATA_JSON:{"nombre": "${nombreCliente}", "servicio": "...", "fecha": "YYYY-MM-DD
     return res.status(200).send(`<Response><Message>${cleanReply}</Message></Response>`);
 
   } catch (error) {
+    console.error("Error General:", error.message);
     res.setHeader('Content-Type', 'text/xml');
-    return res.status(200).send("<Response><Message>Te pido una disculpa, Chris. Tuve un pequeño inconveniente con la agenda. ¿Podrías repetirme qué necesitas?</Message></Response>");
+    return res.status(200).send("<Response><Message>Disculpa el inconveniente, estamos ajustando los últimos detalles de la agenda. ¿Podrías repetirme tu solicitud?</Message></Response>");
   }
 }
