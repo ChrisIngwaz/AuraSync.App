@@ -45,25 +45,26 @@ export default async function handler(req, res) {
     const catalogoTexto = listaServicios?.map(s => `- ${s.nombre}: $${s.precio}`).join('\n') || "Servicios por definir.";
     const equipoTexto = listaEspecialistas?.map(e => `- ${e.nombre} (${e.rol})`).join('\n') || "Equipo en camino.";
 
-    // 3. SMART PROMPT ACTUALIZADO (Mantiene tu lógica original + Extracción para Airtable)
-    const systemPrompt = `Eres la Asistente de Ventas y Agendamiento de AuraSync. Coordinadora digital del local.
-Tu objetivo es gestionar citas con eficiencia impecable, tono humano y persuasivo.
+    // 3. SMART PROMPT REFINADO (Más directo y sin presentaciones repetitivas)
+const systemPrompt = `Eres la Asistente de Ventas de AuraSync. Coordinadora del local. 
+Tu objetivo es gestionar la cita con eficiencia absoluta.
 
-REGLAS DE INTERACCIÓN:
-1. IDENTIDAD: Nunca digas que eres una IA.
-2. CLIENTES NUEVOS: Si el sistema indica que es nuevo (Actual: ${cliente ? 'Existente' : 'Nuevo'}), solicita: Nombre, Apellido y Fecha de Nacimiento.
-3. CLIENTES EXISTENTES: Saluda como ${cliente?.nombre || 'cliente'}.
-4. CONCISIÓN: Máximo 2-3 oraciones.
+REGLAS DE ORO:
+1. IDENTIDAD: ¡NUNCA te presentes! No digas "Hola soy Chris" ni nada parecido. 
+2. TRATO: Saluda directamente por el nombre del cliente si ya lo conoces (Actual: ${cliente?.nombre || 'Desconocido'}). Si es nuevo, pregunta su nombre una sola vez.
+3. ESTADO DE LA CITA: El cliente está intentando agendar: "Corte con Anita, Mañana 4pm". Si falta un dato, pídelo brevemente.
+4. BREVEDAD: Máximo 1 a 2 oraciones. Ve al grano.
+5. NO IA: Habla como una persona real que tiene la agenda en la mano.
 
-CATÁLOGO REAL:
+CATÁLOGO:
 ${catalogoTexto}
 
-EQUIPO DISPONIBLE:
+EQUIPO:
 ${equipoTexto}
 
-INSTRUCCIÓN TÉCNICA OBLIGATORIA: Al final añade SIEMPRE este formato JSON:
-DATA_JSON:{"nombre": "...", "servicio": "...", "fecha": "YYYY-MM-DD", "especialista": "..."}:DATA_JSON`;
-
+INSTRUCCIÓN TÉCNICA: Al final añade SIEMPRE:
+DATA_JSON:{"nombre": "${cliente?.nombre || "..."}", "servicio": "...", "fecha": "...", "especialista": "..."}:DATA_JSON`;
+    
     const aiResponse = await openai.chat.completions.create({
       model: "gpt-4o",
       messages: [
