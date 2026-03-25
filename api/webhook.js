@@ -84,21 +84,40 @@ DATA_JSON:{"nombre": "${nombreCliente}", "servicio": "...", "fecha": "YYYY-MM-DD
     const cleanReply = fullReply.split('DATA_JSON')[0].trim();
 
     // 6. SINCRONIZACIÓN CON AIRTABLE
+    // 6. SINCRONIZACIÓN PROFESIONAL CON AIRTABLE (Mapeo Completo)
     const jsonMatch = fullReply.match(/DATA_JSON:(.*?):DATA_JSON/s);
     if (jsonMatch) {
       try {
         const extracted = JSON.parse(jsonMatch[1]);
+        
+        // Asegurar fecha válida para Airtable
+        let fechaFinal = extracted.fecha;
+        if (!fechaFinal || fechaFinal.includes("YYYY") || !fechaFinal.includes("-")) {
+          const mañana = new Date();
+          mañana.setDate(mañana.getDate() + 1);
+          fechaFinal = mañana.toISOString().split('T')[0];
+        }
+
         const fields = {
-          "Cliente": nombreCliente,
+          "Cliente": String(nombreCliente),
           "Servicio": extracted.servicio !== "..." ? extracted.servicio : "Corte de Cabello",
-          "Fecha": extracted.fecha.includes("-") ? extracted.fecha : "2026-03-26",
+          "Fecha": fechaFinal,
           "Especialista": extracted.especialista !== "..." ? extracted.especialista : "Anita",
-          "Teléfono": userPhone,
+          "Teléfono": String(userPhone),
           "Estado": "Pendiente",
-          "¿Es primera vez?": cliente ? "No" : "Sí"
+          "Notas de la cita": "Agendado por voz vía AuraSync",
+          "Email de cliente": cliente?.email || "",
+          "¿Es primera vez?": cliente ? "No" : "Sí",
+          "Cliente VIP": "No",
+          "Duración estimada (minutos)": 60,
+          "Importe estimado": 0,
+          "Observaciones de confirmación": "Pendiente de validar disponibilidad"
         };
 
-        await axios.post(`https://api.airtable.com/v0/${AIRTABLE_CONFIG.baseId}/${AIRTABLE_CONFIG.tableName}`, 
+        console.log("Intentando insertar en Airtable...");
+
+        const airtableRes = await axios.post(
+          `https://api.airtable.com/v0/${AIRTABLE_CONFIG.baseId}/${AIRTABLE_CONFIG.tableName}`, 
           { fields }, 
           { headers: { 
               'Authorization': `Bearer ${AIRTABLE_CONFIG.token}`, 
@@ -106,8 +125,10 @@ DATA_JSON:{"nombre": "${nombreCliente}", "servicio": "...", "fecha": "YYYY-MM-DD
             } 
           }
         );
+        console.log("✅ Registro exitoso. ID:", airtableRes.data.id);
       } catch (e) {
-        console.error("Error en Airtable:", e.response?.data || e.message);
+        // Si falla, este log en Vercel te dirá EXACTAMENTE qué columna tiene el nombre mal
+        console.error("❌ ERROR EN AIRTABLE:", e.response?.data || e.message);
       }
     }
 
