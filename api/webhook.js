@@ -1,7 +1,6 @@
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js');
 
-// Configuración de Clientes
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 const AIRTABLE_CONFIG = {
@@ -10,45 +9,34 @@ const AIRTABLE_CONFIG = {
   tableName: 'Citas' 
 };
 
-const DEEPGRAM_API_KEY = '5f828847255723d84684d7c468240295cc9e0736';
-
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
-
   const { Body, From, MediaUrl0 } = req.body;
   const userPhone = From.replace('whatsapp:', '');
 
   try {
-    // 1. RECUPERAR DATOS DEL CLIENTE
+    // 1. RECUPERAR DATOS REALES DE SUPABASE
+    const { data: serviciosDB } = await supabase.from('servicios').select('nombre');
+    const { data: equipoDB } = await supabase.from('especialistas').select('nombre, rol');
     const { data: cliente } = await supabase.from('clientes').select('*').eq('telefono', userPhone).single();
+    
     const nombreCliente = cliente?.nombre || "amigo/a";
+    
+    // Generamos las listas basadas en TUS tablas de Supabase
+    const catalogoTexto = serviciosDB?.map(s => `- ${s.nombre}`).join('\n') || "- Corte de Cabello\n- Tratamientos de Bienestar";
+    const equipoTexto = equipoDB?.map(e => `- ${e.nombre} (${e.rol})`).join('\n') || "- Anita (Coherencia Capilar)";
 
-    // 2. PROCESAMIENTO DE AUDIO (DEEPGRAM) O TEXTO
+    // 2. PROCESAMIENTO DE AUDIO (DEEPGRAM)
     let textoFinal = Body || "";
-
     if (MediaUrl0) {
-      try {
-        const deepgramUrl = "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&language=es";
-        const audioResponse = await axios.post(deepgramUrl, 
-          { url: MediaUrl0 }, 
-          { headers: { 
-              'Authorization': `Token ${DEEPGRAM_API_KEY}`, 
-              'Content-Type': 'application/json' 
-            } 
-          }
-        );
-        textoFinal = audioResponse.data.results.channels[0].alternatives[0].transcript;
-      } catch (e) {
-        console.error("Error Deepgram:", e.message);
-        textoFinal = "El usuario envió un audio pero hubo un error al procesarlo.";
-      }
+      const audioRes = await axios.post("https://api.deepgram.com/v1/listen?model=nova-2&language=es", 
+        { url: MediaUrl0 }, 
+        { headers: { 'Authorization': `Token 5f828847255723d84684d7c468240295cc9e0736`, 'Content-Type': 'application/json' } }
+      );
+      textoFinal = audioRes.data.results.channels[0].alternatives[0].transcript;
     }
 
-    // 3. DEFINICIÓN DE CATÁLOGO Y EQUIPO
-    const catalogoTexto = "- Corte de Cabello (Cuidado y Coherencia)\n- Tratamientos de Bienestar Capilar\n- Asesoría de Imagen Holística";
-    const equipoTexto = "- Anita (Especialista en Coherencia Capilar)\n- Chris (Mentor de Bienestar)";
-
-    // 4. SYSTEM PROMPT: EL GUARDIÁN DE LA COHERENCIA (SIN RECORTES)
+    // 3. SYSTEM PROMPT: EL GUARDIÁN DE LA COHERENCIA (INTEGRO)
     const systemPrompt = `Eres la Coordinadora de AuraSync, reconocida como "El 1er mentor 24/7 en el mundo para el bienestar" y "El Guardian de la Coherencia del cuerpo humano". 
 
 Tu misión es facilitar que el usuario recupere su bienestar a través de un proceso de "Ingeniería Humana", gestionando su agenda con una eficiencia y calidez que lo haga sentir comprendido y apoyado.
@@ -71,7 +59,7 @@ INSTRUCCIÓN TÉCNICA (INVISIBLE):
 Al final de tu respuesta, genera SIEMPRE este bloque para el sistema:
 DATA_JSON:{"nombre": "${nombreCliente}", "servicio": "...", "fecha": "YYYY-MM-DD", "especialista": "..."}:DATA_JSON`;
 
-    // 5. PROCESAMIENTO CON GPT-4O
+    // 4. PROCESAMIENTO CON GPT-4O
     const aiResponse = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: "gpt-4o",
       messages: [
@@ -83,61 +71,37 @@ DATA_JSON:{"nombre": "${nombreCliente}", "servicio": "...", "fecha": "YYYY-MM-DD
     const fullReply = aiResponse.data.choices[0].message.content;
     const cleanReply = fullReply.split('DATA_JSON')[0].trim();
 
-    // 6. SINCRONIZACIÓN CON AIRTABLE
-    // 6. SINCRONIZACIÓN PROFESIONAL CON AIRTABLE (Mapeo Completo)
+    // 5. SINCRONIZACIÓN CON AIRTABLE (CON TOKEN LIMPIO)
     const jsonMatch = fullReply.match(/DATA_JSON:(.*?):DATA_JSON/s);
     if (jsonMatch) {
-      try {
-        const extracted = JSON.parse(jsonMatch[1]);
-        
-        // Asegurar fecha válida para Airtable
-        let fechaFinal = extracted.fecha;
-        if (!fechaFinal || fechaFinal.includes("YYYY") || !fechaFinal.includes("-")) {
-          const mañana = new Date();
-          mañana.setDate(mañana.getDate() + 1);
-          fechaFinal = mañana.toISOString().split('T')[0];
-        }
+      const ext = JSON.parse(jsonMatch[1]);
+      const hoy = new Date();
+      hoy.setDate(hoy.getDate() + 1);
+      const fechaFinal = (ext.fecha && ext.fecha.includes('-')) ? ext.fecha : hoy.toISOString().split('T')[0];
 
-        const fields = {
+      await axios.post(`https://api.airtable.com/v0/${AIRTABLE_CONFIG.baseId}/${AIRTABLE_CONFIG.tableName}`, 
+        { fields: {
           "Cliente": String(nombreCliente),
-          "Servicio": extracted.servicio !== "..." ? extracted.servicio : "Corte de Cabello",
+          "Servicio": ext.servicio !== "..." ? ext.servicio : "Consulta de Bienestar",
           "Fecha": fechaFinal,
-          "Especialista": extracted.especialista !== "..." ? extracted.especialista : "Anita",
+          "Especialista": ext.especialista !== "..." ? ext.especialista : "Anita",
           "Teléfono": String(userPhone),
           "Estado": "Pendiente",
-          "Notas de la cita": "Agendado por voz vía AuraSync",
-          "Email de cliente": cliente?.email || "",
           "¿Es primera vez?": cliente ? "No" : "Sí",
-          "Cliente VIP": "No",
-          "Duración estimada (minutos)": 60,
-          "Importe estimado": 0,
-          "Observaciones de confirmación": "Pendiente de validar disponibilidad"
-        };
-
-        console.log("Intentando insertar en Airtable...");
-
-        const airtableRes = await axios.post(
-          `https://api.airtable.com/v0/${AIRTABLE_CONFIG.baseId}/${AIRTABLE_CONFIG.tableName}`, 
-          { fields }, 
-          { headers: { 
-              'Authorization': `Bearer ${AIRTABLE_CONFIG.token}`, 
-              'Content-Type': 'application/json' 
-            } 
-          }
-        );
-        console.log("✅ Registro exitoso. ID:", airtableRes.data.id);
-      } catch (e) {
-        // Si falla, este log en Vercel te dirá EXACTAMENTE qué columna tiene el nombre mal
-        console.error("❌ ERROR EN AIRTABLE:", e.response?.data || e.message);
-      }
+          "Notas de la cita": "Agendado por voz"
+        }}, 
+        { headers: { 
+          'Authorization': `Bearer ${AIRTABLE_CONFIG.token.trim()}`, 
+          'Content-Type': 'application/json' 
+        }}
+      );
     }
 
-    // 7. RESPUESTA DE TWILIO
     res.setHeader('Content-Type', 'text/xml');
     return res.status(200).send(`<Response><Message>${cleanReply}</Message></Response>`);
 
   } catch (error) {
-    console.error("Critical Error:", error.message);
+    console.error("Error:", error.response?.data || error.message);
     res.setHeader('Content-Type', 'text/xml');
     return res.status(200).send("<Response><Message>Te pido una disculpa, tuve un pequeño contratiempo con la agenda. ¿Me podrías repetir lo último?</Message></Response>");
   }
