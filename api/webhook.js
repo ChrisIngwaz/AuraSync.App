@@ -1,9 +1,10 @@
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
 
+// Configuración de Conexiones
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 const AIRTABLE_BASE = 'appvuzv3szWik7kn7';
-const AIRTABLE_CONFIG = { headers: { 'Authorization': `Bearer ${process.env.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }};
+const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN; // Asegúrate de que esta variable esté en tu Vercel/Hosting
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -15,22 +16,23 @@ export default async function handler(req, res) {
   const userPhone = From.replace('whatsapp:', '');
   
   try {
-    // 1. PROCESAR TEXTO/AUDIO
+    // 1. PROCESAR AUDIO (Deepgram)
     let textoUsuario = Body || "";
     if (MediaUrl0) {
-      const audioRes = await axios.post("https://api.deepgram.com/v1/listen?model=nova-2&language=es", 
-        { url: MediaUrl0 }, { headers: { 'Authorization': `Token ${process.env.DEEPGRAM_API_KEY}`, 'Content-Type': 'application/json' }});
-      textoUsuario = audioRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
+      try {
+        const audioRes = await axios.post(
+          "https://api.deepgram.com/v1/listen?model=nova-2&language=es", 
+          { url: MediaUrl0 }, 
+          { headers: { 'Authorization': `Token ${process.env.DEEPGRAM_API_KEY}`, 'Content-Type': 'application/json' }}
+        );
+        textoUsuario = audioRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
+      } catch (e) { 
+        console.error("Error Deepgram:", e.message);
+        textoUsuario = "Envié un audio pero hubo un error al procesarlo"; 
+      }
     }
 
-    // 2. BUSCAR CITA ACTIVA EN AIRTABLE (Para cancelaciones)
-    const airtableRes = await axios.get(
-      `https://api.airtable.com/v0/${AIRTABLE_BASE}/Citas?filterByFormula={Teléfono}='${userPhone}'`, 
-      AIRTABLE_CONFIG
-    );
-    const citaActiva = airtableRes.data.records.find(r => r.fields.Estado === 'Confirmada' || r.fields.Estado === 'Pendiente');
-
-    // 3. CARGAR CONTEXTO DE SUPABASE
+    // 2. CARGAR CONTEXTO (Supabase y Airtable)
     const [histRes, servRes, eqRes, cliRes] = await Promise.all([
       supabase.from('conversaciones').select('rol, contenido').eq('telefono', userPhone).order('created_at', { ascending: false }).limit(6),
       supabase.from('servicios').select('nombre'),
@@ -42,27 +44,20 @@ export default async function handler(req, res) {
     const cliente = cliRes.data;
     const nombreCliente = cliente?.nombre || "amigo/a";
 
-    // 4. DETECTAR INTENCIÓN (Confirmación o Cancelación)
+    // 3. DETECTAR INTENCIONES
     const esConfirmacion = /(sí|si|ok|vale|dale|confirmo|perfecto|así es|listo)/i.test(textoUsuario);
-    const esCancelacion = /(cancela|no puedo|no voy|posponer|quitar|borrar|ya no quiero)/i.test(textoUsuario);
+    const esCancelacion = /(cancela|no puedo|no voy|quitar|borrar)/i.test(textoUsuario);
 
-    // 5. PROMPT DE SOCIO ESTRATÉGICO
-    let systemPrompt = `Eres AuraSync, la coordinadora experta del centro. 
-    Tu misión: Cero huecos en la agenda. Eres humana, cálida y resolutiva.
+    // 4. PROMPT ESTRATÉGICO DE AURASYNC
+    let systemPrompt = `Eres AuraSync, la coordinadora estrella. 
+    Tu objetivo es gestionar citas con calidez humana. 
     Servicios: ${servRes.data?.map(s => s.nombre).join(', ')}.
-    Equipo: ${eqRes.data?.map(e => e.nombre).join(', ')}.
+    Especialistas: ${eqRes.data?.map(e => e.nombre).join(', ')}.
+    
+    INSTRUCCIÓN: Si el cliente confirma, genera el bloque DATA_JSON al final.
+    Si el cliente pide cita, responde de forma amigable sugiriendo disponibilidad.`;
 
-    CASOS ESPECIALES:
-    - CANCELACIÓN: Si el usuario quiere cancelar y tiene cita (${citaActiva ? 'Tiene cita activa' : 'No tiene'}), dile que la has liberado con una sonrisa (aunque te de pena) y ofrécele reagendar de inmediato.
-    - PERSUASIÓN: Si alguien no está disponible, sugiere a otro especialista con entusiasmo.
-    - RECONFIRMACIÓN: Si confirma una propuesta previa, usa DATA_JSON.`;
-
-    if (esCancelacion && citaActiva) {
-      systemPrompt += `\nACCIÓN: El usuario quiere cancelar su cita de ${citaActiva.fields.Servicio}. 
-      Confirma la cancelación amablemente y genera: DATA_JSON{"accion": "cancelar", "id": "${citaActiva.id}"}DATA_JSON`;
-    }
-
-    // 6. LLAMADA A IA
+    // 5. LLAMADA A LA IA
     const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: "gpt-4o",
       messages: [{ role: "system", content: systemPrompt }, ...historial, { role: "user", content: textoUsuario }],
@@ -71,30 +66,41 @@ export default async function handler(req, res) {
 
     let fullReply = aiRes.data.choices[0].message.content;
 
-    // 7. PROCESAR ACCIONES EN AIRTABLE
+    // 6. REGISTRO EN AIRTABLE (Solución al fallo de registro)
     const jsonMatch = fullReply.match(/DATA_JSON(\{.*?\})DATA_JSON/);
     if (jsonMatch) {
-      const data = JSON.parse(jsonMatch[1]);
-      
-      if (data.accion === "cancelar") {
-        await axios.patch(`https://api.airtable.com/v0/${AIRTABLE_BASE}/Citas`, 
-          { records: [{ id: data.id, fields: { "Estado": "Cancelada" } }] }, AIRTABLE_CONFIG);
-      } else if (data.servicio) {
-        // Lógica de Crear Cita (Igual que antes)
+      try {
+        const data = JSON.parse(jsonMatch[1]);
+        // Registro exacto para tus columnas de Airtable
         await axios.post(`https://api.airtable.com/v0/${AIRTABLE_BASE}/Citas`, 
-          { fields: { "Cliente": nombreCliente, "Servicio": data.servicio, "Fecha": data.fecha, "Especialista": data.especialista, "Teléfono": userPhone, "Estado": "Confirmada" }},
-          AIRTABLE_CONFIG);
+          { 
+            fields: { 
+              "Cliente": nombreCliente, 
+              "Servicio": data.servicio, 
+              "Fecha": data.fecha || new Date().toISOString().split('T')[0], 
+              "Especialista": data.especialista, 
+              "Teléfono": userPhone, 
+              "Estado": "Confirmada" 
+            } 
+          }, 
+          { headers: { 'Authorization': `Bearer ${AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }}
+        );
+      } catch (err) {
+        console.error("Error al guardar en Airtable:", err.response?.data || err.message);
       }
     }
 
-    // 8. LIMPIEZA Y GUARDADO
+    // 7. LIMPIAR RESPUESTA Y GUARDAR HISTORIAL
     const cleanReply = fullReply.replace(/DATA_JSON.*?DATA_JSON/g, '').trim();
-    await supabase.from('conversaciones').insert([{ telefono: userPhone, rol: 'user', contenido: textoUsuario }, { telefono: userPhone, rol: 'assistant', contenido: fullReply }]);
+    await supabase.from('conversaciones').insert([
+      { telefono: userPhone, rol: 'user', contenido: textoUsuario },
+      { telefono: userPhone, rol: 'assistant', contenido: fullReply }
+    ]);
 
     res.setHeader('Content-Type', 'text/xml');
     return res.status(200).send(`<Response><Message>${cleanReply}</Message></Response>`);
 
   } catch (error) {
-    res.status(200).send('<Response><Message>¡Hola! AuraSync por aquí. Me distraje un segundo, ¿me repites?</Message></Response>');
+    res.status(200).send('<Response><Message>Hola, soy AuraSync. Tenemos mucha actividad ahora, ¿me podrías escribir de nuevo?</Message></Response>');
   }
 }
