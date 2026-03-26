@@ -3,14 +3,16 @@ import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// Configuración Airtable con validación
+// CORREGIDO: Usando AIRTABLE_TOKEN (no API_KEY) según tus variables
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
-const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
+const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN; // ← Cambiado de API_KEY a TOKEN
 const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || 'Citas';
 
-// Validación crítica al inicio
-if (!AIRTABLE_BASE_ID || !AIRTABLE_API_KEY) {
+// Validación crítica
+if (!AIRTABLE_BASE_ID || !AIRTABLE_TOKEN) {
   console.error('❌ ERROR CRÍTICO: Faltan variables de entorno de Airtable');
+  console.error('Base ID:', AIRTABLE_BASE_ID ? '✓' : '✗ FALTA');
+  console.error('Token:', AIRTABLE_TOKEN ? '✓' : '✗ FALTA');
 }
 
 export default async function handler(req, res) {
@@ -63,15 +65,12 @@ export default async function handler(req, res) {
       .single();
       
     const { data: esp } = await supabase.from('especialistas').select('nombre');
-    
-    // Usando 'duracion' (nombre correcto de tu columna en Supabase)
     const { data: serv } = await supabase.from('servicios').select('nombre, precio, duracion');
     
     const primerNombre = cliente?.nombre ? cliente.nombre.split(' ')[0] : 'cliente';
     const listaEsp = esp?.map(e => e.nombre).join(', ') || "nuestro equipo";
     const catalogo = serv?.map(s => `${s.nombre} ($${s.precio})`).join(', ') || "nuestros servicios";
     
-    // Mapa de servicios usando 'duracion'
     const serviciosMap = {};
     serv?.forEach(s => {
       serviciosMap[s.nombre.toLowerCase()] = {
@@ -80,7 +79,7 @@ export default async function handler(req, res) {
       };
     });
 
-    // 5. SYSTEM PROMPT COMPLETO CON INSTRUCCIONES DE FECHA
+    // 5. SYSTEM PROMPT COMPLETO
     const systemPrompt = `Eres la Asistente de Ventas y Agendamiento de AuraSync. Tu objetivo es gestionar citas para salones de belleza con eficiencia impecable y un tono humano, profesional y persuasivo.
 
 REGLAS DE INTERACCIÓN:
@@ -97,9 +96,8 @@ Cuando el usuario confirme una fecha y hora para su cita, debes extraer y format
 - cita_hora: Formato HH:MM en 24 horas (ejemplo: 14:30 para las 2:30 PM, 09:00 para las 9:00 AM)
 
 Ejemplos de conversión:
-- "mañana a las 3 de la tarde" → cita_fecha: "2026-03-28", cita_hora: "15:00" (asumiendo que hoy es 27/03/2026)
+- "mañana a las 3 de la tarde" → cita_fecha: "2026-03-28", cita_hora: "15:00"
 - "el lunes a las 10 de la mañana" → cita_fecha: "2026-03-30", cita_hora: "10:00"
-- "viernes 4 de abril a la 1" → cita_fecha: "2026-04-04", cita_hora: "13:00"
 
 INSTRUCCIÓN TÉCNICA FINAL: Al final de tu respuesta, agrega SIEMPRE este bloque JSON exacto (rellena con los datos reales si los tienes, usa "..." o null si faltan datos):
 
@@ -150,17 +148,14 @@ DATA_JSON:{
           }, { onConflict: 'telefono' });
         }
 
-        // 8. CREAR CITA EN AIRTABLE (CON VALIDACIÓN DE CREDENCIALES)
+        // 8. CREAR CITA EN AIRTABLE
         if (datosExtraidos.cita_fecha && 
             datosExtraidos.cita_fecha !== "..." && 
             datosExtraidos.cita_hora && 
             datosExtraidos.cita_hora !== "...") {
           
-          // Verificar credenciales antes de llamar
-          if (!AIRTABLE_BASE_ID || !AIRTABLE_API_KEY) {
+          if (!AIRTABLE_BASE_ID || !AIRTABLE_TOKEN) {
             console.error('❌ No se puede crear cita: Faltan credenciales de Airtable');
-            console.error('Base ID:', AIRTABLE_BASE_ID ? 'OK' : 'FALTANTE');
-            console.error('API Key:', AIRTABLE_API_KEY ? 'OK' : 'FALTANTE');
           } else {
             const servicioKey = datosExtraidos.cita_servicio?.toLowerCase();
             const infoServicio = serviciosMap[servicioKey] || { precio: 0, duracion: 60 };
@@ -181,12 +176,11 @@ DATA_JSON:{
           }
         }
       } catch (e) {
-        console.error('❌ Error procesando JSON o guardando datos:', e);
-        console.error('JSON recibido:', jsonMatch ? jsonMatch[1] : 'No match');
+        console.error('❌ Error procesando JSON:', e);
       }
     }
 
-    // Limpiar respuesta para el usuario
+    // Limpiar respuesta
     const cleanReply = fullReply.replace(/DATA_JSON:[\s\S]*?:DATA_JSON/, '').trim();
     
     // 9. GUARDAR CONVERSACIÓN
@@ -199,30 +193,24 @@ DATA_JSON:{
     return res.status(200).send(`<Response><Message>${cleanReply}</Message></Response>`);
 
   } catch (err) {
-    console.error('❌ Error general en handler:', err);
+    console.error('❌ Error general:', err);
     res.setHeader('Content-Type', 'text/xml');
     return res.status(200).send('<Response><Message>AuraSync: Hubo un inconveniente técnico, ¿me repites?</Message></Response>');
   }
 }
 
-// Función auxiliar CORREGIDA para evitar NOT_FOUND
+// Función auxiliar usando AIRTABLE_TOKEN
 async function crearCitaAirtable(datos) {
   try {
     const nombreCompleto = `${datos.nombre || ''} ${datos.apellido || ''}`.trim();
     
-    // Asegurar tipos de datos correctos para Airtable
     const duracionNum = parseInt(datos.duracion) || 60;
     const precioNum = parseFloat(datos.precio) || 0;
     
-    // FIX CRÍTICO: Codificar nombre de tabla por si tiene espacios
     const tableNameEncoded = encodeURIComponent(AIRTABLE_TABLE_NAME);
-    
-    // Construir URL correctamente
     const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${tableNameEncoded}`;
     
     console.log('🔗 URL Airtable:', url);
-    console.log('📋 Verificación - Base ID existe:', !!AIRTABLE_BASE_ID);
-    console.log('📋 Verificación - Tabla:', AIRTABLE_TABLE_NAME);
 
     const fields = {
       "Cliente": nombreCompleto || "Sin nombre",
@@ -240,44 +228,24 @@ async function crearCitaAirtable(datos) {
       "Observaciones de confirmación": `Agendado el ${new Date().toLocaleDateString('es-ES')}`
     };
 
-    console.log('📤 Enviando a Airtable:', JSON.stringify(fields, null, 2));
+    console.log('📤 Enviando a Airtable...');
 
     const response = await axios.post(
       url,
-      {
-        records: [{ fields }]
-      },
+      { records: [{ fields }] },
       {
         headers: {
-          'Authorization': `Bearer ${AIRTABLE_API_KEY}`,
+          'Authorization': `Bearer ${AIRTABLE_TOKEN}`, // ← Usando TOKEN aquí
           'Content-Type': 'application/json'
         }
       }
     );
     
-    console.log('✅ ÉXITO - Cita creada en Airtable ID:', response.data.records[0].id);
+    console.log('✅ Cita creada en Airtable ID:', response.data.records[0].id);
     return response.data;
     
   } catch (error) {
-    console.error('❌ ERROR AIRTABLE DETALLADO:');
-    console.error('Status:', error.response?.status);
-    console.error('Status Text:', error.response?.statusText);
-    
-    if (error.response?.data?.error) {
-      console.error('Error completo:', JSON.stringify(error.response.data.error, null, 2));
-      
-      if (error.response?.status === 404) {
-        console.error('💡 SOLUCIÓN: El error 404 (NOT_FOUND) significa:');
-        console.error('   1. Revisa en Vercel que AIRTABLE_BASE_ID empiece con "app..."');
-        console.error('   2. Revisa que AIRTABLE_TABLE_NAME sea exactamente el nombre de tu tabla');
-        console.error('   3. Si tu tabla se llama "Citas", verifica que no sea "citas" (minúsculas)');
-        console.error('   4. Ve a Airtable → API documentation para copiar la URL exacta');
-      }
-    } else {
-      console.error('Error message:', error.message);
-    }
-    
-    // No lanzamos el error para no romper la conversación con el usuario
+    console.error('❌ ERROR AIRTABLE:', error.response?.status, error.response?.data);
     return null;
   }
 }
