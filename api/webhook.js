@@ -18,14 +18,18 @@ export default async function handler(req, res) {
       textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
     }
 
-    // 2. OBTENER CONTEXTO REAL (Supabase)
+    // 2. CONTEXTO REAL: Traemos Especialistas y Servicios con PRECIOS
     const { data: clienteExistente } = await supabase.from('clientes').select('*').eq('telefono', userPhone).maybeSingle();
     const { data: esp } = await supabase.from('especialistas').select('nombre');
-    const { data: serv } = await supabase.from('servicios').select('nombre');
+    const { data: serv } = await supabase.from('servicios').select('nombre, precio');
     
     const primerNombre = clienteExistente?.nombre ? clienteExistente.nombre.split(' ')[0] : 'cliente';
-    const listaEsp = esp?.map(e => e.nombre).join(', ') || "nuestro equipo";
-    const listaServ = serv?.map(s => s.nombre).join(', ') || "cortes y estética";
+    
+    // Formateamos la lista de especialistas
+    const listaEsp = esp?.map(e => e.nombre).join(', ') || "nuestro equipo experto";
+    
+    // Formateamos el catálogo con precios
+    const catalogoPrecios = serv?.map(s => `${s.nombre}: $${s.precio}`).join(', ') || "nuestros servicios de estética";
 
     // 3. TU SYSTEM PROMPT ORIGINAL (SIN CAMBIOS)
     const systemPrompt = `Eres la Asistente de Ventas y Agendamiento de AuraSync. Tu objetivo es gestionar citas para salones de belleza con una eficiencia impecable y un tono humano, profesional y persuasivo.
@@ -35,7 +39,7 @@ REGLAS DE INTERACCIÓN:
 2. CLIENTES NUEVOS: Si el sistema indica que es un cliente nuevo, saluda con calidez y solicita obligatoriamente: Nombre, Apellido y Fecha de Nacimiento. No agendes nada sin estos datos.
 3. CLIENTES EXISTENTES: Saluda por su nombre (${primerNombre}) y ofrece servicios basados en su historial si está disponible.
 4. CIERRE DE VENTAS: Si el cliente duda, resalta los beneficios de los servicios (calidad, experiencia, bienestar). 
-5. MANEJO DE CITAS: Usa un lenguaje claro para confirmar día, hora, servicio y profesional encargado. Especialistas disponibles: ${listaEsp}. Servicios: ${listaServ}.
+5. MANEJO DE CITAS: Usa un lenguaje claro para confirmar día, hora, servicio y profesional encargado. Especialistas disponibles: ${listaEsp}. Servicios y Precios: ${catalogoPrecios}.
 6. CONCISIÓN: Mantén las respuestas breves y directas para WhatsApp. No uses párrafos largos.
 
 CONTEXTO DE NEGOCIO:
@@ -46,7 +50,7 @@ CONTEXTO DE NEGOCIO:
 INSTRUCCIÓN TÉCNICA: Al final de tu respuesta, añade SIEMPRE este bloque JSON con los datos detectados:
 DATA_JSON:{"nombre": "...", "apellido": "...", "fecha_nacimiento": "...", "email": "...", "servicio": "...", "especialista": "...", "notas_bienestar": "..."}:DATA_JSON`;
 
-    // 4. RESPUESTA IA
+    // 4. RESPUESTA DE GPT-4O
     const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: "gpt-4o",
       messages: [{ role: "system", content: systemPrompt }, { role: "user", content: textoUsuario }],
@@ -55,42 +59,34 @@ DATA_JSON:{"nombre": "...", "apellido": "...", "fecha_nacimiento": "...", "email
 
     let fullReply = aiRes.data.choices[0].message.content;
 
-    // 5. REGISTRO EN SUPABASE (Con columna 'apellido' ya creada)
+    // 5. REGISTRO EN SUPABASE (Asegúrate de tener la columna 'apellido')
     const jsonMatch = fullReply.match(/DATA_JSON:(\{.*?\系统\}):DATA_JSON/s);
     if (jsonMatch) {
       try {
         const d = JSON.parse(jsonMatch[1]);
         if (d.nombre && d.nombre !== "..." && d.nombre.trim() !== "") {
-          const payload = {
+          await supabase.from('clientes').upsert({
             telefono: userPhone,
             nombre: d.nombre.trim(),
             apellido: (d.apellido && d.apellido !== "...") ? d.apellido.trim() : null,
             fecha_nacimiento: (d.fecha_nacimiento && d.fecha_nacimiento !== "...") ? d.fecha_nacimiento : null,
-            email: (d.email && d.email !== "...") ? d.email : null,
-            notas_bienestar: (d.notas_bienestar && d.notas_bienestar !== "...") ? d.notas_bienestar : null
-          };
-          await supabase.from('clientes').upsert(payload, { onConflict: 'telefono' });
+            email: (d.email && d.email !== "...") ? d.email : null
+          }, { onConflict: 'telefono' });
         }
-
-        // Registro en Airtable
-        if (d.servicio && d.servicio !== "...") {
-          await axios.post(`https://api.airtable.com/v0/${AIRTABLE_BASE}/Citas`, 
-            { fields: { "Cliente": `${d.nombre} ${d.apellido !== "..." ? d.apellido : ""}`.trim(), "Servicio": d.servicio, "Especialista": d.especialista, "Teléfono": userPhone, "Estado": "Confirmada" }},
-            { headers: { 'Authorization': `Bearer ${process.env.AIRTABLE_TOKEN}` }}
-          ).catch(e => console.error("Airtable Error"));
-        }
-      } catch (e) { console.error("Parse Error"); }
+      } catch (e) { console.error("Error en JSON"); }
     }
 
-    // 6. RESPONDER Y MEMORIA
+    // 6. RESPUESTA Y MEMORIA
     const cleanReply = fullReply.replace(/DATA_JSON:.*?:DATA_JSON/gs, '').trim();
-    await supabase.from('conversaciones').insert([{ telefono: userPhone, rol: 'user', contenido: textoUsuario }, { telefono: userPhone, rol: 'assistant', contenido: cleanReply }]);
+    await supabase.from('conversaciones').insert([
+      { telefono: userPhone, rol: 'user', contenido: textoUsuario },
+      { telefono: userPhone, rol: 'assistant', contenido: cleanReply }
+    ]);
 
     res.setHeader('Content-Type', 'text/xml');
     return res.status(200).send(`<Response><Message>${cleanReply}</Message></Response>`);
 
   } catch (err) {
-    res.setHeader('Content-Type', 'text/xml');
-    return res.status(200).send('<Response><Message>Hola, soy AuraSync. Tuvimos un detalle técnico, ¿podrías repetirme eso?</Message></Response>');
+    res.status(200).send('<Response><Message>Hola, soy AuraSync. Tuvimos un detalle técnico, ¿podrías repetirme eso?</Message></Response>');
   }
 }
