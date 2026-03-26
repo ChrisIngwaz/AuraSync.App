@@ -1,8 +1,7 @@
 {
+  "type": "module",
   "dependencies": {
-    "@deepgram/sdk": "^2.0.0",
-    "@supabase/supabase-js": "^2.0.0",
-    "openai": "^4.0.0",
-    "twilio": "^3.0.0"
+    "axios": "^1.6.0",
+    "@supabase/supabase-js": "^2.38.0"
   }
 }
