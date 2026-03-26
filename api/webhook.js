@@ -1,137 +1,266 @@
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
 
+// ==================== CONFIGURACIÓN ====================
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
-const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN;
-const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || 'Citas';
 
+const CONFIG = {
+  AIRTABLE_BASE_ID: process.env.AIRTABLE_BASE_ID,
+  AIRTABLE_TOKEN: process.env.AIRTABLE_TOKEN,
+  AIRTABLE_TABLE_NAME: process.env.AIRTABLE_TABLE_NAME || 'Citas',
+  DEEPGRAM_API_KEY: process.env.DEEPGRAM_API_KEY,
+  OPENAI_API_KEY: process.env.OPENAI_API_KEY
+};
+
+// Validación de configuración crítica
+const validarConfig = () => {
+  const faltantes = [];
+  if (!CONFIG.AIRTABLE_BASE_ID) faltantes.push('AIRTABLE_BASE_ID');
+  if (!CONFIG.AIRTABLE_TOKEN) faltantes.push('AIRTABLE_TOKEN');
+  if (!CONFIG.DEEPGRAM_API_KEY) faltantes.push('DEEPGRAM_API_KEY');
+  if (!CONFIG.OPENAI_API_KEY) faltantes.push('OPENAI_API_KEY');
+  
+  if (faltantes.length > 0) {
+    console.error('❌ Variables de entorno faltantes:', faltantes.join(', '));
+    return false;
+  }
+  return true;
+};
+
+// ==================== HANDLER PRINCIPAL ====================
 export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(200).send('<Response></Response>');
+  // Validar método
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
 
   const { Body, From, MediaUrl0 } = req.body;
+  
+  // Validar número de teléfono
+  if (!From) {
+    return res.status(400).json({ error: 'Missing From parameter' });
+  }
+
   const userPhone = From.replace('whatsapp:', '').trim();
-  
-  console.log('📞 Teléfono:', userPhone);
-  
+  console.log(`\n📱 Nueva interacción: ${userPhone}`);
+  console.log(`⏰ Fecha: ${new Date().toISOString()}`);
+
   try {
-    // 1. TRANSCRIPCIÓN
+    // 1. PROCESAR ENTRADA (Audio o Texto)
     let textoUsuario = Body || "";
+    let esAudio = false;
+    
     if (MediaUrl0) {
-      const deepgramRes = await axios.post(
-        "https://api.deepgram.com/v1/listen?model=nova-2&language=es", 
-        { url: MediaUrl0 }, 
-        { headers: { 'Authorization': `Token ${process.env.DEEPGRAM_API_KEY}`, 'Content-Type': 'application/json' }}
-      );
-      textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
-      console.log('🎤 Audio transcrito:', textoUsuario);
+      esAudio = true;
+      console.log('🎙️ Modo: AUDIO');
+      
+      if (!CONFIG.DEEPGRAM_API_KEY) {
+        return responderTwilio(res, "Estoy teniendo problemas con el audio. ¿Podrías escribirme por favor?");
+      }
+
+      try {
+        const deepgramRes = await axios.post(
+          "https://api.deepgram.com/v1/listen?model=nova-2&language=es&smart_format=true&punctuate=true", 
+          { url: MediaUrl0 }, 
+          { 
+            headers: { 
+              'Authorization': `Token ${CONFIG.DEEPGRAM_API_KEY}`, 
+              'Content-Type': 'application/json' 
+            },
+            timeout: 15000 // 15 segundos para audios largos
+          }
+        );
+        
+        textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
+        
+        if (!textoUsuario) {
+          return responderTwilio(res, "No pude escuchar bien el audio. ¿Podrías repetirlo más claro o escribirme?");
+        }
+        
+        console.log('📝 Transcripción:', textoUsuario);
+      } catch (error) {
+        console.error('❌ Error Deepgram:', error.message);
+        return responderTwilio(res, "Tuve problemas procesando el audio. Intenta escribiendo tu mensaje.");
+      }
     } else {
-      console.log('💬 Texto recibido:', textoUsuario);
+      console.log('💬 Modo: TEXTO -', textoUsuario);
     }
 
-    // 2. CARGAR CLIENTE
-    const { data: cliente, error: clienteError } = await supabase
+    // 2. CARGAR CONTEXTO DEL CLIENTE Y HISTORIAL
+    const { data: cliente, error: errorCliente } = await supabase
       .from('clientes')
       .select('*')
       .eq('telefono', userPhone)
-      .single();
+      .maybeSingle(); // maybeSingle no lanza error si no existe
 
-    if (clienteError && clienteError.code !== 'PGRST116') {
-      console.error('Error Supabase:', clienteError);
+    if (errorCliente) {
+      console.error('Error cargando cliente:', errorCliente);
     }
 
-    const esClienteNuevo = !cliente;
-    console.log('👤 Cliente nuevo:', esClienteNuevo, cliente ? `(Nombre: ${cliente.nombre})` : '');
+    // Cargar últimas 5 interacciones para contexto
+    const { data: historial, error: errorHistorial } = await supabase
+      .from('conversaciones')
+      .select('rol, contenido, created_at')
+      .eq('telefono', userPhone)
+      .order('created_at', { ascending: false })
+      .limit(5);
 
-    // 3. CATÁLOGO
-    const { data: esp } = await supabase.from('especialistas').select('nombre');
-    const { data: serv } = await supabase.from('servicios').select('nombre, precio, duracion');
+    // Determinar estado
+    const esNuevo = !cliente?.nombre;
+    const primerNombre = cliente?.nombre?.split(' ')[0] || null;
+    const nombreCompleto = cliente?.nombre && cliente?.apellido 
+      ? `${cliente.nombre} ${cliente.apellido}` 
+      : null;
+
+    console.log(`👤 Cliente: ${esNuevo ? 'NUEVO' : primerNombre}`);
+
+    // 3. CARGAR CATÁLOGO
+    const { data: especialistas, error: errorEsp } = await supabase
+      .from('especialistas')
+      .select('nombre');
+      
+    const { data: servicios, error: errorServ } = await supabase
+      .from('servicios')
+      .select('nombre, precio, duracion');
+
+    if (errorEsp || errorServ) {
+      console.error('Error cargando catálogo:', errorEsp || errorServ);
+    }
+
+    const listaEspecialistas = especialistas?.map(e => e.nombre).join(', ') || "nuestro equipo";
+    const catalogoServicios = servicios?.map(s => `${s.nombre} ($${s.precio})`).join(', ') || "servicios disponibles";
     
-    const listaEsp = esp?.map(e => e.nombre).join(', ') || "nuestro equipo";
-    const catalogo = serv?.map(s => `${s.nombre} ($${s.precio})`).join(', ') || "nuestros servicios";
-    
-    const serviciosMap = {};
-    serv?.forEach(s => {
-      serviciosMap[s.nombre.toLowerCase()] = { precio: s.precio, duracion: s.duracion || 60 };
+    // Mapa de servicios con sinónimos para búsqueda inteligente
+    const mapaServicios = {};
+    servicios?.forEach(s => {
+      const key = s.nombre.toLowerCase();
+      mapaServicios[key] = s;
+      
+      // Sinónimos comunes
+      if (key.includes('corte') || key.includes('cabello')) {
+        mapaServicios['cortarme el pelo'] = s;
+        mapaServicios['cortar el pelo'] = s;
+        mapaServicios['cortarme el cabello'] = s;
+        mapaServicios['corte de pelo'] = s;
+      }
+      if (key.includes('manicura') || key.includes('uñas')) {
+        mapaServicios['manicure'] = s;
+        mapaServicios['uñas'] = s;
+        mapaServicios['pintar uñas'] = s;
+      }
+      if (key.includes('hidratación') || key.includes('tratamiento')) {
+        mapaServicios['tratamiento'] = s;
+        mapaServicios['hidratarme el pelo'] = s;
+      }
     });
 
-    // 4. SYSTEM PROMPT CORREGIDO - Acepta fechas naturales y las convierte
-    const systemPrompt = `Eres la Asistente de AuraSync. ${
-      esClienteNuevo 
-        ? `Este es un CLIENTE NUEVO (teléfono ${userPhone}). Saluda cordialmente y pide: Nombre, Apellido y Fecha de Nacimiento (acepta formatos como "27 de mayo del 76", "15/03/1990", etc. TÚ debes convertirlas internamente a YYYY-MM-DD). NO agendes nada hasta tener estos 3 datos.` 
-        : `Este es el cliente ${cliente.nombre} ${cliente.apellido || ''}. Salúdalo por su nombre y ofrece agendar directamente.`
-    }
+    // 4. CONSTRUIR SYSTEM PROMPT OPTIMIZADO
+    const systemPrompt = `Eres Aura, la coordinadora profesional de AuraSync Salon. Tu objetivo es agendar citas de forma natural y eficiente.
 
-SERVICIOS: ${catalogo}
-ESPECIALISTAS: ${listaEsp}
+ESTADO DEL CLIENTE:
+${esNuevo 
+  ? `🆕 CLIENTE NUEVO (Tel: ${userPhone}). DEBES obtener: Nombre, Apellido y Fecha de Nacimiento antes de agendar. Pídelos de forma natural.` 
+  : `👤 CLIENTE REGISTRADO: ${primerNombre}. Trátalo solo por "${primerNombre}" (nunca por nombre completo). Saluda brevemente y pregunta directamente qué necesita.`
+}
 
-INSTRUCCIONES CRÍTICAS:
-1. Si el usuario da datos personales (ej: "Chris Ingwaz 27 de mayo del 76"), EXTRAE:
-   - nombre: "Chris"
-   - apellido: "Ingwaz" 
-   - fecha_nacimiento: CONVIERTE a "1976-05-27" (YYYY-MM-DD)
-2. Si ya tienes los datos personales y el usuario pide una cita (ej: "quiero corte mañana a las 3"), EXTRAE:
-   - cita_fecha: CONVIERTE "mañana" a fecha real (YYYY-MM-DD)
-   - cita_hora: CONVIERTE "3 de la tarde" a "15:00" (24h)
-   - cita_servicio: "Corte de Cabello Premium"
-   - cita_especialista: "Cualquiera" o el nombre si lo menciona
+CATÁLOGO ACTUAL:
+Servicios: ${catalogoServicios}
+Especialistas: ${listaEspecialistas}
 
-FORMATO JSON OBLIGATORIO al final de tu respuesta:
+PROTOCOLO DE INTERACCIÓN:
+
+1. SI EL CLIENTE EMPIEZA CON "HOLA" O SALUDO:
+   - ${esNuevo ? 'Bienvenida cálida + solicitud de datos personales.' : `Saluda: "Hola ${primerNombre}, ¿qué servicio necesitas hoy?"`}
+
+2. SI EL CLIENTE PIDE CITA DIRECTAMENTE (ej: "quiero corte mañana a las 3"):
+   - ${esNuevo ? 'Primero: "Perfecto, para agendarte necesito tu nombre completo, apellido y fecha de nacimiento". Luego: "Listo, ahora dime..." y continúas con la cita.' : 'Confirma el servicio, fecha y hora directamente.'}
+   - Extrae automáticamente: servicio, fecha (convierte "mañana" a YYYY-MM-DD), hora (convierte "3 de la tarde" a 15:00).
+
+3. CONVERSIÓN AUTOMÁTICA DE FECHAS (tú haces la conversión, no pidas formato al usuario):
+   - "mañana" → fecha actual + 1 día, formato YYYY-MM-DD
+   - "pasado mañana" → fecha actual + 2 días
+   - "el lunes" → próximo lunes en formato YYYY-MM-DD
+   - "3 de la tarde" → "15:00"
+   - "media día" → "12:00"
+   - "27 de mayo del 76" → "1976-05-27"
+
+4. REGLAS IMPORTANTES:
+   - Sé breve y natural (estilo WhatsApp).
+   - Nunca repitas información que el cliente ya dio en mensajes anteriores (revisa el historial).
+   - Si detectas el servicio por sinónimos ("cortarme el pelo"), úsalo correctamente.
+   - No uses lenguaje técnico (JSON, YYYY-MM-DD) con el cliente.
+
+FORMATO JSON OBLIGATORIO (solo tú ves esto, al final de tu respuesta):
 DATA_JSON:{
   "nombre": "${cliente?.nombre || ''}",
   "apellido": "${cliente?.apellido || ''}",
   "fecha_nacimiento": "${cliente?.fecha_nacimiento || ''}",
-  "cita_fecha": "...",
-  "cita_hora": "...",
-  "cita_servicio": "...",
-  "cita_especialista": "..."
+  "cita_fecha": "YYYY-MM-DD si detectaste fecha",
+  "cita_hora": "HH:MM si detectaste hora",
+  "cita_servicio": "Nombre exacto del servicio del catálogo",
+  "cita_especialista": "Nombre específico o 'Cualquiera disponible'"
 }:DATA_JSON`;
 
-    // 5. RESPUESTA IA
-    const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: "gpt-4o",
-      messages: [
-        { role: "system", content: systemPrompt }, 
-        { role: "user", content: textoUsuario }
-      ],
-      temperature: 0.3
-    }, { headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` }});
+    // 5. PREPARAR MENSAJES CON HISTORIAL (MEMORIA)
+    const messages = [{ role: "system", content: systemPrompt }];
+    
+    if (historial && historial.length > 0) {
+      // Ordenar cronológicamente (más antiguo primero)
+      historial.reverse().forEach(msg => {
+        messages.push({ role: msg.rol, content: msg.contenido });
+      });
+    }
+    
+    messages.push({ role: "user", content: textoUsuario });
+
+    // 6. LLAMADA A OPENAI
+    console.log('🤖 Enviando a OpenAI...');
+    
+    const aiRes = await axios.post(
+      'https://api.openai.com/v1/chat/completions', 
+      {
+        model: "gpt-4o",
+        messages: messages,
+        temperature: 0.4,
+        max_tokens: 500
+      }, 
+      { 
+        headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` },
+        timeout: 15000
+      }
+    );
 
     let fullReply = aiRes.data.choices[0].message.content;
-    console.log('🤖 Respuesta IA:', fullReply.substring(0, 100) + '...');
+    console.log('💬 Respuesta IA:', fullReply.substring(0, 100) + '...');
 
-    // 6. EXTRACCIÓN JSON ROBUSTA
-    let datosExtraidos = {};
+    // 7. PROCESAR JSON Y GUARDAR DATOS
     const jsonMatch = fullReply.match(/DATA_JSON:\s*(\{[\s\S]*?\})\s*:DATA_JSON/);
+    let citaCreada = false;
+    let datosExtraidos = {};
     
     if (jsonMatch) {
       try {
-        // Limpiar el JSON de saltos de línea y espacios extra
+        // Limpiar y parsear JSON
         let jsonStr = jsonMatch[1]
           .replace(/\n/g, ' ')
           .replace(/\s+/g, ' ')
-          .replace(/,\s*}/g, '}') // Eliminar comas trailing
+          .replace(/,\s*}/g, '}') // Eliminar trailing commas
           .trim();
-        
-        console.log('📋 JSON extraído:', jsonStr);
-        datosExtraidos = JSON.parse(jsonStr);
-        
-        // 7. GUARDAR DATOS PERSONALES EN SUPABASE
-        const tieneDatosValidos = datosExtraidos.nombre && 
-                                  datosExtraidos.nombre !== "..." && 
-                                  datosExtraidos.nombre !== "" &&
-                                  datosExtraidos.apellido && 
-                                  datosExtraidos.apellido !== "...";
-        
-        if (tieneDatosValidos) {
-          console.log('💾 Guardando en Supabase:', {
-            telefono: userPhone,
-            nombre: datosExtraidos.nombre,
-            apellido: datosExtraidos.apellido,
-            fecha: datosExtraidos.fecha_nacimiento
-          });
           
-          const { error: upsertError } = await supabase
+        datosExtraidos = JSON.parse(jsonStr);
+        console.log('📊 Datos extraídos:', JSON.stringify(datosExtraidos, null, 2));
+
+        // GUARDAR DATOS PERSONALES (si es nuevo y tiene datos válidos)
+        const tieneDatosValidos = datosExtraidos.nombre && 
+                                  datosExtraidos.apellido && 
+                                  datosExtraidos.nombre !== "..." && 
+                                  datosExtraidos.apellido !== "..." &&
+                                  datosExtraidos.nombre.length > 1;
+
+        if (esNuevo && tieneDatosValidos) {
+          console.log('💾 Guardando nuevo cliente en Supabase...');
+          
+          const { error: errorUpsert } = await supabase
             .from('clientes')
             .upsert({
               telefono: userPhone,
@@ -139,108 +268,171 @@ DATA_JSON:{
               apellido: datosExtraidos.apellido.trim(),
               fecha_nacimiento: (datosExtraidos.fecha_nacimiento && datosExtraidos.fecha_nacimiento !== "...") 
                 ? datosExtraidos.fecha_nacimiento 
-                : null
+                : null,
+              created_at: new Date().toISOString()
             }, { onConflict: 'telefono' });
             
-          if (upsertError) {
-            console.error('❌ Error guardando cliente:', upsertError);
+          if (errorUpsert) {
+            console.error('❌ Error guardando cliente:', errorUpsert);
           } else {
-            console.log('✅ Cliente guardado correctamente');
+            console.log('✅ Cliente guardado en Supabase');
           }
-        } else {
-          console.log('⚠️ Datos incompletos, no se guarda:', datosExtraidos);
         }
 
-        // 8. CREAR CITA EN AIRTABLE
-        if (datosExtraidos.cita_fecha && 
-            datosExtraidos.cita_fecha !== "..." && 
-            datosExtraidos.cita_hora && 
-            datosExtraidos.cita_hora !== "..." &&
-            AIRTABLE_BASE_ID && 
-            AIRTABLE_TOKEN) {
-          
-          const servicioKey = datosExtraidos.cita_servicio?.toLowerCase();
-          const infoServicio = serviciosMap[servicioKey] || { precio: 0, duracion: 60 };
-          
-          await crearCitaAirtable({
-            telefono: userPhone,
-            nombre: datosExtraidos.nombre || cliente?.nombre,
-            apellido: datosExtraidos.apellido || cliente?.apellido,
-            esPrimeraVez: esClienteNuevo,
-            fecha: datosExtraidos.cita_fecha,
-            hora: datosExtraidos.cita_hora,
-            servicio: datosExtraidos.cita_servicio,
-            especialista: datosExtraidos.cita_especialista,
-            precio: infoServicio.precio,
-            duracion: infoServicio.duracion,
-            notas: `Agendado por WhatsApp`
-          });
+        // CREAR CITA EN AIRTABLE
+        const tieneDatosCita = datosExtraidos.cita_fecha && 
+                               datosExtraidos.cita_fecha !== "..." &&
+                               datosExtraidos.cita_hora && 
+                               datosExtraidos.cita_hora !== "..." &&
+                               datosExtraidos.cita_servicio && 
+                               datosExtraidos.cita_servicio !== "...";
+
+        if (tieneDatosCita) {
+          // Buscar información del servicio
+          const servicioKey = datosExtraidos.cita_servicio.toLowerCase();
+          const infoServicio = mapaServicios[servicioKey] || { 
+            nombre: datosExtraidos.cita_servicio, 
+            precio: 0, 
+            duracion: 60 
+          };
+
+          // Verificar que tenemos nombre del cliente (nuevo o existente)
+          const nombreParaCita = datosExtraidos.nombre || cliente?.nombre;
+          const apellidoParaCita = datosExtraidos.apellido || cliente?.apellido;
+
+          if (!nombreParaCita) {
+            console.error('❌ Falta nombre del cliente para crear cita');
+          } else if (!validarConfig()) {
+            console.error('❌ Faltan credenciales de Airtable');
+          } else {
+            console.log('📅 Creando cita en Airtable...');
+            
+            citaCreada = await crearCitaAirtable({
+              telefono: userPhone,
+              nombre: nombreParaCita,
+              apellido: apellidoParaCita || '',
+              esPrimeraVez: esNuevo,
+              fecha: datosExtraidos.cita_fecha,
+              hora: datosExtraidos.cita_hora,
+              servicio: infoServicio.nombre,
+              especialista: datosExtraidos.cita_especialista || "Cualquiera disponible",
+              precio: infoServicio.precio,
+              duracion: infoServicio.duracion
+            });
+          }
         }
-      } catch (e) {
-        console.error('❌ Error procesando JSON:', e.message);
+      } catch (error) {
+        console.error('❌ Error procesando JSON:', error.message);
         console.error('JSON problemático:', jsonMatch[1]);
       }
     } else {
       console.log('⚠️ No se encontró bloque DATA_JSON en la respuesta');
     }
 
-    // Limpiar respuesta
-    const cleanReply = fullReply.replace(/DATA_JSON:[\s\S]*?:DATA_JSON/, '').trim();
+    // 8. PREPARAR RESPUESTA FINAL
+    let cleanReply = fullReply.replace(/DATA_JSON:[\s\S]*?:DATA_JSON/, '').trim();
     
-    // Guardar conversación
-    await supabase.from('conversaciones').insert([
-      { telefono: userPhone, rol: 'user', contenido: textoUsuario }, 
-      { telefono: userPhone, rol: 'assistant', contenido: cleanReply }
-    ]);
+    // Agregar confirmación de cita si se creó exitosamente
+    if (citaCreada && !cleanReply.includes('✓') && !cleanReply.includes('confirmada')) {
+      cleanReply += `\n\n✅ ¡Perfecto! Tu cita ha sido registrada. Te esperamos.`;
+    }
 
-    res.setHeader('Content-Type', 'text/xml');
-    return res.status(200).send(`<Response><Message>${cleanReply}</Message></Response>`);
+    // 9. GUARDAR CONVERSACIÓN EN HISTORIAL
+    const { error: errorConv } = await supabase
+      .from('conversaciones')
+      .insert([
+        { telefono: userPhone, rol: 'user', contenido: textoUsuario, tipo: esAudio ? 'audio' : 'texto' }, 
+        { telefono: userPhone, rol: 'assistant', contenido: cleanReply, tipo: 'texto' }
+      ]);
 
-  } catch (err) {
-    console.error('❌ Error general:', err);
-    res.setHeader('Content-Type', 'text/xml');
-    return res.status(200).send('<Response><Message>Hubo un inconveniente técnico, ¿me repites?</Message></Response>');
+    if (errorConv) {
+      console.error('❌ Error guardando conversación:', errorConv);
+    }
+
+    return responderTwilio(res, cleanReply);
+
+  } catch (error) {
+    console.error('❌ Error general:', error.message);
+    console.error('Stack:', error.stack);
+    return responderTwilio(res, "Ups, tuve un problema técnico. ¿Intentamos de nuevo en un momento?");
   }
 }
 
+// ==================== FUNCIONES AUXILIARES ====================
+
+// Helper para responder a Twilio con XML válido
+function responderTwilio(res, mensaje) {
+  // Escapar caracteres XML especiales
+  const mensajeEscapado = mensaje
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+    
+  res.setHeader('Content-Type', 'text/xml');
+  return res.status(200).send(`<Response><Message>${mensajeEscapado}</Message></Response>`);
+}
+
+// Crear cita en Airtable
 async function crearCitaAirtable(datos) {
   try {
-    const nombreCompleto = `${datos.nombre || ''} ${datos.apellido || ''}`.trim();
-    const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}`;
+    const nombreCompleto = `${datos.nombre} ${datos.apellido}`.trim();
+    const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     
-    console.log('🔗 Enviando a Airtable:', url);
-    
-    await axios.post(
+    console.log('🔗 URL Airtable:', url);
+    console.log('📋 Datos a enviar:', {
+      cliente: nombreCompleto,
+      servicio: datos.servicio,
+      fecha: datos.fecha,
+      hora: datos.hora,
+      primeraVez: datos.esPrimeraVez
+    });
+
+    const response = await axios.post(
       url,
       {
         records: [{
           fields: {
-            "Cliente": nombreCompleto || "Sin nombre",
-            "Servicio": datos.servicio || "No especificado",
-            "Fecha": datos.fecha,
-            "Especialista": datos.especialista || "No asignado",
+            "Cliente": nombreCompleto,
+            "Servicio": datos.servicio,
+            "Fecha": datos.fecha, // Formato YYYY-MM-DD
+            "Especialista": datos.especialista,
             "Teléfono": datos.telefono,
             "Estado": "Confirmada",
-            "Notas de la cita": datos.notas,
+            "Notas de la cita": `Agendado por WhatsApp Bot`,
             "Email de cliente": "",
             "¿Es primera vez?": datos.esPrimeraVez ? "Sí" : "No",
             "Cliente VIP": "No",
             "Duración estimada (minutos)": parseInt(datos.duracion) || 60,
             "Importe estimado": parseFloat(datos.precio) || 0,
-            "Observaciones de confirmación": new Date().toLocaleString('es-ES')
+            "Observaciones de confirmación": `Creada: ${new Date().toLocaleString('es-ES')}`
           }
         }]
       },
       {
         headers: {
-          'Authorization': `Bearer ${AIRTABLE_TOKEN}`,
+          'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`,
           'Content-Type': 'application/json'
-        }
+        },
+        timeout: 10000
       }
     );
     
-    console.log('✅ Cita creada en Airtable');
+    console.log('✅ Cita creada en Airtable. ID:', response.data.records[0].id);
+    return true;
+    
   } catch (error) {
-    console.error('❌ Error Airtable:', error.response?.data || error.message);
+    console.error('❌ Error creando cita en Airtable:');
+    console.error('Status:', error.response?.status);
+    console.error('Error:', error.response?.data?.error || error.message);
+    
+    if (error.response?.status === 404) {
+      console.error('💡 Verifica que AIRTABLE_BASE_ID y AIRTABLE_TABLE_NAME sean correctos');
+    }
+    if (error.response?.status === 403) {
+      console.error('💡 Verifica que el AIRTABLE_TOKEN tenga permisos de escritura');
+    }
+    
+    return false;
   }
 }
