@@ -3,17 +3,9 @@ import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// CORREGIDO: Usando AIRTABLE_TOKEN (no API_KEY) según tus variables
 const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
-const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN; // ← Cambiado de API_KEY a TOKEN
+const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN;
 const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || 'Citas';
-
-// Validación crítica
-if (!AIRTABLE_BASE_ID || !AIRTABLE_TOKEN) {
-  console.error('❌ ERROR CRÍTICO: Faltan variables de entorno de Airtable');
-  console.error('Base ID:', AIRTABLE_BASE_ID ? '✓' : '✗ FALTA');
-  console.error('Token:', AIRTABLE_TOKEN ? '✓' : '✗ FALTA');
-}
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(200).send('<Response></Response>');
@@ -38,36 +30,20 @@ export default async function handler(req, res) {
       textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
     }
 
-    // 2. CARGAR CLIENTE EXISTENTE Y DETERMINAR SI ES PRIMERA VEZ
-    const { data: clienteExistente } = await supabase
-      .from('clientes')
-      .select('*')
-      .eq('telefono', userPhone)
-      .maybeSingle();
-
-    const esPrimeraVez = !clienteExistente;
-
-    // 3. DETECCIÓN PREVENTIVA DE DATOS
-    const palabras = textoUsuario.split(' ');
-    if (palabras.length >= 2 && esPrimeraVez) {
-      await supabase.from('clientes').upsert({
-        telefono: userPhone,
-        nombre: palabras[0],
-        apellido: palabras[1] || null
-      }, { onConflict: 'telefono' });
-    }
-
-    // 4. RECARGAR CONTEXTO ACTUALIZADO
+    // 2. CARGAR CLIENTE EXISTENTE
     const { data: cliente } = await supabase
       .from('clientes')
       .select('*')
       .eq('telefono', userPhone)
       .single();
-      
+
+    // Determinar estado claramente
+    const esClienteNuevo = !cliente || !cliente.nombre;
+    
+    // 3. CARGAR CATÁLOGO
     const { data: esp } = await supabase.from('especialistas').select('nombre');
     const { data: serv } = await supabase.from('servicios').select('nombre, precio, duracion');
     
-    const primerNombre = cliente?.nombre ? cliente.nombre.split(' ')[0] : 'cliente';
     const listaEsp = esp?.map(e => e.nombre).join(', ') || "nuestro equipo";
     const catalogo = serv?.map(s => `${s.nombre} ($${s.precio})`).join(', ') || "nuestros servicios";
     
@@ -79,31 +55,33 @@ export default async function handler(req, res) {
       };
     });
 
-    // 5. SYSTEM PROMPT COMPLETO
-    const systemPrompt = `Eres la Asistente de Ventas y Agendamiento de AuraSync. Tu objetivo es gestionar citas para salones de belleza con eficiencia impecable y un tono humano, profesional y persuasivo.
+    // 4. SYSTEM PROMPT CON CONTEXTO CLARO
+    const nombreCliente = cliente?.nombre || null;
+    const apellidoCliente = cliente?.apellido || null;
+    
+    const systemPrompt = `Eres la Asistente de AuraSync. ${
+      esClienteNuevo 
+        ? 'Este es un CLIENTE NUEVO (teléfono no registrado). Debes saludar cordialmente y pedir SOLO: Nombre, Apellido y Fecha de Nacimiento antes de agendar.' 
+        : `Este es un CLIENTE EXISTENTE. Su nombre es ${nombreCliente} ${apellidoCliente || ''}. Salúdalo por su nombre (${nombreCliente}) y ofrécele agendar directamente.`
+    }
 
-REGLAS DE INTERACCIÓN:
-1. IDENTIDAD: Nunca digas que eres una inteligencia artificial. Eres la coordinadora digital del local.
-2. CLIENTES NUEVOS: Si el sistema indica que es un cliente nuevo, saluda con calidez y solicita obligatoriamente: Nombre, Apellido y Fecha de Nacimiento. No agendes nada sin estos datos.
-3. CLIENTES EXISTENTES: Saluda por su nombre (${primerNombre}) y ofrece servicios basados en su historial si está disponible.
-4. CIERRE DE VENTAS: Si el cliente duda, resalta los beneficios de los servicios (calidad, experiencia, bienestar). 
-5. MANEJO DE CITAS: Especialistas disponibles: ${listaEsp}. Servicios: ${catalogo}.
-6. CONCISIÓN: Mantén las respuestas breves y directas para WhatsApp.
+DATOS DEL LOCAL:
+- Especialistas: ${listaEsp}
+- Servicios: ${catalogo}
 
-FORMATO DE FECHAS OBLIGATORIO (CRÍTICO PARA EL SISTEMA):
-Cuando el usuario confirme una fecha y hora para su cita, debes extraer y formatear los datos EXACTAMENTE así:
-- cita_fecha: Formato YYYY-MM-DD (ejemplo: 2026-03-30 para el 30 de marzo de 2026)
-- cita_hora: Formato HH:MM en 24 horas (ejemplo: 14:30 para las 2:30 PM, 09:00 para las 9:00 AM)
+REGLAS:
+1. Nunca digas que eres una IA. Eres la coordinadora del salón.
+2. ${esClienteNuevo ? 'NO agendes nada hasta obtener Nombre, Apellido y Fecha de Nacimiento.' : 'Ofrece agendar directamente, usa su nombre en la conversación.'}
+3. Mantén respuestas breves para WhatsApp.
 
-Ejemplos de conversión:
-- "mañana a las 3 de la tarde" → cita_fecha: "2026-03-28", cita_hora: "15:00"
-- "el lunes a las 10 de la mañana" → cita_fecha: "2026-03-30", cita_hora: "10:00"
+FORMATO FECHAS:
+- cita_fecha: YYYY-MM-DD (ej: 2026-03-27)
+- cita_hora: HH:MM (ej: 14:30)
 
-INSTRUCCIÓN TÉCNICA FINAL: Al final de tu respuesta, agrega SIEMPRE este bloque JSON exacto (rellena con los datos reales si los tienes, usa "..." o null si faltan datos):
-
+AL FINAL agrega SIEMPRE:
 DATA_JSON:{
-  "nombre": "${cliente?.nombre || ''}",
-  "apellido": "${cliente?.apellido || ''}",
+  "nombre": "${nombreCliente || ''}",
+  "apellido": "${apellidoCliente || ''}",
   "fecha_nacimiento": "${cliente?.fecha_nacimiento || ''}",
   "cita_fecha": "...",
   "cita_hora": "...",
@@ -111,7 +89,7 @@ DATA_JSON:{
   "cita_especialista": "..."
 }:DATA_JSON`;
 
-    // 6. RESPUESTA IA
+    // 5. RESPUESTA IA
     const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: "gpt-4o",
       messages: [
@@ -125,65 +103,64 @@ DATA_JSON:{
 
     let fullReply = aiRes.data.choices[0].message.content;
 
-    // 7. PROCESAMIENTO DEL JSON
+    // 6. PROCESAMIENTO JSON Y GUARDADO
     const jsonMatch = fullReply.match(/DATA_JSON:\s*(\{[\s\S]*?\})\s*:DATA_JSON/);
-    let datosExtraidos = {};
     
     if (jsonMatch) {
       try {
-        const jsonLimpio = jsonMatch[1].replace(/\n/g, '').replace(/\s+/g, ' ').trim();
-        datosExtraidos = JSON.parse(jsonLimpio);
+        const jsonLimpio = jsonMatch[1].replace(/\n/g, '').trim();
+        const datosExtraidos = JSON.parse(jsonLimpio);
         
-        // Actualizar Supabase si hay datos personales nuevos
-        if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && datosExtraidos.nombre !== "") {
+        // Solo guardar datos personales si son válidos (no "..." y no vacíos)
+        if (datosExtraidos.nombre && 
+            datosExtraidos.nombre !== "..." && 
+            datosExtraidos.nombre !== "" &&
+            datosExtraidos.apellido && 
+            datosExtraidos.apellido !== "...") {
+          
           await supabase.from('clientes').upsert({
             telefono: userPhone,
             nombre: datosExtraidos.nombre.trim(),
-            apellido: (datosExtraidos.apellido && datosExtraidos.apellido !== "..." && datosExtraidos.apellido !== "") 
-              ? datosExtraidos.apellido.trim() 
-              : cliente?.apellido,
-            fecha_nacimiento: (datosExtraidos.fecha_nacimiento && datosExtraidos.fecha_nacimiento !== "..." && datosExtraidos.fecha_nacimiento !== "")
+            apellido: datosExtraidos.apellido.trim(),
+            fecha_nacimiento: (datosExtraidos.fecha_nacimiento && datosExtraidos.fecha_nacimiento !== "...") 
               ? datosExtraidos.fecha_nacimiento 
-              : cliente?.fecha_nacimiento
+              : null
           }, { onConflict: 'telefono' });
         }
 
-        // 8. CREAR CITA EN AIRTABLE
+        // Crear cita en Airtable si hay datos completos
         if (datosExtraidos.cita_fecha && 
             datosExtraidos.cita_fecha !== "..." && 
             datosExtraidos.cita_hora && 
-            datosExtraidos.cita_hora !== "...") {
+            datosExtraidos.cita_hora !== "..." &&
+            AIRTABLE_BASE_ID && 
+            AIRTABLE_TOKEN) {
           
-          if (!AIRTABLE_BASE_ID || !AIRTABLE_TOKEN) {
-            console.error('❌ No se puede crear cita: Faltan credenciales de Airtable');
-          } else {
-            const servicioKey = datosExtraidos.cita_servicio?.toLowerCase();
-            const infoServicio = serviciosMap[servicioKey] || { precio: 0, duracion: 60 };
-            
-            await crearCitaAirtable({
-              telefono: userPhone,
-              nombre: datosExtraidos.nombre || cliente?.nombre,
-              apellido: datosExtraidos.apellido || cliente?.apellido,
-              esPrimeraVez: esPrimeraVez,
-              fecha: datosExtraidos.cita_fecha,
-              hora: datosExtraidos.cita_hora,
-              servicio: datosExtraidos.cita_servicio || 'No especificado',
-              especialista: datosExtraidos.cita_especialista || 'No asignado',
-              precio: infoServicio.precio,
-              duracion: infoServicio.duracion,
-              notas: `Cita agendada vía WhatsApp. Mensaje original: "${textoUsuario.substring(0, 200)}"`
-            });
-          }
+          const servicioKey = datosExtraidos.cita_servicio?.toLowerCase();
+          const infoServicio = serviciosMap[servicioKey] || { precio: 0, duracion: 60 };
+          
+          await crearCitaAirtable({
+            telefono: userPhone,
+            nombre: datosExtraidos.nombre || cliente?.nombre,
+            apellido: datosExtraidos.apellido || cliente?.apellido,
+            esPrimeraVez: esClienteNuevo,
+            fecha: datosExtraidos.cita_fecha,
+            hora: datosExtraidos.cita_hora,
+            servicio: datosExtraidos.cita_servicio,
+            especialista: datosExtraidos.cita_especialista,
+            precio: infoServicio.precio,
+            duracion: infoServicio.duracion,
+            notas: `Agendado por WhatsApp`
+          });
         }
       } catch (e) {
-        console.error('❌ Error procesando JSON:', e);
+        console.error('Error procesando:', e);
       }
     }
 
-    // Limpiar respuesta
+    // Limpiar y enviar respuesta
     const cleanReply = fullReply.replace(/DATA_JSON:[\s\S]*?:DATA_JSON/, '').trim();
     
-    // 9. GUARDAR CONVERSACIÓN
     await supabase.from('conversaciones').insert([
       { telefono: userPhone, rol: 'user', contenido: textoUsuario }, 
       { telefono: userPhone, rol: 'assistant', contenido: cleanReply }
@@ -193,59 +170,48 @@ DATA_JSON:{
     return res.status(200).send(`<Response><Message>${cleanReply}</Message></Response>`);
 
   } catch (err) {
-    console.error('❌ Error general:', err);
+    console.error('Error:', err);
     res.setHeader('Content-Type', 'text/xml');
-    return res.status(200).send('<Response><Message>AuraSync: Hubo un inconveniente técnico, ¿me repites?</Message></Response>');
+    return res.status(200).send('<Response><Message>Hubo un inconveniente técnico, ¿me repites?</Message></Response>');
   }
 }
 
-// Función auxiliar usando AIRTABLE_TOKEN
 async function crearCitaAirtable(datos) {
   try {
     const nombreCompleto = `${datos.nombre || ''} ${datos.apellido || ''}`.trim();
+    const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}`;
     
-    const duracionNum = parseInt(datos.duracion) || 60;
-    const precioNum = parseFloat(datos.precio) || 0;
-    
-    const tableNameEncoded = encodeURIComponent(AIRTABLE_TABLE_NAME);
-    const url = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${tableNameEncoded}`;
-    
-    console.log('🔗 URL Airtable:', url);
-
-    const fields = {
-      "Cliente": nombreCompleto || "Sin nombre",
-      "Servicio": datos.servicio || "No especificado",
-      "Fecha": datos.fecha,
-      "Especialista": datos.especialista || "No asignado",
-      "Teléfono": datos.telefono,
-      "Estado": "Confirmada",
-      "Notas de la cita": datos.notas || "",
-      "Email de cliente": "",
-      "¿Es primera vez?": datos.esPrimeraVez ? "Sí" : "No",
-      "Cliente VIP": "No",
-      "Duración estimada (minutos)": duracionNum,
-      "Importe estimado": precioNum,
-      "Observaciones de confirmación": `Agendado el ${new Date().toLocaleDateString('es-ES')}`
-    };
-
-    console.log('📤 Enviando a Airtable...');
-
-    const response = await axios.post(
+    await axios.post(
       url,
-      { records: [{ fields }] },
+      {
+        records: [{
+          fields: {
+            "Cliente": nombreCompleto,
+            "Servicio": datos.servicio || "No especificado",
+            "Fecha": datos.fecha,
+            "Especialista": datos.especialista || "No asignado",
+            "Teléfono": datos.telefono,
+            "Estado": "Confirmada",
+            "Notas de la cita": datos.notas,
+            "Email de cliente": "",
+            "¿Es primera vez?": datos.esPrimeraVez ? "Sí" : "No",
+            "Cliente VIP": "No",
+            "Duración estimada (minutos)": parseInt(datos.duracion) || 60,
+            "Importe estimado": parseFloat(datos.precio) || 0,
+            "Observaciones de confirmación": new Date().toLocaleString('es-ES')
+          }
+        }]
+      },
       {
         headers: {
-          'Authorization': `Bearer ${AIRTABLE_TOKEN}`, // ← Usando TOKEN aquí
+          'Authorization': `Bearer ${AIRTABLE_TOKEN}`,
           'Content-Type': 'application/json'
         }
       }
     );
     
-    console.log('✅ Cita creada en Airtable ID:', response.data.records[0].id);
-    return response.data;
-    
+    console.log('✅ Cita creada en Airtable');
   } catch (error) {
-    console.error('❌ ERROR AIRTABLE:', error.response?.status, error.response?.data);
-    return null;
+    console.error('❌ Error Airtable:', error.response?.data || error.message);
   }
 }
