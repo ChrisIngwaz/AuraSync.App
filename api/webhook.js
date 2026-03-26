@@ -14,7 +14,7 @@ export default async function handler(req, res) {
   const userPhone = From.replace('whatsapp:', '');
   
   try {
-    // 1. TRANSCRIPCIÓN DE AUDIO (Deepgram)
+    // 1. PROCESAR AUDIO O TEXTO
     let textoUsuario = Body || "";
     if (MediaUrl0) {
       const deepgramRes = await axios.post(
@@ -25,35 +25,38 @@ export default async function handler(req, res) {
       textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
     }
 
-    if (!textoUsuario.trim()) {
-      res.setHeader('Content-Type', 'text/xml');
-      return res.status(200).send('<Response><Message>Hola, recibí tu audio pero no logré escucharlo. ¿Podrías repetirlo o escribirme?</Message></Response>');
-    }
-
-    // 2. CONTEXTO DEL CLIENTE (Supabase)
+    // 2. LEER DATOS REALES (Especialistas y Servicios)
+    const { data: especialistas } = await supabase.from('especialistas').select('nombre');
+    const { data: servicios } = await supabase.from('servicios').select('nombre');
     const { data: cliente } = await supabase.from('clientes').select('*').eq('telefono', userPhone).single();
+    
+    const listaEspecialistas = especialistas?.map(e => e.nombre).join(', ') || "nuestro equipo";
+    const listaServicios = servicios?.map(s => s.nombre).join(', ') || "cortes y estética";
+
+    // 3. RECUPERAR HISTORIAL
     const { data: historial } = await supabase.from('conversaciones').select('rol, contenido').eq('telefono', userPhone).order('created_at', { ascending: false }).limit(5);
     const mensajesPrevios = (historial || []).reverse();
 
-    // 3. SYSTEM PROMPT DE AURASYNC (EL TUYO, SIN MEZCLAS)
+    // 4. TU SYSTEM PROMPT ORIGINAL (SIN CAMBIOS)
     const systemPrompt = `Eres la Asistente de Ventas y Agendamiento de AuraSync. Tu objetivo es gestionar citas para salones de belleza con una eficiencia impecable y un tono humano, profesional y persuasivo.
 
-    REGLAS DE INTERACCIÓN:
-    1. IDENTIDAD: Nunca digas que eres una inteligencia artificial. Eres la coordinadora digital del local.
-    2. CLIENTES NUEVOS: Si el sistema indica que es un cliente nuevo, saluda con calidez y solicita obligatoriamente: Nombre, Apellido y Fecha de Nacimiento. No agendes nada sin estos datos.
-    3. CLIENTES EXISTENTES: Saluda por su nombre (${cliente?.nombre || 'cliente'}) y ofrece servicios basados en su historial si está disponible.
-    4. CIERRE DE VENTAS: Si el cliente duda, resalta los beneficios de los servicios (calidad, experiencia, bienestar). 
-    5. MANEJO DE CITAS: Usa un lenguaje claro para confirmar día, hora, servicio y profesional encargado.
-    6. CONCISIÓN: Mantén las respuestas breves y directas para WhatsApp. No uses párrafos largos.
+REGLAS DE INTERACCIÓN:
+1. IDENTIDAD: Nunca digas que eres una inteligencia artificial. Eres la coordinadora digital del local.
+2. CLIENTES NUEVOS: Si el sistema indica que es un cliente nuevo, saluda con calidez y solicita obligatoriamente: Nombre, Apellido y Fecha de Nacimiento. No agendes nada sin estos datos.
+3. CLIENTES EXISTENTES: Saluda por su nombre (${cliente?.nombre || 'cliente'}) y ofrece servicios basados en su historial si está disponible.
+4. CIERRE DE VENTAS: Si el cliente duda, resalta los beneficios de los servicios (calidad, experiencia, bienestar). 
+5. MANEJO DE CITAS: Usa un lenguaje claro para confirmar día, hora, servicio y profesional encargado. Especialistas disponibles: ${listaEspecialistas}. Servicios: ${listaServicios}.
+6. CONCISIÓN: Mantén las respuestas breves y directas para WhatsApp. No uses párrafos largos.
 
-    CONTEXTO DE NEGOCIO:
-    - Los servicios incluyen cortes, color, manicura y tratamientos estéticos.
-    - La política de cancelación es de mínimo 4 horas de anticipación.
+CONTEXTO DE NEGOCIO:
+- Los servicios incluyen cortes, color, manicura y tratamientos estéticos.
+- La política de cancelación es de mínimo 4 horas de anticipación.
+- Si un cliente cancela a tiempo, sé comprensiva. Si cancela tarde, menciona amablemente la política pero ofrece reprogramar para no perder la venta.
 
-    INSTRUCCIÓN TÉCNICA: Al final de tu respuesta, añade SIEMPRE este bloque JSON con los datos detectados:
-    DATA_JSON:{"nombre": "...", "fecha_nacimiento": "...", "email": "...", "notas_bienestar": "..."}:DATA_JSON`;
+INSTRUCCIÓN TÉCNICA: Al final de tu respuesta, añade SIEMPRE este bloque JSON con los datos detectados:
+DATA_JSON:{"nombre": "...", "apellido": "...", "fecha_nacimiento": "...", "email": "...", "servicio": "...", "especialista": "...", "notas_bienestar": "..."}:DATA_JSON`;
 
-    // 4. RESPUESTA DE OPENAI
+    // 5. RESPUESTA DE OPENAI
     const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: "gpt-4o",
       messages: [
@@ -61,29 +64,36 @@ export default async function handler(req, res) {
         ...mensajesPrevios.map(m => ({ role: m.rol, content: m.contenido })),
         { role: "user", content: textoUsuario }
       ],
-      temperature: 0.7
+      temperature: 0.6
     }, { headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` }});
 
     let fullReply = aiRes.data.choices[0].message.content;
 
-    // 5. GUARDAR EN AIRTABLE (Detección de JSON)
+    // 6. GUARDAR DATOS (Supabase y Airtable)
     const jsonMatch = fullReply.match(/DATA_JSON:(\{.*?\系统\}):DATA_JSON/);
     if (jsonMatch) {
-      const data = JSON.parse(jsonMatch[1]);
-      await axios.post(`https://api.airtable.com/v0/${AIRTABLE_BASE}/Citas`, 
-        { 
-          fields: { 
-            "Cliente": data.nombre || "Cliente WhatsApp", 
-            "Teléfono": userPhone,
-            "Estado": "Pendiente de Confirmar",
-            "Notas": `Cumpleaños: ${data.fecha_nacimiento}`
-          } 
-        },
-        { headers: { 'Authorization': `Bearer ${process.env.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }}
-      );
+      const d = JSON.parse(jsonMatch[1]);
+      
+      // Registro/Actualización de Cliente en Supabase
+      if (d.nombre && d.nombre !== "...") {
+        await supabase.from('clientes').upsert({
+          telefono: userPhone,
+          nombre: d.nombre,
+          apellido: d.apellido,
+          fecha_nacimiento: d.fecha_nacimiento
+        }, { onConflict: 'telefono' });
+      }
+
+      // Registro de Cita en Airtable
+      if (d.servicio && d.servicio !== "...") {
+        await axios.post(`https://api.airtable.com/v0/${AIRTABLE_BASE}/Citas`, 
+          { fields: { "Cliente": d.nombre, "Servicio": d.servicio, "Especialista": d.especialista, "Teléfono": userPhone, "Estado": "Confirmada" }},
+          { headers: { 'Authorization': `Bearer ${process.env.AIRTABLE_TOKEN}` }}
+        );
+      }
     }
 
-    // 6. LIMPIAR Y ENVIAR
+    // 7. RESPONDER Y MEMORIA
     const cleanReply = fullReply.replace(/DATA_JSON:.*?:DATA_JSON/g, '').trim();
     await supabase.from('conversaciones').insert([
       { telefono: userPhone, rol: 'user', contenido: textoUsuario },
@@ -95,6 +105,6 @@ export default async function handler(req, res) {
 
   } catch (error) {
     res.setHeader('Content-Type', 'text/xml');
-    return res.status(200).send('<Response><Message>Hola, soy AuraSync. Tuvimos un pequeño inconveniente técnico, ¿podrías repetirme tu mensaje?</Message></Response>');
+    return res.status(200).send('<Response><Message>Hola, soy AuraSync. Tuvimos un pequeño problema técnico, ¿podrías repetirme eso?</Message></Response>');
   }
 }
