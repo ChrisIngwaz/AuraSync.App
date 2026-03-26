@@ -58,23 +58,31 @@ DATA_JSON:{"nombre": "...", "apellido": "...", "fecha_nacimiento": "...", "email
 
     let fullReply = aiRes.data.choices[0].message.content;
 
-    // 5. REGISTRO FORZADO (Aquí es donde se arregla la amnesia)
+    // 5. REGISTRO DE DATOS (REFORZADO)
     const jsonMatch = fullReply.match(/DATA_JSON:(\{.*?\系统\}):DATA_JSON/s);
     if (jsonMatch) {
       try {
         const d = JSON.parse(jsonMatch[1]);
         
-        // Si la IA detectó un nombre real, lo guardamos DE INMEDIATO
+        // REGLA DE ORO: Si detectamos nombre, registramos sí o sí
         if (d.nombre && d.nombre !== "...") {
-          await supabase.from('clientes').upsert({
-            telefono: userPhone,
-            nombre: d.nombre.trim(),
-            apellido: (d.apellido && d.apellido !== "...") ? d.apellido.trim() : (clienteExistente?.apellido || null),
-            fecha_nacimiento: (d.fecha_nacimiento && d.fecha_nacimiento !== "...") ? d.fecha_nacimiento : (clienteExistente?.fecha_nacimiento || null),
-            email: (d.email && d.email !== "...") ? d.email : (clienteExistente?.email || null)
-          }, { onConflict: 'telefono' });
+          const { error: saveError } = await supabase
+            .from('clientes')
+            .upsert({
+              telefono: userPhone,
+              nombre: d.nombre.trim(),
+              apellido: d.apellido !== "..." ? d.apellido.trim() : null,
+              fecha_nacimiento: d.fecha_nacimiento !== "..." ? d.fecha_nacimiento : null,
+              email: d.email !== "..." ? d.email : null
+            }, { onConflict: 'telefono' });
+
+          if (saveError) {
+            console.error("Supabase Save Error:", saveError.message);
+          }
         }
-      } catch (e) { console.error("Error al procesar JSON"); }
+      } catch (e) {
+        console.error("JSON Parsing Error:", e.message);
+      }
     }
 
     // 6. RESPUESTA Y MEMORIA
