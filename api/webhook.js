@@ -18,25 +18,24 @@ export default async function handler(req, res) {
       textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
     }
 
-    // 2. CONTEXTO REAL: Traemos Especialistas y Servicios con PRECIOS
+    // 2. CONTEXTO REAL (Sincronización con Supabase)
     const { data: clienteExistente } = await supabase.from('clientes').select('*').eq('telefono', userPhone).maybeSingle();
     const { data: esp } = await supabase.from('especialistas').select('nombre');
     const { data: serv } = await supabase.from('servicios').select('nombre, precio');
     
+    // Si ya existe en la DB, usamos su nombre. Si no, es "NUEVO".
+    const estadoCliente = clienteExistente?.nombre ? "EXISTENTE" : "NUEVO";
     const primerNombre = clienteExistente?.nombre ? clienteExistente.nombre.split(' ')[0] : 'cliente';
     
-    // Formateamos la lista de especialistas
-    const listaEsp = esp?.map(e => e.nombre).join(', ') || "nuestro equipo experto";
-    
-    // Formateamos el catálogo con precios
-    const catalogoPrecios = serv?.map(s => `${s.nombre}: $${s.precio}`).join(', ') || "nuestros servicios de estética";
+    const listaEsp = esp?.map(e => e.nombre).join(', ') || "nuestro equipo";
+    const catalogoPrecios = serv?.map(s => `${s.nombre} ($${s.precio})`).join(', ') || "nuestros servicios";
 
-    // 3. TU SYSTEM PROMPT ORIGINAL (SIN CAMBIOS)
+    // 3. TU SYSTEM PROMPT ORIGINAL (INTOCABLE)
     const systemPrompt = `Eres la Asistente de Ventas y Agendamiento de AuraSync. Tu objetivo es gestionar citas para salones de belleza con una eficiencia impecable y un tono humano, profesional y persuasivo.
 
 REGLAS DE INTERACCIÓN:
 1. IDENTIDAD: Nunca digas que eres una inteligencia artificial. Eres la coordinadora digital del local.
-2. CLIENTES NUEVOS: Si el sistema indica que es un cliente nuevo, saluda con calidez y solicita obligatoriamente: Nombre, Apellido y Fecha de Nacimiento. No agendes nada sin estos datos.
+2. CLIENTES NUEVOS: Si el sistema indica que es un cliente nuevo (${estadoCliente}), saluda con calidez y solicita obligatoriamente: Nombre, Apellido y Fecha de Nacimiento. No agendes nada sin estos datos.
 3. CLIENTES EXISTENTES: Saluda por su nombre (${primerNombre}) y ofrece servicios basados en su historial si está disponible.
 4. CIERRE DE VENTAS: Si el cliente duda, resalta los beneficios de los servicios (calidad, experiencia, bienestar). 
 5. MANEJO DE CITAS: Usa un lenguaje claro para confirmar día, hora, servicio y profesional encargado. Especialistas disponibles: ${listaEsp}. Servicios y Precios: ${catalogoPrecios}.
@@ -54,26 +53,28 @@ DATA_JSON:{"nombre": "...", "apellido": "...", "fecha_nacimiento": "...", "email
     const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: "gpt-4o",
       messages: [{ role: "system", content: systemPrompt }, { role: "user", content: textoUsuario }],
-      temperature: 0.4
+      temperature: 0.3
     }, { headers: { 'Authorization': `Bearer ${process.env.OPENAI_API_KEY}` }});
 
     let fullReply = aiRes.data.choices[0].message.content;
 
-    // 5. REGISTRO EN SUPABASE (Asegúrate de tener la columna 'apellido')
+    // 5. REGISTRO FORZADO (Aquí es donde se arregla la amnesia)
     const jsonMatch = fullReply.match(/DATA_JSON:(\{.*?\系统\}):DATA_JSON/s);
     if (jsonMatch) {
       try {
         const d = JSON.parse(jsonMatch[1]);
-        if (d.nombre && d.nombre !== "..." && d.nombre.trim() !== "") {
+        
+        // Si la IA detectó un nombre real, lo guardamos DE INMEDIATO
+        if (d.nombre && d.nombre !== "...") {
           await supabase.from('clientes').upsert({
             telefono: userPhone,
             nombre: d.nombre.trim(),
-            apellido: (d.apellido && d.apellido !== "...") ? d.apellido.trim() : null,
-            fecha_nacimiento: (d.fecha_nacimiento && d.fecha_nacimiento !== "...") ? d.fecha_nacimiento : null,
-            email: (d.email && d.email !== "...") ? d.email : null
+            apellido: (d.apellido && d.apellido !== "...") ? d.apellido.trim() : (clienteExistente?.apellido || null),
+            fecha_nacimiento: (d.fecha_nacimiento && d.fecha_nacimiento !== "...") ? d.fecha_nacimiento : (clienteExistente?.fecha_nacimiento || null),
+            email: (d.email && d.email !== "...") ? d.email : (clienteExistente?.email || null)
           }, { onConflict: 'telefono' });
         }
-      } catch (e) { console.error("Error en JSON"); }
+      } catch (e) { console.error("Error al procesar JSON"); }
     }
 
     // 6. RESPUESTA Y MEMORIA
