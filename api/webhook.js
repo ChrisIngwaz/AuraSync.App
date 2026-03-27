@@ -67,7 +67,7 @@ export default async function handler(req, res) {
               'Authorization': `Token ${CONFIG.DEEPGRAM_API_KEY}`, 
               'Content-Type': 'application/json' 
             },
-            timeout: 15000 // 15 segundos para audios largos
+            timeout: 15000
           }
         );
         
@@ -87,11 +87,11 @@ export default async function handler(req, res) {
     }
 
     // 2. CARGAR CONTEXTO DEL CLIENTE Y HISTORIAL
-    const { data: cliente, error: errorCliente } = await supabase
+    let { data: cliente, error: errorCliente } = await supabase
       .from('clientes')
       .select('*')
       .eq('telefono', userPhone)
-      .maybeSingle(); // maybeSingle no lanza error si no existe
+      .maybeSingle();
 
     if (errorCliente) {
       console.error('Error cargando cliente:', errorCliente);
@@ -205,7 +205,6 @@ DATA_JSON:{
     const messages = [{ role: "system", content: systemPrompt }];
     
     if (historial && historial.length > 0) {
-      // Ordenar cronológicamente (más antiguo primero)
       historial.reverse().forEach(msg => {
         messages.push({ role: msg.rol, content: msg.contenido });
       });
@@ -234,33 +233,33 @@ DATA_JSON:{
     console.log('💬 Respuesta IA:', fullReply.substring(0, 100) + '...');
 
     // 7. PROCESAR JSON Y GUARDAR DATOS
-    // CORRECCIÓN 1: Regex más robusto que capture el JSON incluso con saltos de línea
     const jsonMatch = fullReply.match(/DATA_JSON:\s*(\{[\s\S]*?\})\s*:DATA_JSON/);
     let citaCreada = false;
     let datosExtraidos = {};
+    let datosPersonalesGuardados = false;
     
     if (jsonMatch) {
       try {
-        // CORRECCIÓN 2: Limpiar mejor el JSON
         let jsonStr = jsonMatch[1]
-          .replace(/\\n/g, ' ')  // Eliminar \n literales
-          .replace(/\n/g, ' ')   // Eliminar saltos de línea reales
-          .replace(/\s+/g, ' ')  // Normalizar espacios
-          .replace(/,\s*}/g, '}') // Eliminar trailing commas
+          .replace(/\\n/g, ' ')
+          .replace(/\n/g, ' ')
+          .replace(/\s+/g, ' ')
+          .replace(/,\s*}/g, '}')
           .trim();
           
         datosExtraidos = JSON.parse(jsonStr);
         console.log('📊 Datos extraídos:', JSON.stringify(datosExtraidos, null, 2));
 
-        // GUARDAR DATOS PERSONALES (si es nuevo y tiene datos válidos)
+        // GUARDAR DATOS PERSONALES
         const tieneDatosValidos = datosExtraidos.nombre && 
                                   datosExtraidos.apellido && 
                                   datosExtraidos.nombre !== "..." && 
                                   datosExtraidos.apellido !== "..." &&
-                                  datosExtraidos.nombre.length > 1;
+                                  datosExtraidos.nombre.length > 1 &&
+                                  datosExtraidos.apellido.length > 1;
 
         if (esNuevo && tieneDatosValidos) {
-          console.log('💾 Guardando nuevo cliente en Supabase...');
+          console.log('💾 Guardando nuevo cliente...');
           
           const { error: errorUpsert } = await supabase
             .from('clientes')
@@ -268,7 +267,7 @@ DATA_JSON:{
               telefono: userPhone,
               nombre: datosExtraidos.nombre.trim(),
               apellido: datosExtraidos.apellido.trim(),
-              fecha_nacimiento: (datosExtraidos.fecha_nacimiento && datosExtraidos.fecha_nacimiento !== "...") 
+              fecha_nacimiento: (datosExtraidos.fecha_nacimiento && datosExtraidos.fecha_nacimiento !== "..." && datosExtraidos.fecha_nacimiento.match(/^\d{4}-\d{2}-\d{2}$/)) 
                 ? datosExtraidos.fecha_nacimiento 
                 : null,
               created_at: new Date().toISOString()
@@ -276,59 +275,91 @@ DATA_JSON:{
             
           if (errorUpsert) {
             console.error('❌ Error guardando cliente:', errorUpsert);
+            datosPersonalesGuardados = false;
           } else {
             console.log('✅ Cliente guardado en Supabase');
+            datosPersonalesGuardados = true;
+            // Recargar cliente para tener los datos actualizados
+            cliente = { 
+              nombre: datosExtraidos.nombre.trim(), 
+              apellido: datosExtraidos.apellido.trim() 
+            };
           }
+        } else if (!esNuevo) {
+          datosPersonalesGuardados = true;
         }
 
-        // CREAR CITA EN AIRTABLE
-        const tieneDatosCita = datosExtraidos.cita_fecha && 
-                               datosExtraidos.cita_fecha !== "..." &&
-                               datosExtraidos.cita_hora && 
-                               datosExtraidos.cita_hora !== "..." &&
-                               datosExtraidos.cita_servicio && 
-                               datosExtraidos.cita_servicio !== "...";
+        // VALIDACIÓN ESTRICTA ANTES DE CREAR CITA EN AIRTABLE
+        // 1. Verificar que tenemos fecha válida (formato real YYYY-MM-DD, no placeholder)
+        const fechaValida = datosExtraidos.cita_fecha && 
+                           datosExtraidos.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/);
+        
+        // 2. Verificar hora válida (HH:MM)
+        const horaValida = datosExtraidos.cita_hora && 
+                          datosExtraidos.cita_hora.match(/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/);
+        
+        // 3. Verificar que el usuario realmente quiso agendar (intención)
+        const textoLower = textoUsuario.toLowerCase();
+        const intencionAgendar = /(quiero|agendar|cita|reservar|pedir|sacar|hacer|mañana|hoy|pasado|lunes|martes|miércoles|jueves|viernes|sábado|domingo|\d{1,2}:\d{2})/.test(textoLower);
+        
+        // 4. Verificar servicio válido
+        const servicioValido = datosExtraidos.cita_servicio && 
+                              datosExtraidos.cita_servicio !== "..." &&
+                              datosExtraidos.cita_servicio.length > 2;
 
-        if (tieneDatosCita) {
-          // Buscar información del servicio
-          const servicioKey = datosExtraidos.cita_servicio.toLowerCase();
-          const infoServicio = mapaServicios[servicioKey] || { 
-            nombre: datosExtraidos.cita_servicio, 
-            precio: 0, 
-            duracion: 60 
-          };
+        console.log('🔍 Validaciones cita:', {
+          fechaValida: !!fechaValida,
+          horaValida: !!horaValida,
+          intencionAgendar: intencionAgendar,
+          servicioValido: servicioValido,
+          datosPersonalesGuardados: datosPersonalesGuardados
+        });
 
-          // Verificar que tenemos nombre del cliente (nuevo o existente)
-          const nombreParaCita = datosExtraidos.nombre || cliente?.nombre;
-          const apellidoParaCita = datosExtraidos.apellido || cliente?.apellido;
-
-          if (!nombreParaCita) {
-            console.error('❌ Falta nombre del cliente para crear cita');
-          } else if (!validarConfig()) {
-            console.error('❌ Faltan credenciales de Airtable');
+        if (fechaValida && horaValida && servicioValido && datosPersonalesGuardados) {
+          if (!intencionAgendar) {
+            console.log('⚠️ Datos de cita presentes pero NO detecté intención de agendar. Omitiendo creación en Airtable.');
           } else {
-            console.log('📅 Creando cita en Airtable...');
-            
-            citaCreada = await crearCitaAirtable({
-              telefono: userPhone,
-              nombre: nombreParaCita,
-              apellido: apellidoParaCita || '',
-              esPrimeraVez: esNuevo,
-              fecha: datosExtraidos.cita_fecha,
-              hora: datosExtraidos.cita_hora,
-              servicio: infoServicio.nombre,
-              especialista: datosExtraidos.cita_especialista || "Cualquiera disponible",
-              precio: infoServicio.precio,
-              duracion: infoServicio.duracion
-            });
+            // Buscar información del servicio
+            const servicioKey = datosExtraidos.cita_servicio.toLowerCase();
+            const infoServicio = mapaServicios[servicioKey] || { 
+              nombre: datosExtraidos.cita_servicio, 
+              precio: 0, 
+              duracion: 60 
+            };
+
+            const nombreParaCita = datosExtraidos.nombre || cliente?.nombre;
+            const apellidoParaCita = datosExtraidos.apellido || cliente?.apellido;
+
+            if (!nombreParaCita || !apellidoParaCita) {
+              console.error('❌ Falta nombre o apellido para crear cita');
+            } else if (!validarConfig()) {
+              console.error('❌ Faltan credenciales de Airtable');
+            } else {
+              console.log('📅 Creando cita en Airtable...');
+              
+              citaCreada = await crearCitaAirtable({
+                telefono: userPhone,
+                nombre: nombreParaCita,
+                apellido: apellidoParaCita,
+                esPrimeraVez: esNuevo,
+                fecha: datosExtraidos.cita_fecha,
+                hora: datosExtraidos.cita_hora,
+                servicio: infoServicio.nombre,
+                especialista: datosExtraidos.cita_especialista || "Cualquiera disponible",
+                precio: infoServicio.precio,
+                duracion: infoServicio.duracion
+              });
+            }
           }
+        } else {
+          console.log('ℹ️ No se creó cita: faltan datos válidos o no hay intención clara');
         }
       } catch (error) {
         console.error('❌ Error procesando JSON:', error.message);
         console.error('JSON problemático:', jsonMatch[1]);
       }
     } else {
-      console.log('⚠️ No se encontró bloque DATA_JSON en la respuesta');
+      console.log('⚠️ No se encontró bloque DATA_JSON');
     }
 
     // 8. PREPARAR RESPUESTA FINAL
@@ -375,67 +406,62 @@ function responderTwilio(res, mensaje) {
   return res.status(200).send(`<Response><Message>${mensajeEscapado}</Message></Response>`);
 }
 
-// Crear cita en Airtable - CORREGIDO: Eliminada columna problemática
+// Crear cita en Airtable - con validaciones y logs detallados
 async function crearCitaAirtable(datos) {
   try {
     const nombreCompleto = `${datos.nombre} ${datos.apellido}`.trim();
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     
-    console.log('🔗 URL Airtable:', url);
-    console.log('📋 Datos a enviar:', {
-      cliente: nombreCompleto,
-      servicio: datos.servicio,
-      fecha: datos.fecha,
-      hora: datos.hora,
-      primeraVez: datos.esPrimeraVez
-    });
+    // Validar que la fecha sea real antes de enviar
+    if (!datos.fecha.match(/^\d{4}-\d{2}-\d{2}$/)) {
+      console.error('❌ Fecha inválida:', datos.fecha);
+      return false;
+    }
 
-    const response = await axios.post(
-      url,
-      {
-        records: [{
-          fields: {
-            "Cliente": nombreCompleto,
-            "Servicio": datos.servicio,
-            "Fecha": datos.fecha,
-            "Especialista": datos.especialista,
-            "Teléfono": datos.telefono,
-            "Estado": "Confirmada",
-            "Notas de la cita": `Agendado por WhatsApp Bot`,
-            "Email de cliente": "",
-            // CORRECCIÓN 3: Eliminada columna "¿Es primera vez?" que daba error 422
-            "Cliente VIP": "No",
-            "Duración estimada (minutos)": parseInt(datos.duracion) || 60,
-            "Importe estimado": parseFloat(datos.precio) || 0,
-            "Observaciones de confirmación": `Creada: ${new Date().toLocaleString('es-ES')}`
-          }
-        }]
+    const payload = {
+      records: [{
+        fields: {
+          "Cliente": nombreCompleto,
+          "Servicio": datos.servicio,
+          "Fecha": datos.fecha,
+          "Especialista": datos.especialista,
+          "Teléfono": datos.telefono,
+          "Estado": "Confirmada",
+          "Notas de la cita": `Agendado por WhatsApp Bot`,
+          "Email de cliente": "",
+          "Cliente VIP": "No",
+          "Duración estimada (minutos)": parseInt(datos.duracion) || 60,
+          "Importe estimado": parseFloat(datos.precio) || 0,
+          "Observaciones de confirmación": `Creada: ${new Date().toLocaleString('es-ES')}`
+        }
+      }]
+    };
+
+    console.log('🔗 URL Airtable:', url);
+    console.log('📋 Payload completo:', JSON.stringify(payload, null, 2));
+
+    const response = await axios.post(url, payload, {
+      headers: {
+        'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`,
+        'Content-Type': 'application/json'
       },
-      {
-        headers: {
-          'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`,
-          'Content-Type': 'application/json'
-        },
-        timeout: 10000
-      }
-    );
+      timeout: 10000
+    });
     
-    console.log('✅ Cita creada en Airtable. ID:', response.data.records[0].id);
+    console.log('✅ Cita creada. ID:', response.data.records[0].id);
     return true;
     
   } catch (error) {
-    console.error('❌ Error creando cita en Airtable:');
+    console.error('❌ Error Airtable detallado:');
     console.error('Status:', error.response?.status);
-    console.error('Error:', error.response?.data?.error || error.message);
+    console.error('Data:', JSON.stringify(error.response?.data, null, 2));
+    console.error('Message:', error.message);
     
-    if (error.response?.status === 404) {
-      console.error('💡 Verifica que AIRTABLE_BASE_ID y AIRTABLE_TABLE_NAME sean correctos');
-    }
-    if (error.response?.status === 403) {
-      console.error('💡 Verifica que el AIRTABLE_TOKEN tenga permisos de escritura');
-    }
     if (error.response?.status === 422) {
-      console.error('💡 Error 422: Verifica que los campos existan en Airtable y tengan el formato correcto');
+      console.error('💡 Error 422: Datos inválidos. Revisa que:');
+      console.error('   - La fecha tenga formato YYYY-MM-DD (ej: 2026-03-27)');
+      console.error('   - El campo Fecha en Airtable sea tipo "Date" o "Single line text"');
+      console.error('   - No haya campos requeridos vacíos en Airtable');
     }
     
     return false;
