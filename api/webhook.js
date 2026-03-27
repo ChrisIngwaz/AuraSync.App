@@ -122,7 +122,6 @@ export default async function handler(req, res) {
     let datosExtraidos = {};
     let citaCreada = false;
     
-    // Busca el patrón DATA_JSON: seguido de la llave {
     const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/);
     
     if (jsonMatch) {
@@ -131,40 +130,44 @@ export default async function handler(req, res) {
         datosExtraidos = JSON.parse(jsonStr);
         console.log('📋 Datos detectados:', datosExtraidos);
 
-        // Guardar/Actualizar cliente solo si hay datos nuevos y no los teníamos
-        if (datosExtraidos.nombre && datosExtraidos.apellido && datosExtraidos.nombre !== "...") {
+        // --- CAMBIO AQUÍ: ACTUALIZACIÓN INMEDIATA ---
+        if (datosExtraidos.nombre && datosExtraidos.nombre !== "...") {
           await supabase.from('clientes').upsert({
             telefono: userPhone,
             nombre: datosExtraidos.nombre.trim(),
-            apellido: datosExtraidos.apellido.trim(),
-            fecha_nacimiento: datosExtraidos.fecha_nacimiento
+            apellido: (datosExtraidos.apellido && datosExtraidos.apellido !== "...") ? datosExtraidos.apellido.trim() : "",
+            fecha_nacimiento: (datosExtraidos.fecha_nacimiento && datosExtraidos.fecha_nacimiento !== "...") ? datosExtraidos.fecha_nacimiento : null
           }, { onConflict: 'telefono' });
+          
+          console.log('✅ Cliente actualizado en Supabase');
+          
+          // Llenamos la variable cliente manualmente para que la cita no salga vacía
+          if (!cliente) cliente = {};
+          cliente.nombre = datosExtraidos.nombre;
+          cliente.apellido = datosExtraidos.apellido !== "..." ? datosExtraidos.apellido : "";
         }
 
         // LÓGICA DE CITA
-        const tieneFecha = datosExtraidos.cita_fecha && datosExtraidos.cita_fecha.includes('-');
-        const tieneHora = datosExtraidos.cita_hora && datosExtraidos.cita_hora.includes(':');
+        const tieneFecha = datosExtraidos.cita_fecha && datosExtraidos.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/);
+        const tieneHora = datosExtraidos.cita_hora && datosExtraidos.cita_hora.match(/^\d{2}:\d{2}$/);
         
-        if (tieneFecha && tieneHora && (cliente?.nombre || datosExtraidos.nombre)) {
-          const nombreFinal = cliente?.nombre || datosExtraidos.nombre;
-          const apellidoFinal = cliente?.apellido || datosExtraidos.apellido;
-          
+        if (tieneFecha && tieneHora && cliente?.nombre) {
           citaCreada = await crearCitaAirtable({
             telefono: userPhone,
-            nombre: nombreFinal,
-            apellido: apellidoFinal,
+            nombre: cliente.nombre,
+            apellido: cliente.apellido || '',
             fecha: datosExtraidos.cita_fecha,
             hora: datosExtraidos.cita_hora,
-            servicio: datosExtraidos.cita_servicio,
-            especialista: datosExtraidos.cita_especialista,
-            precio: 0, 
-            duracion: 60
+            servicio: datosExtraidos.cita_servicio !== "..." ? datosExtraidos.cita_servicio : "Corte de Cabello Premium",
+            especialista: datosExtraidos.cita_especialista !== "..." ? datosExtraidos.cita_especialista : "Cualquiera",
+            precio: mapaServicios[datosExtraidos.cita_servicio?.toLowerCase()]?.precio || 0, 
+            duracion: mapaServicios[datosExtraidos.cita_servicio?.toLowerCase()]?.duracion || 60
           });
         }
       } catch (e) {
         console.error('❌ Error parseando JSON:', e.message);
       }
-          }
+    }
 
     // Limpiar respuesta
     let cleanReply = fullReply.replace(/DATA_JSON[\s\S]*/, '').trim();
