@@ -79,7 +79,7 @@ export default async function handler(req, res) {
     });
 
     // 4. SYSTEM PROMPT - DEFINICIÓN DE AURA (Reforzada)
-    const infoAura = 'Eres Aura, la Asistente Inteligente de AuraSync. Tu único objetivo es gestionar citas y registrar clientes de forma profesional. 
+    const infoAura = 'Eres Aura, la Asistente Inteligente de AuraSync. Tu único objetivo es gestionar citas y registrar clientes de forma profesional.';
 
     const systemPrompt = `${infoAura}
     
