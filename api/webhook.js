@@ -234,16 +234,18 @@ DATA_JSON:{
     console.log('💬 Respuesta IA:', fullReply.substring(0, 100) + '...');
 
     // 7. PROCESAR JSON Y GUARDAR DATOS
+    // CORRECCIÓN 1: Regex más robusto que capture el JSON incluso con saltos de línea
     const jsonMatch = fullReply.match(/DATA_JSON:\s*(\{[\s\S]*?\})\s*:DATA_JSON/);
     let citaCreada = false;
     let datosExtraidos = {};
     
     if (jsonMatch) {
       try {
-        // Limpiar y parsear JSON
+        // CORRECCIÓN 2: Limpiar mejor el JSON
         let jsonStr = jsonMatch[1]
-          .replace(/\n/g, ' ')
-          .replace(/\s+/g, ' ')
+          .replace(/\\n/g, ' ')  // Eliminar \n literales
+          .replace(/\n/g, ' ')   // Eliminar saltos de línea reales
+          .replace(/\s+/g, ' ')  // Normalizar espacios
           .replace(/,\s*}/g, '}') // Eliminar trailing commas
           .trim();
           
@@ -373,7 +375,7 @@ function responderTwilio(res, mensaje) {
   return res.status(200).send(`<Response><Message>${mensajeEscapado}</Message></Response>`);
 }
 
-// Crear cita en Airtable
+// Crear cita en Airtable - CORREGIDO: Eliminada columna problemática
 async function crearCitaAirtable(datos) {
   try {
     const nombreCompleto = `${datos.nombre} ${datos.apellido}`.trim();
@@ -395,13 +397,13 @@ async function crearCitaAirtable(datos) {
           fields: {
             "Cliente": nombreCompleto,
             "Servicio": datos.servicio,
-            "Fecha": datos.fecha, // Formato YYYY-MM-DD
+            "Fecha": datos.fecha,
             "Especialista": datos.especialista,
             "Teléfono": datos.telefono,
             "Estado": "Confirmada",
             "Notas de la cita": `Agendado por WhatsApp Bot`,
             "Email de cliente": "",
-            "¿Es primera vez?": datos.esPrimeraVez ? "Sí" : "No",
+            // CORRECCIÓN 3: Eliminada columna "¿Es primera vez?" que daba error 422
             "Cliente VIP": "No",
             "Duración estimada (minutos)": parseInt(datos.duracion) || 60,
             "Importe estimado": parseFloat(datos.precio) || 0,
@@ -431,6 +433,9 @@ async function crearCitaAirtable(datos) {
     }
     if (error.response?.status === 403) {
       console.error('💡 Verifica que el AIRTABLE_TOKEN tenga permisos de escritura');
+    }
+    if (error.response?.status === 422) {
+      console.error('💡 Error 422: Verifica que los campos existan en Airtable y tengan el formato correcto');
     }
     
     return false;
