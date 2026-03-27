@@ -79,28 +79,28 @@ export default async function handler(req, res) {
     });
 
     // 4. SYSTEM PROMPT - FORZAR JSON AL FINAL
-    const systemPrompt = `Eres Aura de AuraSync. ${esNuevo 
-      ? 'CLIENTE NUEVO. Pide nombre, apellido y fecha de nacimiento.' 
-      : `CLIENTE: ${primerNombre}. Usa solo su nombre.`}
+    const systemPrompt = `Eres Aura de AuraSync, "El 1er mentor 24/7 en el mundo para el bienestar", "El Guardián de la Coherencia del cuerpo humano".
+    
+    CONTEXTO DEL CLIENTE ACTUAL:
+    - Nombre: ${cliente?.nombre || 'Desconocido'}
+    - Apellido: ${cliente?.apellido || 'Desconocido'}
+    - ¿Está registrado?: ${esNuevo ? 'NO. DEBES PEDIR NOMBRE, APELLIDO Y FECHA DE NACIMIENTO.' : 'SÍ. YA TIENES SUS DATOS, NO LOS PIDAS DE NUEVO.'}
 
-Catálogo: ${catalogo}
-Especialistas: ${listaEsp}
+    REGLA CRÍTICA: 
+    Si el nombre es "${primerNombre}", ya lo conoces. Salúdalo por su nombre y pasa directamente a agendar o asesorar. No seas repetitivo.
 
-INSTRUCCIONES:
-- Si pide cita y es nuevo: primero pide datos, luego agenda.
-- Convierte fechas naturales a YYYY-MM-DD y HH:MM automáticamente.
-- Sé breve y natural.
-
-MUY IMPORTANTE - AL FINAL DE TU RESPUESTA DEBES INCLUIR EXACTAMENTE:
-DATA_JSON:{
-  "nombre": "${cliente?.nombre || ''}",
-  "apellido": "${cliente?.apellido || ''}",
-  "fecha_nacimiento": "${cliente?.fecha_nacimiento || ''}",
-  "cita_fecha": "YYYY-MM-DD",
-  "cita_hora": "HH:MM",
-  "cita_servicio": "...",
-  "cita_especialista": "..."
-}`;
+    INSTRUCCIÓN TÉCNICA OBLIGATORIA: 
+    Al final de cada respuesta, sin excepción, añade el bloque JSON con los datos. Si ya tienes el nombre, rellénalo en el JSON.
+    
+    DATA_JSON:{
+      "nombre": "${cliente?.nombre || ''}",
+      "apellido": "${cliente?.apellido || ''}",
+      "fecha_nacimiento": "${cliente?.fecha_nacimiento || ''}",
+      "cita_fecha": "YYYY-MM-DD",
+      "cita_hora": "HH:MM",
+      "cita_servicio": "...",
+      "cita_especialista": "..."
+    }`;
 
     // 5. OPENAI
     const messages = [{ role: "system", content: systemPrompt }];
@@ -118,66 +118,53 @@ DATA_JSON:{
     let fullReply = aiRes.data.choices[0].message.content;
     console.log('🤖:', fullReply.substring(0, 80));
 
-    // 6. EXTRAER JSON (más flexible)
+    // 6. EXTRAER JSON (Súper Reforzado)
     let datosExtraidos = {};
     let citaCreada = false;
     
-    // Buscar cualquier bloque que parezca JSON
-    const jsonMatch = fullReply.match(/DATA_JSON\s*:\s*(\{[\s\S]*?\})(?=\s*$|\s*\n\s*$|:\s*DATA_JSON)/) || 
-                      fullReply.match(/DATA_JSON\s*(\{[\s\S]*?\})\s*$/) ||
-                      fullReply.match(/\{[\s\S]*?"cita_fecha"[\s\S]*?\}/);
+    // Busca el patrón DATA_JSON: seguido de la llave {
+    const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/);
     
     if (jsonMatch) {
       try {
-        let jsonStr = jsonMatch[1] || jsonMatch[0];
-        jsonStr = jsonStr.replace(/\\n/g, ' ').replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+        const jsonStr = jsonMatch[1].trim();
         datosExtraidos = JSON.parse(jsonStr);
-        console.log('📋 Datos:', datosExtraidos);
+        console.log('📋 Datos detectados:', datosExtraidos);
 
-        // Guardar cliente
-        if (esNuevo && datosExtraidos.nombre && datosExtraidos.apellido && 
-            datosExtraidos.nombre !== "..." && datosExtraidos.apellido !== "...") {
+        // Guardar/Actualizar cliente solo si hay datos nuevos y no los teníamos
+        if (datosExtraidos.nombre && datosExtraidos.apellido && datosExtraidos.nombre !== "...") {
           await supabase.from('clientes').upsert({
             telefono: userPhone,
             nombre: datosExtraidos.nombre.trim(),
             apellido: datosExtraidos.apellido.trim(),
-            fecha_nacimiento: datosExtraidos.fecha_nacimiento !== "..." ? datosExtraidos.fecha_nacimiento : null
+            fecha_nacimiento: datosExtraidos.fecha_nacimiento
           }, { onConflict: 'telefono' });
-          console.log('✅ Cliente guardado');
-          
-          // Actualizar cliente para usar en cita
-          cliente = { nombre: datosExtraidos.nombre, apellido: datosExtraidos.apellido };
         }
 
-        // VALIDAR ANTES DE CREAR CITA
-        const fechaValida = datosExtraidos.cita_fecha?.match(/^\d{4}-\d{2}-\d{2}$/);
-        const horaValida = datosExtraidos.cita_hora?.match(/^\d{2}:\d{2}$/);
-        const intencionAgendar = /(quiero|agendar|cita|mañana|hoy|pasado|lunes|martes|miércoles|jueves|viernes|\d{1,2}:\d{2})/.test(textoUsuario.toLowerCase());
+        // LÓGICA DE CITA
+        const tieneFecha = datosExtraidos.cita_fecha && datosExtraidos.cita_fecha.includes('-');
+        const tieneHora = datosExtraidos.cita_hora && datosExtraidos.cita_hora.includes(':');
         
-        if (fechaValida && horaValida && intencionAgendar && cliente?.nombre) {
-          const servKey = datosExtraidos.cita_servicio?.toLowerCase();
-          const infoServ = mapaServicios[servKey] || { nombre: datosExtraidos.cita_servicio, precio: 0, duracion: 60 };
+        if (tieneFecha && tieneHora && (cliente?.nombre || datosExtraidos.nombre)) {
+          const nombreFinal = cliente?.nombre || datosExtraidos.nombre;
+          const apellidoFinal = cliente?.apellido || datosExtraidos.apellido;
           
           citaCreada = await crearCitaAirtable({
             telefono: userPhone,
-            nombre: cliente.nombre,
-            apellido: cliente.apellido || '',
+            nombre: nombreFinal,
+            apellido: apellidoFinal,
             fecha: datosExtraidos.cita_fecha,
             hora: datosExtraidos.cita_hora,
-            servicio: infoServ.nombre,
-            especialista: datosExtraidos.cita_especialista || "Cualquiera",
-            precio: infoServ.precio,
-            duracion: infoServ.duracion
+            servicio: datosExtraidos.cita_servicio,
+            especialista: datosExtraidos.cita_especialista,
+            precio: 0, 
+            duracion: 60
           });
-        } else {
-          console.log('ℹ️ No se crea cita:', {fechaValida, horaValida, intencionAgendar, tieneNombre: !!cliente?.nombre});
         }
       } catch (e) {
-        console.error('❌ Error JSON:', e.message);
+        console.error('❌ Error parseando JSON:', e.message);
       }
-    } else {
-      console.log('⚠️ No se encontró JSON en la respuesta');
-    }
+          }
 
     // Limpiar respuesta
     let cleanReply = fullReply.replace(/DATA_JSON[\s\S]*/, '').trim();
@@ -204,27 +191,26 @@ async function crearCitaAirtable(datos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     
+    // Mapeo EXACTO a tus columnas de Airtable
     const payload = {
       records: [{
         fields: {
           "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
-          "Servicio": datos.servicio,
-          "Fecha": datos.fecha,
-          "Especialista": datos.especialista,
+          "Servicio": datos.servicio || "Corte de Cabello Premium",
+          "Fecha": datos.fecha, // Debe ser YYYY-MM-DD
+          "Especialista": datos.especialista || "Cualquiera",
           "Teléfono": datos.telefono,
           "Estado": "Confirmada",
-          "Notas de la cita": "WhatsApp Bot",
-          "Email de cliente": "",
-          // ELIMINADOS: "Cliente VIP" y "¿Es primera vez?" que dan error 422
+          "Notas de la cita": "Agendado por AuraSync",
+          "Email de cliente": datos.email || "",
           "Duración estimada (minutos)": parseInt(datos.duracion) || 60,
           "Importe estimado": parseFloat(datos.precio) || 0,
-          "Observaciones de confirmación": new Date().toLocaleString('es-ES')
+          "Observaciones de confirmación": `Confirmado el ${new Date().toLocaleString('es-ES')}`
         }
       }]
     };
 
-    console.log('📤 Enviando a Airtable:', JSON.stringify(payload, null, 2));
-    
+    console.log('📤 Enviando a Airtable...');
     const response = await axios.post(url, payload, {
       headers: {
         'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`,
@@ -232,11 +218,12 @@ async function crearCitaAirtable(datos) {
       }
     });
     
-    console.log('✅ Cita creada. ID:', response.data.records[0].id);
+    console.log('✅ Cita en Airtable ID:', response.data.records[0].id);
     return true;
     
   } catch (error) {
-    console.error('❌ Error Airtable:', error.response?.status, error.response?.data?.error?.message || error.message);
+    // Esto te dirá exactamente qué columna está mal en los logs de Vercel
+    console.error('❌ ERROR AIRTABLE:', error.response?.data?.error || error.message);
     return false;
   }
 }
