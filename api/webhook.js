@@ -78,20 +78,32 @@ export default async function handler(req, res) {
       }
     });
 
-    // 4. SYSTEM PROMPT - FORZAR JSON AL FINAL
-    const systemPrompt = `Eres Aura de AuraSync, "El 1er mentor 24/7 en el mundo para el bienestar", "El Guardián de la Coherencia del cuerpo humano".
-    
-    CONTEXTO DEL CLIENTE ACTUAL:
-    - Nombre: ${cliente?.nombre || 'Desconocido'}
-    - Apellido: ${cliente?.apellido || 'Desconocido'}
-    - ¿Está registrado?: ${esNuevo ? 'NO. DEBES PEDIR NOMBRE, APELLIDO Y FECHA DE NACIMIENTO.' : 'SÍ. YA TIENES SUS DATOS, NO LOS PIDAS DE NUEVO.'}
+    // 4. SYSTEM PROMPT - DEFINICIÓN DE AURA (Reforzada)
+    const infoAura = 'Eres Aura de AuraSync, "El 1er mentor 24/7 en el mundo para el bienestar", "El Guardián de la Coherencia del cuerpo humano". Nunca digas que eres una inteligencia artificial.';
 
-    REGLA CRÍTICA: 
-    Si el nombre es "${primerNombre}", ya lo conoces. Salúdalo por su nombre y pasa directamente a agendar o asesorar. No seas repetitivo.
-
-    INSTRUCCIÓN TÉCNICA OBLIGATORIA: 
-    Al final de cada respuesta, sin excepción, añade el bloque JSON con los datos. Si ya tienes el nombre, rellénalo en el JSON.
+    const systemPrompt = `${infoAura}
     
+    [INSTRUCCIÓN CRÍTICA DE IDENTIDAD]
+    - Tu nombre es Aura.
+    - El cliente actual es: ${esNuevo ? 'TOTALMENTE DESCONOCIDO. Es su primera vez.' : primerNombre}.
+    - ${esNuevo 
+      ? 'Como es desconocido, tu saludo debe ser frío pero cordial. Di: "Hola, soy AuraSync. Antes de empezar, necesito tu nombre y apellido."' 
+      : `Como ya lo conoces, salúdalo con calidez por su nombre: "¡Hola ${primerNombre}! Qué alegría verte de nuevo."`}
+
+    CONTEXTO DEL CLIENTE:
+    ${esNuevo 
+      ? 'CLIENTE NUEVO. Tienes prohibido pasar a agendar. Debes solicitar: Nombre, Apellido y Fecha de Nacimiento.' 
+      : `CLIENTE REGISTRADO: ${primerNombre}. Ya tienes sus datos, NO los vuelvas a pedir.`}
+
+    Catálogo: ${catalogo}
+    Especialistas: ${listaEsp}
+
+    INSTRUCCIONES DE AGENDAMIENTO:
+    1. Solo si el cliente ya está registrado (${primerNombre}) puedes proceder a agendar el servicio.
+    2. Si el cliente es nuevo y pide cita, dile amablemente: "Con gusto, pero primero necesito registrar tus datos base."
+    3. Convierte fechas como "mañana" a YYYY-MM-DD.
+
+    MUY IMPORTANTE - AL FINAL DE TU RESPUESTA DEBES INCLUIR EXACTAMENTE:
     DATA_JSON:{
       "nombre": "${cliente?.nombre || ''}",
       "apellido": "${cliente?.apellido || ''}",
@@ -130,8 +142,8 @@ export default async function handler(req, res) {
         datosExtraidos = JSON.parse(jsonStr);
         console.log('📋 Datos detectados:', datosExtraidos);
 
-        // --- CAMBIO AQUÍ: ACTUALIZACIÓN INMEDIATA ---
-        if (datosExtraidos.nombre && datosExtraidos.nombre !== "...") {
+        // Guardar/Actualizar cliente (Actualización inmediata de variables)
+        if (datosExtraidos.nombre && datosExtraidos.apellido && datosExtraidos.nombre !== "...") {
           await supabase.from('clientes').upsert({
             telefono: userPhone,
             nombre: datosExtraidos.nombre.trim(),
@@ -141,28 +153,37 @@ export default async function handler(req, res) {
           
           console.log('✅ Cliente actualizado en Supabase');
           
-          // Llenamos la variable cliente manualmente para que la cita no salga vacía
+          // --- AJUSTE CLAVE: Memoria instantánea ---
+          // Actualizamos las variables localmente para que Airtable y la IA las usen YA
           if (!cliente) cliente = {};
-          cliente.nombre = datosExtraidos.nombre;
-          cliente.apellido = datosExtraidos.apellido !== "..." ? datosExtraidos.apellido : "";
+          cliente.nombre = datosExtraidos.nombre.trim();
+          cliente.apellido = datosExtraidos.apellido !== "..." ? datosExtraidos.apellido.trim() : "";
         }
 
-        // LÓGICA DE CITA
+        // --- AJUSTE CLAVE: Lógica de Cita Blindada ---
+        // Solo intentamos agendar si el JSON tiene fecha/hora Y si el cliente YA TIENE NOMBRE en la base de datos o en el JSON
         const tieneFecha = datosExtraidos.cita_fecha && datosExtraidos.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/);
         const tieneHora = datosExtraidos.cita_hora && datosExtraidos.cita_hora.match(/^\d{2}:\d{2}$/);
         
-        if (tieneFecha && tieneHora && cliente?.nombre) {
-          citaCreada = await crearCitaAirtable({
-            telefono: userPhone,
-            nombre: cliente.nombre,
-            apellido: cliente.apellido || '',
-            fecha: datosExtraidos.cita_fecha,
-            hora: datosExtraidos.cita_hora,
-            servicio: datosExtraidos.cita_servicio !== "..." ? datosExtraidos.cita_servicio : "Corte de Cabello Premium",
-            especialista: datosExtraidos.cita_especialista !== "..." ? datosExtraidos.cita_especialista : "Cualquiera",
-            precio: mapaServicios[datosExtraidos.cita_servicio?.toLowerCase()]?.precio || 0, 
-            duracion: mapaServicios[datosExtraidos.cita_servicio?.toLowerCase()]?.duracion || 60
-          });
+        if (tieneFecha && tieneHora && (cliente?.nombre || datosExtraidos.nombre)) {
+          const nombreFinal = cliente?.nombre || datosExtraidos.nombre.trim();
+          const apellidoFinal = cliente?.apellido || datosExtraidos.apellido.trim();
+          
+          if (nombreFinal) { // Confirmación extra
+            citaCreada = await crearCitaAirtable({
+              telefono: userPhone,
+              nombre: nombreFinal,
+              apellido: apellidoFinal,
+              fecha: datosExtraidos.cita_fecha,
+              hora: datosExtraidos.cita_hora,
+              servicio: datosExtraidos.cita_servicio !== "..." ? datosExtraidos.cita_servicio : "Corte de pelo",
+              especialista: datosExtraidos.cita_especialista !== "..." ? datosExtraidos.cita_especialista : "Asignar disponible",
+              precio: 0, 
+              duracion: 60
+            });
+          }
+        } else {
+          console.log('ℹ️ Cita no creada: faltan datos de fecha/hora o el nombre del cliente sigue siendo null.');
         }
       } catch (e) {
         console.error('❌ Error parseando JSON:', e.message);
@@ -194,18 +215,22 @@ async function crearCitaAirtable(datos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     
-    // Mapeo EXACTO a tus columnas de Airtable
+    // Validación extra: Si el nombre es nulo o vacío, no enviamos nada
+    if (!datos.nombre || datos.nombre.trim() === "") {
+      console.log('⚠️ Airtable: Nombre de cliente vacío, se cancela el envío.');
+      return false;
+    }
+
     const payload = {
       records: [{
         fields: {
           "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
-          "Servicio": datos.servicio || "Corte de Cabello Premium",
+          "Servicio": datos.servicio,
           "Fecha": datos.fecha, // Debe ser YYYY-MM-DD
-          "Especialista": datos.especialista || "Cualquiera",
+          "Especialista": datos.especialista,
           "Teléfono": datos.telefono,
           "Estado": "Confirmada",
           "Notas de la cita": "Agendado por AuraSync",
-          "Email de cliente": datos.email || "",
           "Duración estimada (minutos)": parseInt(datos.duracion) || 60,
           "Importe estimado": parseFloat(datos.precio) || 0,
           "Observaciones de confirmación": `Confirmado el ${new Date().toLocaleString('es-ES')}`
@@ -225,7 +250,6 @@ async function crearCitaAirtable(datos) {
     return true;
     
   } catch (error) {
-    // Esto te dirá exactamente qué columna está mal en los logs de Vercel
     console.error('❌ ERROR AIRTABLE:', error.response?.data?.error || error.message);
     return false;
   }
