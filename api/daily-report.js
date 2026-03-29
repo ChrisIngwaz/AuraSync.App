@@ -9,8 +9,8 @@ const CONFIG = {
   AIRTABLE_TABLE_NAME: process.env.AIRTABLE_TABLE_NAME || 'Citas',
   TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN,
-  TWILIO_PHONE: process.env.TWILIO_PHONE, // Formato 'whatsapp:+123456789'
-  NUMEROS_REPORTE: ['whatsapp:+593995430859'] // Dueño y Admin
+  TWILIO_PHONE: process.env.TWILIO_PHONE,
+  NUMEROS_REPORTE: ['whatsapp:+593995430859']
 };
 
 export default async function handler(req, res) {
