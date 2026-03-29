@@ -50,9 +50,8 @@ export default async function handler(req, res) {
       .maybeSingle();
 
     const esNuevo = !cliente?.nombre;
-    const primerNombre = cliente?.nombre?.split(' ')[0] || null;
 
-    // 3. RECUPERAR HISTORIAL SÓLO SI EL CLIENTE EXISTE (ÉLITE)
+    // 3. RECUPERAR HISTORIAL SÓLO SI EL CLIENTE EXISTE
     let historialFiltrado = [];
     if (!esNuevo) {
       const { data: mensajes } = await supabase
@@ -65,8 +64,6 @@ export default async function handler(req, res) {
       if (mensajes) {
         historialFiltrado = mensajes.reverse();
       }
-    } else {
-      console.log('⚡ Cliente nuevo detectado. Forzando historial vacío para evitar redundancia.');
     }
 
     // 4. DATOS DE NEGOCIO
@@ -87,8 +84,8 @@ export default async function handler(req, res) {
     const systemPrompt = `Tu nombre es Aura, asistente profesional de AuraSync. Tu objetivo es brindar una atención cálida, ejecutiva y humana. No parezcas un software; habla como una persona que conoce su negocio.
 
 [REGLAS DE CONVERSACIÓN]
-1. NATURALIDAD: Responde con empatía. Si el cliente pide una cita, confirma que hay espacio antes de pedir más datos. No uses frases prefabricadas como "permítame hacerle una consulta experta".
-2. ASESORÍA SUTIL: Solo sugiere tratamientos adicionales (como hidratación o cuidado de puntas) si la conversación fluye hacia ello o si el cliente menciona un problema. No lo fuerces al inicio.
+1. NATURALIDAD: Responde con empatía. Si el cliente pide una cita, confirma que hay espacio antes de pedir más datos. No uses frases prefabricadas.
+2. ASESORÍA SUTIL: Solo sugiere tratamientos adicionales si la conversación fluye hacia ello o si el cliente menciona un problema. No lo fuerces al inicio.
 3. ESPECIALISTAS: Si el cliente no menciona a nadie, dile quiénes están disponibles y pregúntale con quién prefiere atenderse. Presenta a Carlos y Anita como tus compañeros expertos.
    * Especialistas: ${listaEsp}.
 4. LENGUAJE: Sofisticado pero cercano. Evita el tono robótico. Eres el brazo derecho del local.
@@ -112,7 +109,6 @@ DATA_JSON:{
     // 6. CONSTRUIR MENSAJES PARA AI
     const messages = [{ role: "system", content: systemPrompt }];
     historialFiltrado.forEach(msg => {
-      // Ajuste de mapeo de nombres de columna si es necesario
       messages.push({ role: msg.rol === 'assistant' ? 'assistant' : 'user', content: msg.contenido });
     });
     messages.push({ role: "user", content: textoUsuario });
@@ -141,12 +137,16 @@ DATA_JSON:{
             apellido: datosExtraidos.apellido || "",
             fecha_nacimiento: datosExtraidos.fecha_nacimiento !== "..." ? datosExtraidos.fecha_nacimiento : null
           }, { onConflict: 'telefono' });
-          cliente = { nombre: datosExtraidos.nombre }; // Actualización local
+          cliente = { nombre: datosExtraidos.nombre, apellido: datosExtraidos.apellido }; 
         }
 
         const tieneFecha = datosExtraidos.cita_fecha && datosExtraidos.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/);
         const tieneHora = datosExtraidos.cita_hora && datosExtraidos.cita_hora.match(/^\d{2}:\d{2}$/);
         
+        // BUSCAR PRECIO EN LOS DATOS CARGADOS DE SUPABASE
+        const servicioDb = servicios?.find(s => s.nombre.toLowerCase() === datosExtraidos.cita_servicio.toLowerCase());
+        const importeEstimado = servicioDb ? servicioDb.precio : 0;
+
         if (tieneFecha && tieneHora && (cliente?.nombre || datosExtraidos.nombre)) {
           citaCreada = await crearCitaAirtable({
             telefono: userPhone,
@@ -156,8 +156,7 @@ DATA_JSON:{
             hora: datosExtraidos.cita_hora,
             servicio: datosExtraidos.cita_servicio !== "..." ? datosExtraidos.cita_servicio : "Servicio",
             especialista: datosExtraidos.cita_especialista !== "..." ? datosExtraidos.cita_especialista : "Asignar",
-            precio: 0, 
-            duracion: 60
+            precio: importeEstimado
           });
         }
       } catch (e) { console.error('Error JSON:', e.message); }
@@ -190,18 +189,16 @@ async function crearCitaAirtable(datos) {
           "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
           "Servicio": datos.servicio,
           "Fecha": datos.fecha,
-          "Hora": datos.hora, // <-- Ahora se envía la hora correctamente
+          "Hora": datos.hora,
           "Especialista": datos.especialista,
           "Teléfono": datos.telefono,
-          "Estado": "Confirmada"
+          "Estado": "Confirmada",
+          "Importe estimado": datos.precio
         }
       }]
     };
-    const res = await axios.post(url, payload, { 
-      headers: { 
-        'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 
-        'Content-Type': 'application/json' 
-      }
+    await axios.post(url, payload, { 
+      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
     });
     return true;
   } catch (error) { 
