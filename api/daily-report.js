@@ -10,7 +10,7 @@ const CONFIG = {
   TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN,
   TWILIO_PHONE: process.env.TWILIO_PHONE, // Formato 'whatsapp:+123456789'
-  NUMEROS_REPORTE: ['whatsapp:+593XXXXXXXXX', 'whatsapp:+593YYYYYYYYY'] // Dueño y Admin
+  NUMEROS_REPORTE: ['whatsapp:+593995430859', 'whatsapp:+593995163184'] // Dueño y Admin
 };
 
 export default async function handler(req, res) {
