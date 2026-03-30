@@ -1,90 +1,93 @@
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
+import qs from 'qs'; // Usaremos esto para formatear correctamente el envío
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 export default async function handler(req, res) {
-  // Configuración interna directa para evitar errores de inicialización
-  const AIRTABLE_BASE_ID = process.env.AIRTABLE_BASE_ID;
-  const AIRTABLE_TOKEN = process.env.AIRTABLE_TOKEN;
-  const AIRTABLE_TABLE_NAME = process.env.AIRTABLE_TABLE_NAME || 'Citas';
-  const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
-  const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-  const TWILIO_PHONE = process.env.TWILIO_PHONE;
+  const {
+    AIRTABLE_BASE_ID,
+    AIRTABLE_TOKEN,
+    AIRTABLE_TABLE_NAME = 'Citas',
+    TWILIO_ACCOUNT_SID,
+    TWILIO_AUTH_TOKEN,
+    TWILIO_PHONE
+  } = process.env;
+
   const NUMEROS_REPORTE = ['whatsapp:+593995430859']; 
 
   try {
     const ahora = new Date();
-    // Fecha hoy en formato YYYY-MM-DD para Ecuador
     const hoyEcuador = ahora.toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' });
 
-    // 1. Obtener citas de hoy desde Airtable
+    // 1. Obtener citas de hoy
     const formula = `IS_SAME({Fecha}, '${hoyEcuador}', 'day')`;
     const airtableUrl = `https://api.airtable.com/v0/${AIRTABLE_BASE_ID}/${encodeURIComponent(AIRTABLE_TABLE_NAME)}?filterByFormula=${encodeURIComponent(formula)}`;
     
-    const response = await axios.get(airtableUrl, {
+    const airtableRes = await axios.get(airtableUrl, {
       headers: { 'Authorization': `Bearer ${AIRTABLE_TOKEN}` }
     });
 
-    const citas = response.data.records || [];
+    const citas = airtableRes.data.records || [];
 
     if (citas.length === 0) {
-      return res.status(200).json({ success: true, message: "No hay citas hoy." });
+      return res.status(200).json({ success: true, message: "Sin citas hoy." });
     }
 
-    // 2. Procesar Datos
-    let totalIngresos = 0;
-    const serviciosCount = {};
-    const especialistasCount = {};
+    // 2. Procesar Balance
+    let total = 0;
+    const servicios = {};
+    const expertos = {};
 
-    citas.forEach(record => {
-      const f = record.fields;
-      totalIngresos += parseFloat(f["Importe estimado"] || 0);
-      if (f.Servicio) serviciosCount[f.Servicio] = (serviciosCount[f.Servicio] || 0) + 1;
-      if (f.Especialista) especialistasCount[f.Especialista] = (especialistasCount[f.Especialista] || 0) + 1;
+    citas.forEach(r => {
+      const f = r.fields;
+      total += parseFloat(f["Importe estimado"] || 0);
+      if (f.Servicio) servicios[f.Servicio] = (servicios[f.Servicio] || 0) + 1;
+      if (f.Especialista) expertos[f.Especialista] = (expertos[f.Especialista] || 0) + 1;
     });
 
-    const servicioMasPedido = Object.keys(serviciosCount).length > 0 
-      ? Object.keys(serviciosCount).reduce((a, b) => serviciosCount[a] > serviciosCount[b] ? a : b) 
-      : "N/A";
-    
-    const topEspecialista = Object.keys(especialistasCount).length > 0 
-      ? Object.keys(especialistasCount).reduce((a, b) => especialistasCount[a] > especialistasCount[b] ? a : b) 
-      : "N/A";
+    const topServicio = Object.keys(servicios).reduce((a, b) => servicios[a] > servicios[b] ? a : b, "N/A");
+    const topExperto = Object.keys(expertos).reduce((a, b) => expertos[a] > expertos[b] ? a : b, "N/A");
 
-    // 3. Formatear Mensaje
-    const fechaTexto = ahora.toLocaleDateString('es-EC', { weekday: 'long', day: 'numeric', month: 'long' });
-    const mensaje = `📊 *Balance Diario AuraSync* - ${fechaTexto}\n` +
+    // 3. Crear Mensaje
+    const fechaTxt = ahora.toLocaleDateString('es-EC', { weekday: 'long', day: 'numeric', month: 'long' });
+    const mensajeBody = `📊 *Balance Diario AuraSync* - ${fechaTxt}\n` +
       `----------------------------------\n` +
       `✅ *Citas Agendadas:* ${citas.length}\n` +
-      `💰 *Ingresos Proyectados:* $${totalIngresos.toFixed(2)}\n` +
-      `💇‍♂️ *Servicio más pedido:* ${servicioMasPedido}\n` +
-      `⭐ *Especialista del día:* ${topEspecialista}\n` +
+      `💰 *Ingresos Proyectados:* $${total.toFixed(2)}\n` +
+      `💇‍♂️ *Servicio más pedido:* ${topServicio}\n` +
+      `⭐ *Especialista del día:* ${topExperto}\n` +
       `----------------------------------\n` +
-      `_Reporte generado automáticamente por Aura._`;
+      `_Generado por Aura._`;
 
-    // 4. Enviar vía Twilio
-    const twilioUrl = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
+    // 4. Envío Blindado a Twilio
     const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
+    
+    for (const destino of NUMEROS_REPORTE) {
+      // Usamos URLSearchParams para asegurar el formato x-www-form-urlencoded que pide Twilio
+      const data = new URLSearchParams();
+      data.append('To', destino.trim());
+      data.append('From', TWILIO_PHONE.trim());
+      data.append('Body', mensajeBody);
 
-    for (const numero of NUMEROS_REPORTE) {
-      const params = new URLSearchParams();
-      params.append('To', numero);
-      params.append('From', TWILIO_PHONE);
-      params.append('Body', mensaje);
-
-      await axios.post(twilioUrl, params, {
-        headers: { 
-          'Authorization': `Basic ${auth}`, 
-          'Content-Type': 'application/x-www-form-urlencoded' 
+      await axios({
+        method: 'post',
+        url: `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
+        data: data.toString(),
+        headers: {
+          'Authorization': `Basic ${auth}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
         }
       });
     }
 
-    return res.status(200).json({ success: true, count: citas.length });
+    return res.status(200).json({ success: true });
 
   } catch (error) {
-    console.error('Error:', error.response?.data || error.message);
-    return res.status(500).json({ error: error.message });
+    console.error('DETALLE ERROR:', error.response?.data || error.message);
+    return res.status(500).json({ 
+      error: "Error en envío", 
+      detalle: error.response?.data || error.message 
+    });
   }
 }
