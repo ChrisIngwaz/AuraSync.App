@@ -25,7 +25,7 @@ export default async function handler(req, res) {
     citas.forEach(r => ingresos += parseFloat(r.fields["Importe estimado"] || 0));
 
     // 2. Formatear mensaje con la identidad de Anesi
-    const mensajeBody = `📊 *AuraSync: Balance Diario*\n\n✅ Citas hoy: ${citas.length}\n💰 Total: $${ingresos.toFixed(2)}\n\n_Mensaje de Anesi: El Guardián de la Coherencia._`;
+    const mensajeBody = `📊 *AuraSync: Balance Diario*\n\n✅ Citas hoy: ${citas.length}\n💰 Total: $${ingresos.toFixed(2)}\n\n_Mensaje de AuraSync: El Asistente Premium._`;
 
     // 3. Envío a Twilio usando URLSearchParams (Formato oficial)
     const params = new URLSearchParams();
