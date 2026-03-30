@@ -5,7 +5,7 @@ export default async function handler(req, res) {
   const token = process.env.TWILIO_AUTH_TOKEN?.trim();
   
   // Número de Twilio Sandbox (ej: +14155238886) o tu número WhatsApp aprobado
-  const twilioNumber = process.env.TWILIO_PHONE?.trim().replace('whatsapp:', '');
+  const twilioNumber = process.env.TWILIO_NUMBER?.trim().replace('whatsapp:', '');
   const fromFinal = `whatsapp:${twilioNumber}`;
   
   // Número del dueño (debe tener WhatsApp y unirse al sandbox primero)
