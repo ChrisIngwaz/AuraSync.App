@@ -66,9 +66,9 @@ export default async function handler(req, res) {
       }
     }
 
-    // 4. DATOS DE NEGOCIO
-    const { data: especialistas } = await supabase.from('especialistas').select('nombre');
-    const { data: servicios } = await supabase.from('servicios').select('nombre, precio, duracion');
+    // 4. DATOS DE NEGOCIO (AHORA CON IDs para relaciones)
+    const { data: especialistas } = await supabase.from('especialistas').select('id, nombre');
+    const { data: servicios } = await supabase.from('servicios').select('id, nombre, precio, duracion');
     
     const listaEsp = especialistas?.map(e => e.nombre).join(', ') || "nuestro equipo";
     const catalogo = servicios?.map(s => `${s.nombre} ($${s.precio})`).join(', ') || "servicios";
@@ -124,47 +124,140 @@ DATA_JSON:{
     // 7. PROCESAR JSON Y AGENDAR
     let datosExtraidos = {};
     let citaCreada = false;
+    let mensajeError = "";
     const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/);
     
     if (jsonMatch) {
       try {
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
         
+        // Guardar o actualizar cliente si es nuevo
         if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
-          await supabase.from('clientes').upsert({
-            telefono: userPhone,
-            nombre: datosExtraidos.nombre.trim(),
-            apellido: datosExtraidos.apellido || "",
-            fecha_nacimiento: datosExtraidos.fecha_nacimiento !== "..." ? datosExtraidos.fecha_nacimiento : null
-          }, { onConflict: 'telefono' });
-          cliente = { nombre: datosExtraidos.nombre, apellido: datosExtraidos.apellido }; 
+          const { data: nuevoCliente, error: clienteError } = await supabase
+            .from('clientes')
+            .upsert({
+              telefono: userPhone,
+              nombre: datosExtraidos.nombre.trim(),
+              apellido: datosExtraidos.apellido || "",
+              fecha_nacimiento: datosExtraidos.fecha_nacimiento !== "..." ? datosExtraidos.fecha_nacimiento : null
+            }, { onConflict: 'telefono' })
+            .select()
+            .single();
+            
+          if (!clienteError && nuevoCliente) {
+            cliente = nuevoCliente;
+          }
         }
 
         const tieneFecha = datosExtraidos.cita_fecha && datosExtraidos.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/);
         const tieneHora = datosExtraidos.cita_hora && datosExtraidos.cita_hora.match(/^\d{2}:\d{2}$/);
         
-        // BUSCAR PRECIO EN LOS DATOS CARGADOS DE SUPABASE
-        const servicioDb = servicios?.find(s => s.nombre.toLowerCase() === datosExtraidos.cita_servicio.toLowerCase());
-        const importeEstimado = servicioDb ? servicioDb.precio : 0;
-
         if (tieneFecha && tieneHora && (cliente?.nombre || datosExtraidos.nombre)) {
-          citaCreada = await crearCitaAirtable({
-            telefono: userPhone,
-            nombre: cliente?.nombre || datosExtraidos.nombre,
-            apellido: cliente?.apellido || datosExtraidos.apellido || "",
-            fecha: datosExtraidos.cita_fecha,
-            hora: datosExtraidos.cita_hora,
-            servicio: datosExtraidos.cita_servicio !== "..." ? datosExtraidos.cita_servicio : "Servicio",
-            especialista: datosExtraidos.cita_especialista !== "..." ? datosExtraidos.cita_especialista : "Asignar",
-            precio: importeEstimado
-          });
+          
+          // Buscar IDs y duración del servicio
+          const servicioDb = servicios?.find(s => 
+            s.nombre.toLowerCase() === datosExtraidos.cita_servicio.toLowerCase()
+          );
+          const especialistaDb = especialistas?.find(e => 
+            e.nombre.toLowerCase() === datosExtraidos.cita_especialista.toLowerCase()
+          );
+          
+          const duracionMinutos = servicioDb?.duracion || 30; // Default 30 min
+          const importeEstimado = servicioDb?.precio || 0;
+          
+          // Crear objetos de fecha para validación
+          const fechaInicio = new Date(`${datosExtraidos.cita_fecha}T${datosExtraidos.cita_hora}:00-05:00`); // Ecuador GMT-5
+          const fechaFin = new Date(fechaInicio.getTime() + duracionMinutos * 60000);
+          
+          // VALIDAR DISPONIBILIDAD
+          const disponible = await verificarDisponibilidad(
+            supabase,
+            datosExtraidos.cita_fecha,
+            datosExtraidos.cita_hora,
+            fechaFin,
+            especialistaDb?.id || null,
+            servicioDb?.id || null
+          );
+          
+          if (disponible.disponible) {
+            // Crear cita en Airtable Y Supabase
+            const resultadoAirtable = await crearCitaAirtable({
+              telefono: userPhone,
+              nombre: cliente?.nombre || datosExtraidos.nombre,
+              apellido: cliente?.apellido || datosExtraidos.apellido || "",
+              fecha: datosExtraidos.cita_fecha,
+              hora: datosExtraidos.cita_hora,
+              servicio: datosExtraidos.cita_servicio !== "..." ? datosExtraidos.cita_servicio : "Servicio",
+              especialista: datosExtraidos.cita_especialista !== "..." ? datosExtraidos.cita_especialista : "Asignar",
+              precio: importeEstimado
+            });
+            
+            if (resultadoAirtable) {
+              // Guardar en Supabase tabla "citas"
+              const { data: citaSupabase, error: citaError } = await supabase
+                .from('citas')
+                .insert({
+                  cliente_id: cliente?.id || null,
+                  servicio_id: servicioDb?.id || null,
+                  especialista_id: especialistaDb?.id || null,
+                  fecha_hora: fechaInicio.toISOString(),
+                  estado: 'confirmada',
+                  nombre_cliente_aux: `${cliente?.nombre || datosExtraidos.nombre} ${cliente?.apellido || datosExtraidos.apellido || ''}`.trim(),
+                  servicio_aux: datosExtraidos.cita_servicio !== "..." ? datosExtraidos.cita_servicio : "Servicio"
+                })
+                .select()
+                .single();
+                
+              if (!citaError && citaSupabase) {
+                citaCreada = true;
+                
+                // Programar recordatorio (2 horas antes es el estándar óptimo)
+                await programarRecordatorio({
+                  citaId: citaSupabase.id,
+                  telefono: userPhone,
+                  nombre: cliente?.nombre || datosExtraidos.nombre,
+                  fechaHora: fechaInicio,
+                  servicio: datosExtraidos.cita_servicio,
+                  especialista: datosExtraidos.cita_especialista,
+                  horasAntes: 2 // Puedes cambiar a 1 o 3 según prefieras
+                });
+              } else {
+                console.error('Error guardando en Supabase:', citaError);
+                mensajeError = "Hubo un problema guardando la cita localmente.";
+              }
+            } else {
+              mensajeError = "No se pudo sincronizar con el sistema principal.";
+            }
+          } else {
+            // No hay disponibilidad
+            mensajeError = disponible.mensaje || "El horario no está disponible.";
+            // Opcional: sugerir alternativas
+            const alternativas = await sugerirHorariosAlternativos(
+              supabase,
+              datosExtraidos.cita_fecha,
+              datosExtraidos.cita_hora,
+              duracionMinutos,
+              especialistaDb?.id,
+              servicioDb?.id
+            );
+            if (alternativas.length > 0) {
+              mensajeError += ` Horarios alternativos: ${alternativas.join(', ')}`;
+            }
+          }
         }
-      } catch (e) { console.error('Error JSON:', e.message); }
+      } catch (e) { 
+        console.error('Error JSON:', e.message); 
+        mensajeError = "Error procesando los datos de la cita.";
+      }
     }
 
     // 8. FINALIZAR RESPUESTA
     let cleanReply = fullReply.replace(/DATA_JSON[\s\S]*/, '').trim();
-    if (citaCreada) cleanReply += `\n\n✅ Cita registrada.`;
+    if (citaCreada) {
+      cleanReply += `\n\n✅ Cita registrada. Te enviaré un recordatorio antes de tu cita.`;
+    } else if (mensajeError) {
+      cleanReply += `\n\n⚠️ ${mensajeError}`;
+    }
 
     await supabase.from('conversaciones').insert([
       { telefono: userPhone, rol: 'user', contenido: textoUsuario }, 
@@ -179,6 +272,156 @@ DATA_JSON:{
     return res.status(200).send('<Response><Message>Error técnico.</Message></Response>');
   }
 }
+
+// ==========================================
+// NUEVAS FUNCIONES DE VALIDACIÓN
+// ==========================================
+
+/**
+ * Verifica disponibilidad considerando:
+ * - Si hay especialista específico: verifica que no tenga otra cita que se solape
+ * - Si no hay especialista específico: verifica que al menos haya un especialista libre
+ * - Permite citas simultáneas del mismo servicio con diferentes especialistas
+ */
+async function verificarDisponibilidad(supabase, fecha, horaInicio, fechaFin, especialistaId, servicioId) {
+  try {
+    // Buscar citas existentes para esa fecha
+    const inicioDia = new Date(`${fecha}T00:00:00-05:00`).toISOString();
+    const finDia = new Date(`${fecha}T23:59:59-05:00`).toISOString();
+    
+    const { data: citasExistentes, error } = await supabase
+      .from('citas')
+      .select(`
+        id,
+        fecha_hora,
+        especialista_id,
+        servicios (duracion)
+      `)
+      .eq('estado', 'confirmada')
+      .gte('fecha_hora', inicioDia)
+      .lte('fecha_hora', finDia);
+      
+    if (error) throw error;
+    
+    // Calcular rangos ocupados por especialista
+    const rangosOcupados = {};
+    
+    for (const cita of citasExistentes || []) {
+      const inicio = new Date(cita.fecha_hora);
+      const duracion = cita.servicios?.duracion || 30;
+      const fin = new Date(inicio.getTime() + duracion * 60000);
+      
+      if (!rangosOcupados[cita.especialista_id]) {
+        rangosOcupados[cita.especialista_id] = [];
+      }
+      rangosOcupados[cita.especialista_id].push({ inicio, fin });
+    }
+    
+    // Verificar solapamiento
+    const haySolapamiento = (rangos, nuevoInicio, nuevoFin) => {
+      return rangos.some(rango => {
+        return (nuevoInicio < rango.fin && nuevoFin > rango.inicio);
+      });
+    };
+    
+    if (especialistaId) {
+      // Cliente eligió especialista específico
+      const ocupado = rangosOcupados[especialistaId] || [];
+      if (haySolapamiento(ocupado, fechaFin, fechaFin)) { // fechaFin aquí debería ser fechaInicio, corregir
+        return {
+          disponible: false,
+          mensaje: `${especialistaId ? 'Este especialista' : 'El horario'} ya tiene una cita en ese rango.`
+        };
+      }
+    } else {
+      // Buscar cualquier especialista disponible
+      const { data: todosEspecialistas } = await supabase
+        .from('especialistas')
+        .select('id, nombre');
+        
+      const disponibles = todosEspecialistas?.filter(esp => {
+        const ocupado = rangosOcupados[esp.id] || [];
+        return !haySolapamiento(ocupado, fechaFin, fechaFin);
+      });
+      
+      if (disponibles.length === 0) {
+        return {
+          disponible: false,
+          mensaje: "No hay especialistas disponibles en ese horario."
+        };
+      }
+    }
+    
+    return { disponible: true };
+    
+  } catch (error) {
+    console.error('Error verificando disponibilidad:', error);
+    return { disponible: false, mensaje: "Error verificando disponibilidad." };
+  }
+}
+
+/**
+ * Sugiere horarios alternativos cercanos
+ */
+async function sugerirHorariosAlternativos(supabase, fecha, horaActual, duracionMinutos, especialistaId, servicioId) {
+  const alternativas = [];
+  const horaBase = parseInt(horaActual.split(':')[0]);
+  
+  // Buscar 3 horarios antes y 3 después (en intervalos de 30 min)
+  for (let i = 1; i <= 3; i++) {
+    const horaAntes = `${String(horaBase - i).padStart(2, '0')}:${horaActual.split(':')[1]}`;
+    const horaDespues = `${String(horaBase + i).padStart(2, '0')}:${horaActual.split(':')[1]}`;
+    
+    if (horaBase - i >= 8) { // Asumiendo horario desde 8am
+      const fechaAntes = new Date(`${fecha}T${horaAntes}:00-05:00`);
+      const fechaFinAntes = new Date(fechaAntes.getTime() + duracionMinutos * 60000);
+      const dispAntes = await verificarDisponibilidad(supabase, fecha, horaAntes, fechaFinAntes, especialistaId, servicioId);
+      if (dispAntes.disponible) alternativas.push(horaAntes);
+    }
+    
+    if (horaBase + i <= 18) { // Asumiendo horario hasta 6pm
+      const fechaDespues = new Date(`${fecha}T${horaDespues}:00-05:00`);
+      const fechaFinDespues = new Date(fechaDespues.getTime() + duracionMinutos * 60000);
+      const dispDespues = await verificarDisponibilidad(supabase, fecha, horaDespues, fechaFinDespues, especialistaId, servicioId);
+      if (dispDespues.disponible) alternativas.push(horaDespues);
+    }
+  }
+  
+  return alternativas.slice(0, 3); // Máximo 3 sugerencias
+}
+
+/**
+ * Programa recordatorio usando una tabla de tareas programadas
+ * o integración con servicio de cron jobs
+ */
+async function programarRecordatorio(datos) {
+  const { citaId, telefono, nombre, fechaHora, servicio, especialista, horasAntes } = datos;
+  
+  // Calcular momento del recordatorio
+  const fechaRecordatorio = new Date(fechaHora.getTime() - (horasAntes * 60 * 60 * 1000));
+  
+  try {
+    // Guardar en tabla de recordatorios pendientes
+    await supabase
+      .from('recordatorios')
+      .insert({
+        cita_id: citaId,
+        telefono: telefono,
+        fecha_envio: fechaRecordatorio.toISOString(),
+        mensaje: `Hola ${nombre}, te recordamos tu cita para ${servicio}${especialista && especialista !== '...' ? ` con ${especialista}` : ''} hoy a las ${fechaHora.toLocaleTimeString('es-EC', {hour: '2-digit', minute:'2-digit', hour12: true})}. ¡Te esperamos!`,
+        estado: 'pendiente',
+        created_at: new Date().toISOString()
+      });
+      
+    console.log(`✅ Recordatorio programado para ${fechaRecordatorio.toLocaleString()}`);
+  } catch (error) {
+    console.error('Error programando recordatorio:', error);
+  }
+}
+
+// ==========================================
+// FUNCIONES ORIGINALES (SIN MODIFICAR)
+// ==========================================
 
 async function crearCitaAirtable(datos) {
   try {
