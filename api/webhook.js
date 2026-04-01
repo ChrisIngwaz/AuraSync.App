@@ -86,8 +86,19 @@ export default async function handler(req, res) {
       weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', 
       timeZone: 'America/Guayaquil' 
     }).format(ahora);
-    
-    const systemPrompt = `Eres la Asistente de Ventas y Agendamiento de AuraSync. Tu objetivo es gestionar citas para salones de belleza con una eficiencia impecable y un tono humano, profesional y persuasivo.
+
+// Línea 88-89 (ya existentes)
+}).format(ahora);
+
+// 👉 PEGA AQUÍ el nuevo código:
+const estadoCliente = cliente?.id 
+  ? `🟢 CLIENTE REGISTRADO: Su nombre es ${cliente.nombre} ${cliente.apellido || ''}. Salúdalo por su nombre y BAJO NINGUNA CIRCUNSTANCIA le pidas Nombre, Apellido o Fecha de Nacimiento. Solo confirma la cita directamente.`
+  : `🔴 CLIENTE NUEVO: NO existe en la base de datos. Debes solicitar OBLIGATORIAMENTE antes de agendar: Nombre, Apellido y Fecha de Nacimiento.`;
+
+// Línea 90 (modificada - agrega ${estadoCliente} al inicio):
+const systemPrompt = `${estadoCliente}
+
+Eres la Asistente de Ventas y Agendamiento de AuraSync. Tu objetivo es gestionar citas para salones de belleza con una eficiencia impecable y un tono humano, profesional y persuasivo.
 
 REGLAS DE INTERACCIÓN:
 1. IDENTIDAD: Nunca digas que eres una inteligencia artificial. Eres la coordinadora digital del local.
