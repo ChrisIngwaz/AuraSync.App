@@ -18,7 +18,7 @@ export default async function handler(req, res) {
   const userPhone = From.replace('whatsapp:', '').trim();
 
   try {
-    // 1. PROCESAMIENTO DE ENTRADA
+    // 1. PROCESAMIENTO DE VOZ/TEXTO
     let textoUsuario = Body || "";
     if (MediaUrl0) {
       const deepgramRes = await axios.post("https://api.deepgram.com/v1/listen?model=nova-2&language=es", { url: MediaUrl0 }, 
@@ -26,16 +26,15 @@ export default async function handler(req, res) {
       textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
     }
 
-    // 2. DATOS DE CLIENTE, NEGOCIO E HISTORIAL
+    // 2. RECUPERACIÓN DE CONTEXTO CRÍTICO
     let { data: cliente } = await supabase.from('clientes').select('*').eq('telefono', userPhone).maybeSingle();
     const { data: especialistas } = await supabase.from('especialistas').select('id, nombre');
     const { data: servicios } = await supabase.from('servicios').select('id, nombre, precio, duracion');
     
-    // Recuperar historial para mantener la memoria
-    const { data: historial } = await supabase.from('conversaciones').select('rol, contenido').eq('telefono', userPhone).order('created_at', { ascending: false }).limit(6);
+    const { data: historial } = await supabase.from('conversaciones').select('rol, contenido').eq('telefono', userPhone).order('created_at', { ascending: false }).limit(8);
     const historialReverse = historial?.reverse() || [];
 
-    // 3. CÁLCULO DE DISPONIBILIDAD REAL (HUECOS LIBRES)
+    // 3. CÁLCULO DE DISPONIBILIDAD (HUECOS LIBRES)
     const ahora = new Date();
     const hoyStr = ahora.toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' });
     const inicioHoy = new Date(`${hoyStr}T00:00:00-05:00`).toISOString();
@@ -44,56 +43,55 @@ export default async function handler(req, res) {
     const { data: citasHoy } = await supabase.from('citas').select('fecha_hora, especialista_id, servicios(duracion)')
       .eq('estado', 'confirmada').gte('fecha_hora', inicioHoy).lte('fecha_hora', finHoy);
 
-    // Definimos bloques de 1 hora para la consulta de disponibilidad
     const bloques = ["08:00", "09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00"];
     const disponibilidadResumen = especialistas?.map(esp => {
       const ocupados = citasHoy?.filter(c => c.especialista_id === esp.id).map(c => 
         new Date(c.fecha_hora).toLocaleTimeString('es-EC', { hour: '2-digit', minute: '2-digit', hour12: false })
       ) || [];
       const libres = bloques.filter(b => !ocupados.includes(b));
-      return `${esp.nombre}: Libres a las [${libres.join(', ')}]`;
-    }).join('\n') || "Todos los especialistas están libres hoy.";
+      return `${esp.nombre}: [${libres.join(', ')}]`;
+    }).join('\n');
 
-    // 4. NUEVO SYSTEM PROMPT: COORDINADORA DE ÉLITE
+    // 4. SYSTEM PROMPT: PROTOCOLO DE CONCIERGE PREMIUM
     const hoyEcuador = new Intl.DateTimeFormat('es-EC', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'America/Guayaquil' }).format(ahora);
     
-    const systemPrompt = `Eres Aura, la Coordinadora de Élite de AuraSync. Tu gestión es impecable, humana y sumamente eficiente.
+    const systemPrompt = `Eres Aura, Coordinadora de Élite de AuraSync. Tu inteligencia es superior y tu trato es impecable. No eres un bot, eres la máxima autoridad en la gestión de este centro.
 
-[REGLAS DE ORO]
-1. MEMORIA TOTAL: Si el usuario ya mencionó el servicio, la hora o el especialista en el historial, NO lo vuelvas a preguntar. Confírmalo directamente.
-2. CERO ESPERAS: Nunca digas "déjame revisar" o "un momento". Tú ya tienes la agenda frente a ti.
-3. VERACIDAD: Usa la "DISPONIBILIDAD REAL" abajo. Si la hora está en la lista de Libres, dile que SÍ hay espacio de inmediato.
-4. PROACTIVIDAD: Si el cliente pide una hora ocupada, ofrece inmediatamente las 2 opciones libres más cercanas.
-5. NO INVENTAR: No menciones servicios que no estén en la lista.
+[PROTOCOLO DE RESPUESTA]
+1. PROHIBICIÓN DE AMNESIA: Si el cliente mencionó un servicio, hora o especialista en CUALQUIER parte del chat, ya lo sabes. Está terminantemente prohibido pedir datos que ya se dijeron.
+2. EJECUCIÓN INMEDIATA: Si tienes el servicio, la hora y el nombre, confirma la cita de inmediato. No pidas permiso, da soluciones.
+3. LENGUAJE PREMIUM: No uses frases de relleno como "estaría encantada" o "puedo ayudarte con eso". Sé directa y sofisticada. 
+   - Mal: "Para agendar con Elena necesito la fecha..."
+   - Bien: "Perfecto. Elena te recibirá hoy a las 15:00 para tu Corte Premium. Todo listo."
+4. GESTIÓN DE AGENDA: Usa la "DISPONIBILIDAD REAL". Si la hora está en la lista de Libres, la cita es un hecho.
 
-[DISPONIBILIDAD REAL HOY - ${hoyEcuador}]
+[DISPONIBILIDAD LIBRE HOY - ${hoyEcuador}]
 ${disponibilidadResumen}
 
-[SERVICIOS]
-${servicios?.map(s => `${s.nombre} ($${s.price || s.precio})`).join(', ')}
+[SERVICIOS DISPONIBLES]
+${servicios?.map(s => `${s.nombre}`).join(', ')}
 
-[DATA_JSON]
-Mantén los valores que ya conozcas. Si faltan, usa "...".
+[MEMORIA DE DATOS]
+Extrae y mantén estos datos del historial. Si ya los tienes, NO los preguntes:
 DATA_JSON:{"nombre":"${cliente?.nombre || ''}","cita_fecha":"${hoyStr}","cita_hora":"...","cita_servicio":"...","cita_especialista":"..."}`;
 
-    // 5. AI COMPLETION
+    // 5. LLAMADA A OPENAI
     const messages = [{ role: "system", content: systemPrompt }];
     historialReverse.forEach(h => messages.push({ role: h.rol === 'assistant' ? 'assistant' : 'user', content: h.contenido }));
     messages.push({ role: "user", content: textoUsuario });
 
     const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: "gpt-4o", messages: messages, temperature: 0.2
+      model: "gpt-4o", messages: messages, temperature: 0
     }, { headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` }});
 
     let fullReply = aiRes.data.choices[0].message.content;
     let citaCreada = false;
     let mensajeError = "";
 
-    // 6. EXTRACCIÓN Y AGENDAMIENTO
+    // 6. LÓGICA DE AGENDAMIENTO AUTOMÁTICO
     const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/);
     if (jsonMatch) {
       const datos = JSON.parse(jsonMatch[1].trim());
-      
       const servicioDb = servicios?.find(s => s.nombre.toLowerCase().trim() === datos.cita_servicio.toLowerCase().trim());
       const especialistaDb = especialistas?.find(e => e.nombre.toLowerCase().trim() === datos.cita_especialista.toLowerCase().trim());
 
@@ -109,7 +107,6 @@ DATA_JSON:{"nombre":"${cliente?.nombre || ''}","cita_fecha":"${hoyStr}","cita_ho
             fecha: datos.cita_fecha, hora: datos.cita_hora, servicio: servicioDb.nombre,
             especialista: especialistaDb?.nombre || "Cualquiera", precio: servicioDb.precio
           });
-
           if (okAirtable) {
             await supabase.from('citas').insert({
               cliente_id: cliente?.id, servicio_id: servicioDb.id, especialista_id: especialistaDb?.id,
@@ -123,9 +120,9 @@ DATA_JSON:{"nombre":"${cliente?.nombre || ''}","cita_fecha":"${hoyStr}","cita_ho
       }
     }
 
-    // 7. RESPUESTA Y GUARDADO
+    // 7. RESPUESTA FINAL
     let cleanReply = fullReply.replace(/DATA_JSON[\s\S]*/, '').trim();
-    if (citaCreada) cleanReply += `\n\n✅ ¡Hecho! Tu cita está agendada.`;
+    if (citaCreada) cleanReply += `\n\n✅ *Confirmado.* Tu espacio está reservado.`;
     else if (mensajeError) cleanReply += `\n\n⚠️ ${mensajeError}`;
 
     await supabase.from('conversaciones').insert([
@@ -136,8 +133,7 @@ DATA_JSON:{"nombre":"${cliente?.nombre || ''}","cita_fecha":"${hoyStr}","cita_ho
     return res.status(200).send(`<Response><Message>${cleanReply}</Message></Response>`);
 
   } catch (err) {
-    console.error(err);
-    return res.status(200).send('<Response><Message>Disculpa, tuve un pequeño inconveniente técnico. ¿Podemos intentarlo de nuevo?</Message></Response>');
+    return res.status(200).send('<Response><Message>Estamos optimizando el sistema, por favor reintenta en un momento.</Message></Response>');
   }
 }
 
@@ -155,10 +151,10 @@ async function verificarDisponibilidad(supabase, fecha, nInicio, nFin, espId) {
   };
 
   if (espId) {
-    if (chequear(espId)) return { disponible: false, mensaje: "Ese horario ya está reservado con ese especialista." };
+    if (chequear(espId)) return { disponible: false, mensaje: "Horario ocupado con este especialista." };
   } else {
     const { data: todos } = await supabase.from('especialistas').select('id');
-    if (!todos.some(e => !chequear(e.id))) return { disponible: false, mensaje: "Lo siento, ya no tenemos especialistas libres a esa hora." };
+    if (!todos.some(e => !chequear(e.id))) return { disponible: false, mensaje: "No hay disponibilidad en ese rango." };
   }
   return { disponible: true };
 }
