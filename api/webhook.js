@@ -66,9 +66,9 @@ export default async function handler(req, res) {
       }
     }
 
-    // 4. DATOS DE NEGOCIO
-    const { data: especialistas } = await supabase.from('especialistas').select('nombre');
-    const { data: servicios } = await supabase.from('servicios').select('nombre, precio, duracion');
+    // 4. DATOS DE NEGOCIO (MODIFICADO: agregamos 'id' a la selección)
+    const { data: especialistas } = await supabase.from('especialistas').select('id, nombre'); // AGREGADO: id
+    const { data: servicios } = await supabase.from('servicios').select('id, nombre, precio, duracion'); // AGREGADO: id
     
     const listaEsp = especialistas?.map(e => e.nombre).join(', ') || "nuestro equipo";
     const catalogo = servicios?.map(s => `${s.nombre} ($${s.precio})`).join(', ') || "servicios";
@@ -121,15 +121,18 @@ DATA_JSON:{
 
     let fullReply = aiRes.data.choices[0].message.content;
 
-    // 7. PROCESAR JSON Y AGENDAR
+    // 7. PROCESAR JSON Y AGENDAR (AGREGADO: Lógica completa de validación y guardado en Supabase)
     let datosExtraidos = {};
     let citaCreada = false;
+    let mensajeError = ""; // AGREGADO
+    
     const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/);
     
     if (jsonMatch) {
       try {
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
         
+        // Guardar cliente nuevo si es necesario (CÓDIGO ORIGINAL INTACTO)
         if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
           await supabase.from('clientes').upsert({
             telefono: userPhone,
@@ -143,28 +146,88 @@ DATA_JSON:{
         const tieneFecha = datosExtraidos.cita_fecha && datosExtraidos.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/);
         const tieneHora = datosExtraidos.cita_hora && datosExtraidos.cita_hora.match(/^\d{2}:\d{2}$/);
         
-        // BUSCAR PRECIO EN LOS DATOS CARGADOS DE SUPABASE
-        const servicioDb = servicios?.find(s => s.nombre.toLowerCase() === datosExtraidos.cita_servicio.toLowerCase());
+        // AGREGADO: Buscar IDs y duración del servicio
+        const servicioDb = servicios?.find(s => 
+          s.nombre.toLowerCase() === datosExtraidos.cita_servicio.toLowerCase()
+        );
+        const especialistaDb = especialistas?.find(e => 
+          e.nombre.toLowerCase() === datosExtraidos.cita_especialista.toLowerCase()
+        );
+        
         const importeEstimado = servicioDb ? servicioDb.precio : 0;
+        const duracionMinutos = servicioDb?.duracion || 30; // AGREGADO: Duración real o default 30min
 
-        if (tieneFecha && tieneHora && (cliente?.nombre || datosExtraidos.nombre)) {
-          citaCreada = await crearCitaAirtable({
-            telefono: userPhone,
-            nombre: cliente?.nombre || datosExtraidos.nombre,
-            apellido: cliente?.apellido || datosExtraidos.apellido || "",
-            fecha: datosExtraidos.cita_fecha,
-            hora: datosExtraidos.cita_hora,
-            servicio: datosExtraidos.cita_servicio !== "..." ? datosExtraidos.cita_servicio : "Servicio",
-            especialista: datosExtraidos.cita_especialista !== "..." ? datosExtraidos.cita_especialista : "Asignar",
-            precio: importeEstimado
-          });
+        if (tieneFecha && tieneHora && (cliente?.nombre || datosExtraidos.nombre) && servicioDb) {
+          
+          // AGREGADO: Calcular fecha inicio y fin
+          const fechaInicio = new Date(`${datosExtraidos.cita_fecha}T${datosExtraidos.cita_hora}:00-05:00`);
+          const fechaFin = new Date(fechaInicio.getTime() + duracionMinutos * 60000);
+          
+          // AGREGADO: Verificar disponibilidad antes de agendar
+          const disponibilidad = await verificarDisponibilidad(
+            supabase,
+            datosExtraidos.cita_fecha,
+            fechaInicio,
+            fechaFin,
+            especialistaDb?.id || null,
+            servicioDb.id
+          );
+          
+          if (disponibilidad.disponible) {
+            // AGREGADO: Determinar especialista final (si no eligió, usamos el que quedó libre)
+            const espFinalId = especialistaDb?.id || disponibilidad.especialistaId;
+            const espFinalNombre = especialistaDb?.nombre || disponibilidad.especialistaNombre || "Por asignar";
+            
+            // CÓDIGO ORIGINAL: Crear en Airtable
+            citaCreada = await crearCitaAirtable({
+              telefono: userPhone,
+              nombre: cliente?.nombre || datosExtraidos.nombre,
+              apellido: cliente?.apellido || datosExtraidos.apellido || "",
+              fecha: datosExtraidos.cita_fecha,
+              hora: datosExtraidos.cita_hora,
+              servicio: datosExtraidos.cita_servicio,
+              especialista: espFinalNombre,
+              precio: importeEstimado
+            });
+            
+            // AGREGADO: Si se creó en Airtable, guardar en Supabase
+            if (citaCreada) {
+              const { error: errorCita } = await supabase.from('citas').insert({
+                cliente_id: cliente?.id || null,
+                servicio_id: servicioDb.id,
+                especialista_id: espFinalId,
+                fecha_hora: fechaInicio.toISOString(),
+                estado: 'confirmada',
+                nombre_cliente_aux: cliente?.nombre || datosExtraidos.nombre,
+                servicio_aux: servicioDb.nombre,
+                duracion_aux: duracionMinutos
+              });
+              
+              if (errorCita) {
+                console.error('Error guardando cita en Supabase:', errorCita);
+                // No cambiamos citaCreada a false porque Airtable sí funcionó
+              }
+            }
+          } else {
+            // AGREGADO: No hay disponibilidad
+            mensajeError = disponibilidad.mensaje;
+            if (disponibilidad.alternativas?.length > 0) {
+              mensajeError += ` Te sugiero: ${disponibilidad.alternativas.slice(0, 3).join(', ')}`;
+            }
+          }
         }
-      } catch (e) { console.error('Error JSON:', e.message); }
+      } catch (e) { 
+        console.error('Error JSON:', e.message); 
+      }
     }
 
-    // 8. FINALIZAR RESPUESTA
+    // 8. FINALIZAR RESPUESTA (AGREGADO: Manejo de errores en la respuesta)
     let cleanReply = fullReply.replace(/DATA_JSON[\s\S]*/, '').trim();
-    if (citaCreada) cleanReply += `\n\n✅ Cita registrada.`;
+    if (citaCreada) {
+      cleanReply += `\n\n✅ Cita registrada.`;
+    } else if (mensajeError) {
+      cleanReply += `\n\n⚠️ ${mensajeError}`;
+    }
 
     await supabase.from('conversaciones').insert([
       { telefono: userPhone, rol: 'user', contenido: textoUsuario }, 
@@ -180,6 +243,7 @@ DATA_JSON:{
   }
 }
 
+// FUNCIÓN ORIGINAL INTACTA
 async function crearCitaAirtable(datos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
@@ -205,4 +269,104 @@ async function crearCitaAirtable(datos) {
     console.error('Error Airtable:', error.response?.data || error.message);
     return false; 
   }
+}
+
+// AGREGADO: Funciones nuevas para control de agenda
+async function verificarDisponibilidad(supabase, fecha, nInicio, nFin, espId, servicioId) {
+  try {
+    const iDia = new Date(`${fecha}T00:00:00-05:00`).toISOString();
+    const fDia = new Date(`${fecha}T23:59:59-05:00`).toISOString();
+    
+    const { data: citas, error } = await supabase
+      .from('citas')
+      .select(`
+        fecha_hora,
+        especialista_id,
+        servicios: servicio_id (duracion)
+      `)
+      .eq('estado', 'confirmada')
+      .gte('fecha_hora', iDia)
+      .lte('fecha_hora', fDia);
+      
+    if (error) throw error;
+    
+    // Función para chequear solapamiento
+    const seSolapan = (citaExistente) => {
+      const exI = new Date(citaExistente.fecha_hora);
+      const duracionEx = citaExistente.servicios?.duracion || 30;
+      const exF = new Date(exI.getTime() + duracionEx * 60000);
+      return (nInicio < exF && nFin > exI);
+    };
+    
+    // Si hay especialista específico
+    if (espId) {
+      const ocupado = citas?.some(c => c.especialista_id === espId && seSolapan(c));
+      if (ocupado) {
+        return {
+          disponible: false,
+          mensaje: "Este especialista ya tiene una cita en ese horario. ¿Prefieres otro especialista u otro horario?",
+          alternativas: await sugerirAlternativas(supabase, fecha, nInicio, nFin, citas, espId)
+        };
+      }
+      return { disponible: true, especialistaId: espId };
+    }
+    
+    // Buscar cualquier especialista libre
+    const { data: todosEsp } = await supabase.from('especialistas').select('id, nombre');
+    for (const esp of todosEsp || []) {
+      const citasEsp = citas?.filter(c => c.especialista_id === esp.id) || [];
+      if (!citasEsp.some(c => seSolapan(c))) {
+        return { 
+          disponible: true, 
+          especialistaId: esp.id,
+          especialistaNombre: esp.nombre
+        };
+      }
+    }
+    
+    return { 
+      disponible: false, 
+      mensaje: "Todos nuestros especialistas están ocupados en ese horario.",
+      alternativas: await sugerirAlternativas(supabase, fecha, nInicio, nFin, citas, null)
+    };
+    
+  } catch (error) {
+    console.error('Error verificando disponibilidad:', error);
+    return { disponible: false, mensaje: "Error verificando agenda." };
+  }
+}
+
+async function sugerirAlternativas(supabase, fecha, nInicio, nFin, citasExistentes, espIdExcluir) {
+  const alternativas = [];
+  const duracionCita = (nFin - nInicio) / 60000;
+  const horaBase = nInicio.getHours();
+  const minutos = String(nInicio.getMinutes()).padStart(2, '0');
+  
+  for (let offset = 1; offset <= 3; offset++) {
+    for (const dir of [-1, 1]) {
+      const nuevaHora = horaBase + (offset * dir);
+      if (nuevaHora < 8 || nuevaHora > 18) continue;
+      
+      const horaStr = `${String(nuevaHora).padStart(2, '0')}:${minutos}`;
+      const nuevaInicio = new Date(`${fecha}T${horaStr}:00-05:00`);
+      const nuevaFin = new Date(nuevaInicio.getTime() + duracionCita * 60000);
+      
+      // Verificar si hay algún especialista libre a esta hora
+      const { data: todosEsp } = await supabase.from('especialistas').select('id, nombre');
+      const hayLibre = todosEsp?.some(esp => {
+        if (espIdExcluir && esp.id === espIdExcluir) return false;
+        const citasEsp = citasExistentes?.filter(c => c.especialista_id === esp.id) || [];
+        return !citasEsp.some(c => {
+          const exI = new Date(c.fecha_hora);
+          const durEx = c.servicios?.duracion || 30;
+          const exF = new Date(exI.getTime() + durEx * 60000);
+          return (nuevaInicio < exF && nuevaFin > exI);
+        });
+      });
+      
+      if (hayLibre && !alternativas.includes(horaStr)) alternativas.push(horaStr);
+    }
+  }
+  
+  return alternativas.slice(0, 3);
 }
