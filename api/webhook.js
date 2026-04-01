@@ -87,9 +87,6 @@ export default async function handler(req, res) {
       timeZone: 'America/Guayaquil' 
     }).format(ahora);
 
-// Línea 88-89 (ya existentes)
-}).format(ahora);
-
 // 👉 PEGA AQUÍ el nuevo código:
 const estadoCliente = cliente?.id 
   ? `🟢 CLIENTE REGISTRADO: Su nombre es ${cliente.nombre} ${cliente.apellido || ''}. Salúdalo por su nombre y BAJO NINGUNA CIRCUNSTANCIA le pidas Nombre, Apellido o Fecha de Nacimiento. Solo confirma la cita directamente.`
