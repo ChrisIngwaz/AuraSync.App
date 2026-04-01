@@ -411,7 +411,7 @@ async function crearCitaAirtable(datos) {
           "Teléfono": datos.telefono || '',
           "Estado": "Confirmada",
           "Importe estimado": datos.precio,
-          "Duración": datos.duracion
+          "Duración estimada (minutos)": datos.duracion
         }
       }]
     };
