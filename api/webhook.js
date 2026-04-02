@@ -367,6 +367,7 @@ DATA_JSON:{
           } else {
             const datosCita = {
               clienteId: cliente.id,
+              telefono: userPhone,
               nombre: cliente.nombre || datosExtraidos.nombre,
               apellido: cliente.apellido || datosExtraidos.apellido || "",
               fecha: datosExtraidos.cita_fecha,
