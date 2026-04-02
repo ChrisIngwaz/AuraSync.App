@@ -229,11 +229,14 @@ export default async function handler(req, res) {
       if (mensajes) historialFiltrado = mensajes.reverse();
     }
 
-    // 4. DATOS DE NEGOCIO
-    const { data: especialistas } = await supabase.from('especialistas').select('nombre');
+        // 4. DATOS DE NEGOCIO
+    const { data: especialistas } = await supabase.from('especialistas').select('id, nombre, rol, expertise');
     const { data: servicios } = await supabase.from('servicios').select('nombre, precio, duracion');
     
-    const listaEsp = especialistas?.map(e => e.nombre).join(', ') || "nuestro equipo";
+    const especialistasConExpertise = especialistas?.map(e => 
+      `- ${e.nombre} (${e.rol}): ${e.expertise || 'Especialista certificado con amplia experiencia.'}`
+    ).join('\n') || "Nuestro equipo de expertos";
+    
     const catalogoDetallado = servicios?.map(s => 
       `${s.nombre} ($${s.precio}, ${s.duracion} min)`
     ).join(', ') || "servicios";
@@ -264,12 +267,19 @@ Si el cliente solicita una cita:
 - YA TIENES TODO (fecha, hora, servicio, especialista): Confirma con seguridad absoluta: "Listo, te queda agendado para mañana a las 11:00 con Anita para Manicura Aura Express. ¿Confirmamos?"
 - HAY CONFLICTO (el código te informará): Ofrece alternativas sin dramatizar: "A las 3:00 con Carlos ya tengo ocupado, pero te puedo ofrecer a las 4:00 o a las 3:00 con Elena. ¿Cuál prefieres?"
 
-[ESPECIALISTAS Y SERVICIOS]
-- Especialistas disponibles: ${listaEsp}
-- Servicios con duración y precio: ${catalogoDetallado}
-- Horario de atención: 9:00 a 18:00
-- Si el cliente no menciona especialista, preséntalos como opciones naturales: "Para ese horario tengo a Carlos o a Anita. ¿Con quién te gustaría atenderte?"
+[ASESORÍA DE ESPECIALISTAS - EXPERTISE REAL]
+Tu equipo y sus fortalezas:
+${especialistasConExpertise}
 
+REGLAS DE RECOMENDACIÓN:
+- SIEMPRE sugiere 1 o 2 especialistas máximo, destacando su expertise específico relacionado al servicio solicitado
+- Si hay solapamiento de habilidades, diferencia por estilo: "Elena es nuestra nail artist creativa para diseños personalizados"
+- Si el cliente NO menciona preferencia, usa la expertise para persuadir: "Para hidratación facial te recomendaría Marina, es facialista holística y sus masajes relajantes son increíbles. ¿Te gustaría con ella?"
+- NUNCA dejes sin opción: si el especialista ideal está ocupado, presenta la alternativa resaltando SU expertise
+
+[SERVICIOS Y DURACIONES]
+${catalogoDetallado}
+Horario: 9:00 a 18:00
 [MANEJO DE OBJECIONES]
 - Si piden un servicio no listado: "Específicamente de pedicura no tengo en el menú, pero puedo agendarte una atención personalizada para tus uñas. ¿Te funciona?"
 - Si la hora está fuera de horario: "Atendemos de 9 a 6. ¿Te funciona a las 9:00 mañana o prefieres otro día?"
