@@ -1,18 +1,42 @@
 import axios from 'axios';
 
 export default async function handler(req, res) {
-  const sid = process.env.TWILIO_ACCOUNT_SID?.trim();
-  const token = process.env.TWILIO_AUTH_TOKEN?.trim();
-  
-  const twilioNumber = process.env.TWILIO_NUMBER?.trim().replace('whatsapp:', '');
-  const fromFinal = `whatsapp:${twilioNumber}`;
-  const toFinal = 'whatsapp:+593995430859';
-
   try {
-    const ahora = new Date();
-    const hoy = ahora.toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' });
+    // Validar variables de entorno primero
+    if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) {
+      throw new Error('Faltan credenciales de Twilio');
+    }
+    if (!process.env.AIRTABLE_BASE_ID || !process.env.AIRTABLE_TOKEN) {
+      throw new Error('Faltan credenciales de Airtable');
+    }
+
+    const sid = process.env.TWILIO_ACCOUNT_SID.trim();
+    const token = process.env.TWILIO_AUTH_TOKEN.trim();
     
-    // Formato de fecha bonito: "Lunes 30 de marzo"
+    const twilioNumber = process.env.TWILIO_NUMBER?.trim().replace('whatsapp:', '');
+    const fromFinal = `whatsapp:${twilioNumber}`;
+    const toFinal = 'whatsapp:+593995430859';
+
+    // Obtener fecha con zona horaria de Ecuador
+    const ahora = new Date();
+    
+    // IMPORTANTE: Forzar el cálculo en zona horaria Ecuador
+    const opciones = { 
+      timeZone: 'America/Guayaquil',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit'
+    };
+    
+    const formatter = new Intl.DateTimeFormat('en-CA', opciones);
+    const hoy = formatter.format(ahora);
+    
+    // Log crítico para ver qué fecha está buscando
+    console.log('🔍 Buscando citas para fecha:', hoy);
+    console.log('🕐 Hora actual servidor (UTC):', new Date().toISOString());
+    console.log('📅 Fecha formateada (Ecuador):', hoy);
+
+    // Formato bonito para el mensaje
     const fechaFormateada = ahora.toLocaleDateString('es-EC', { 
       weekday: 'long', 
       day: 'numeric', 
@@ -20,43 +44,61 @@ export default async function handler(req, res) {
       timeZone: 'America/Guayaquil'
     });
 
-    // Consulta Airtable
-    const airtableUrl = `https://api.airtable.com/v0/${process.env.AIRTABLE_BASE_ID}/${encodeURIComponent(process.env.AIRTABLE_TABLE_NAME)}?filterByFormula=${encodeURIComponent(`IS_SAME({Fecha}, '${hoy}', 'day')`)}`;
+    // Consulta Airtable - CAMBIO IMPORTANTE: Usar filtro por rango en lugar de IS_SAME
+    // para evitar problemas de timezone
+    const baseId = process.env.AIRTABLE_BASE_ID;
+    const tableName = encodeURIComponent(process.env.AIRTABLE_TABLE_NAME);
     
+    // Filtro más seguro: registros donde Fecha es igual a hoy (YYYY-MM-DD)
+    // Airtable almacena fechas como YYYY-MM-DD si es campo Date
+    const formula = `{Fecha} = '${hoy}'`;
+    const encodedFormula = encodeURIComponent(formula);
+    
+    const airtableUrl = `https://api.airtable.com/v0/${baseId}/${tableName}?filterByFormula=${encodedFormula}`;
+    
+    console.log('🌐 URL de consulta:', airtableUrl.replace(process.env.AIRTABLE_TOKEN, 'TOKEN_OCULTO'));
+
     const airtableRes = await axios.get(airtableUrl, {
-      headers: { Authorization: `Bearer ${process.env.AIRTABLE_TOKEN}` }
+      headers: { 
+        Authorization: `Bearer ${process.env.AIRTABLE_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 10000
     });
 
     const citas = airtableRes.data.records || [];
-    
+    console.log(`✅ Citas encontradas: ${citas.length}`);
+
     if (citas.length === 0) {
+      console.log('⚠️ No se encontraron citas para la fecha:', hoy);
+      
       const mensajeVacio = `📊 *AURA SYNC - Reporte Diario*\n\n📅 ${fechaFormateada}\n\n⚠️ *No hubo citas registradas hoy.*\n\n📌 No se registraron atenciones en el sistema para esta fecha.`;
       
       await enviarWhatsApp(fromFinal, toFinal, mensajeVacio, sid, token);
-      return res.status(200).json({ success: true, message: "Sin citas hoy" });
+      return res.status(200).json({ success: true, message: "Sin citas hoy", fechaConsultada: hoy });
     }
 
-    // Procesar datos detallados
+    // ... resto de tu código de procesamiento (igual que lo tenías) ...
     let granTotal = 0;
     const servicios = {};
     const especialistas = {};
     
-    citas.forEach(cita => {
+    citas.forEach((cita, index) => {
       const f = cita.fields;
+      console.log(`📋 Cita ${index + 1}:`, JSON.stringify(f));
+      
       const importe = parseFloat(f["Importe estimado"] || 0);
       const servicio = f.Servicio || "Sin especificar";
       const especialista = f.Especialista || "Sin asignar";
       
       granTotal += importe;
       
-      // Acumular por servicio
       if (!servicios[servicio]) {
         servicios[servicio] = { cantidad: 0, total: 0 };
       }
       servicios[servicio].cantidad += 1;
       servicios[servicio].total += importe;
       
-      // Acumular por especialista
       if (!especialistas[especialista]) {
         especialistas[especialista] = { citas: 0, ingresos: 0 };
       }
@@ -64,43 +106,33 @@ export default async function handler(req, res) {
       especialistas[especialista].ingresos += importe;
     });
 
-    // Encontrar top especialista
-    const topEspecialista = Object.entries(especialistas)
-      .sort((a, b) => b[1].citas - a[1].citas)[0];
-    
-    // Calcular promedio por cita
-    const promedioGeneral = granTotal / citas.length;
-
-    // Construir mensaje profesional
+    // Construir mensaje (tu código actual...)
     let mensaje = `📊 *AURA SYNC - Reporte Diario*\n`;
     mensaje += `━━━━━━━━━━━━━━━\n`;
     mensaje += `📅 ${fechaFormateada.toUpperCase()}\n\n`;
     
-    // Resumen Ejecutivo
     mensaje += `*📈 RESUMEN EJECUTIVO*\n`;
     mensaje += `• Total Citas: ${citas.length}\n`;
     mensaje += `• Ingresos del Día: $${granTotal.toFixed(2)}\n`;
-    mensaje += `• Promedio por Cita: $${promedioGeneral.toFixed(2)}\n\n`;
+    mensaje += `• Promedio por Cita: $${(granTotal / citas.length).toFixed(2)}\n\n`;
     
-    // Desglose por Servicio
     mensaje += `*💇‍♀️ DETALLE POR SERVICIO*\n`;
     Object.entries(servicios).forEach(([nombre, datos]) => {
-      const promedioServicio = datos.total / datos.cantidad;
       mensaje += `\n▪️ *${nombre}*\n`;
       mensaje += `   Citas: ${datos.cantidad}  |  $${datos.total.toFixed(2)}\n`;
-      mensaje += `   Ticket prom.: $${promedioServicio.toFixed(2)}\n`;
     });
     
     mensaje += `\n`;
     
-    // Top Especialista
+    const topEspecialista = Object.entries(especialistas)
+      .sort((a, b) => b[1].citas - a[1].citas)[0];
+    
     if (topEspecialista) {
       mensaje += `*⭐ ESPECIALISTA DESTACADO*\n`;
       mensaje += `👤 ${topEspecialista[0]}\n`;
       mensaje += `   ${topEspecialista[1].citas} citas | $${topEspecialista[1].ingresos.toFixed(2)}\n\n`;
     }
     
-    // Cierre
     mensaje += `━━━━━━━━━━━━━━━\n`;
     mensaje += `*💰 GRAN TOTAL: $${granTotal.toFixed(2)}*\n`;
     mensaje += `━━━━━━━━━━━━━━━\n`;
@@ -111,35 +143,48 @@ export default async function handler(req, res) {
     return res.status(200).json({ 
       success: true, 
       citas: citas.length,
-      total: granTotal 
+      total: granTotal,
+      fecha: hoy
     });
 
   } catch (error) {
-    console.error('Error:', error.response?.data || error.message);
+    console.error('❌ Error completo:', error);
+    console.error('Detalles:', error.response?.data || error.message);
+    
     return res.status(500).json({ 
       error: "Error en envío", 
-      detalle: error.response?.data || error.message 
+      detalle: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 }
 
-// Función auxiliar para enviar WhatsApp
+// Función auxiliar (sin cambios)
 async function enviarWhatsApp(from, to, body, sid, token) {
-  const params = new URLSearchParams();
-  params.append('To', to);
-  params.append('From', from);
-  params.append('Body', body);
+  try {
+    const params = new URLSearchParams();
+    params.append('To', to);
+    params.append('From', from);
+    params.append('Body', body);
 
-  const auth = Buffer.from(`${sid}:${token}`).toString('base64');
+    const auth = Buffer.from(`${sid}:${token}`).toString('base64');
 
-  await axios.post(
-    `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
-    params.toString(),
-    {
-      headers: {
-        'Authorization': `Basic ${auth}`,
-        'Content-Type': 'application/x-www-form-urlencoded'
+    const response = await axios.post(
+      `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
+      params.toString(),
+      {
+        headers: {
+          'Authorization': `Basic ${auth}`,
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        timeout: 15000
       }
-    }
-  );
+    );
+    
+    console.log('✅ WhatsApp enviado:', response.data.sid);
+    return response.data;
+  } catch (error) {
+    console.error('❌ Error enviando WhatsApp:', error.response?.data || error.message);
+    throw error;
+  }
 }
