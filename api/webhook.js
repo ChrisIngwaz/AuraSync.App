@@ -306,7 +306,7 @@ DATA_JSON:{
       messages.push({ role: msg.rol === 'assistant' ? 'assistant' : 'user', content: msg.contenido });
     });
     messages.push({ role: "user", content: textoUsuario });
-    // ... (todo tu código anterior se mantiene igual hasta la línea del AI response) ...
+    
     const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: "gpt-4o",
       messages: messages,
