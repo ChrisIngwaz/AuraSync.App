@@ -454,17 +454,17 @@ DATA_JSON:{
               clienteId: cliente.id,
               telefono: userPhone,
               nombre: cliente.nombre || datosExtraidos.nombre,
-              apellido: cliente.apellido || datosExtraidos.apellido || "",
-              fecha: datosExtraidos.cita_fecha,
-              hora: datosExtraidos.cita_hora,
-              servicio: datosExtraidos.cita_servicio !== "..." ? datosExtraidos.cita_servicio : "Servicio",
-              especialista: datosExtraidos.cita_especialista !== "..." ? datosExtraidos.cita_especialista : "Asignar",
-              servicioId: ids.servicioId,
-              especialistaId: ids.especialistaId,
-              duracion: ids.duracion,
-              precio: ids.precio
-    
-    // 7. PROCESAR JSON Y AGENDAR (CON LOGS DETALLADOS)
+
+// ... (todo tu código anterior se mantiene igual hasta la línea del AI response) ...
+    const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
+      model: "gpt-4o",
+      messages: messages,
+      temperature: 0.3
+    }, { headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` }});
+
+    let fullReply = aiRes.data.choices[0].message.content;
+
+    // 7. PROCESAR JSON Y AGENDAR (VERSIÓN CORREGIDA CON LOGS)
     let datosExtraidos = {};
     let citaCreada = false;
     let mensajeErrorCita = null;
@@ -602,7 +602,8 @@ DATA_JSON:{
     return res.status(200).send('<Response><Message>Error técnico.</Message></Response>');
   }
 }
-// Airtable sin cambios (puedes agregar duración si quieres)
+
+// Airtable sin cambios 
 async function crearCitaAirtable(datos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
@@ -629,4 +630,4 @@ async function crearCitaAirtable(datos) {
     console.error('Error Airtable:', error.response?.data || error.message);
     return false; 
   }
-}
+ }
