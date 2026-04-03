@@ -463,47 +463,118 @@ DATA_JSON:{
               especialistaId: ids.especialistaId,
               duracion: ids.duracion,
               precio: ids.precio
+    
+    // 7. PROCESAR JSON Y AGENDAR (CON LOGS DETALLADOS)
+    let datosExtraidos = {};
+    let citaCreada = false;
+    let mensajeErrorCita = null;
+    
+    const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/);
+    
+    console.log('🔍 JSON encontrado:', jsonMatch ? 'SÍ' : 'NO');
+    console.log('📝 Respuesta OpenAI:', fullReply.substring(0, 300));
+    
+    if (jsonMatch) {
+      try {
+        datosExtraidos = JSON.parse(jsonMatch[1].trim());
+        console.log('📊 Datos extraídos:', JSON.stringify(datosExtraidos));
+        
+        // Crear/Actualizar cliente si es nuevo
+        if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
+          console.log('👤 Creando cliente...');
+          const { data: nuevoCliente, error: clienteError } = await supabase
+            .from('clientes')
+            .upsert({
+              telefono: userPhone,
+              nombre: datosExtraidos.nombre.trim(),
+              apellido: datosExtraidos.apellido || "",
+              fecha_nacimiento: datosExtraidos.fecha_nacimiento !== "..." ? datosExtraidos.fecha_nacimiento : null
+            }, { onConflict: 'telefono' })
+            .select()
+            .single();
+
+          if (clienteError) {
+            console.error('❌ Error cliente:', clienteError);
+          } else if (nuevoCliente) {
+            cliente = nuevoCliente;
+            console.log('✅ Cliente ID:', cliente.id);
+          }
+        }
+
+        const tieneFecha = datosExtraidos.cita_fecha && datosExtraidos.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/);
+        const tieneHora = datosExtraidos.cita_hora && datosExtraidos.cita_hora.match(/^\d{2}:\d{2}$/);
+        
+        console.log('📅 Fecha válida:', tieneFecha, '|', datosExtraidos.cita_fecha);
+        console.log('🕐 Hora válida:', tieneHora, '|', datosExtraidos.cita_hora);
+        console.log('👤 Cliente ID:', cliente?.id);
+        
+        if (tieneFecha && tieneHora && cliente?.id) {
+          
+          console.log('🔎 Buscando IDs...');
+          const ids = await obtenerIdsRelacionales(
+            datosExtraidos.cita_servicio,
+            datosExtraidos.cita_especialista !== "..." ? datosExtraidos.cita_especialista : null
+          );
+          
+          console.log('📋 IDs:', { serv: ids.servicioId, esp: ids.especialistaId, dur: ids.duracion });
+
+          console.log('✅ Verificando disponibilidad...');
+          const verificacion = await verificarDisponibilidad(
+            datosExtraidos.cita_fecha,
+            datosExtraidos.cita_hora,
+            ids.especialistaId,
+            ids.duracion
+          );
+
+          if (!verificacion.disponible) {
+            console.log('⚠️ No disponible:', verificacion.mensaje);
+            mensajeErrorCita = verificacion.mensaje;
+          } else {
+            console.log('✅ Disponible, creando cita...');
+            
+            const datosCita = {
+              clienteId: cliente.id,
+              telefono: userPhone,
+              nombre: cliente.nombre || datosExtraidos.nombre,
+              apellido: cliente.apellido || datosExtraidos.apellido || "",
+              fecha: datosExtraidos.cita_fecha,
+              hora: datosExtraidos.cita_hora,
+              servicio: datosExtraidos.cita_servicio !== "..." ? datosExtraidos.cita_servicio : "Servicio",
+              especialista: datosExtraidos.cita_especialista !== "..." ? datosExtraidos.cita_especialista : "Asignar",
+              servicioId: ids.servicioId,
+              especialistaId: ids.especialistaId,
+              duracion: ids.duracion,
+              precio: ids.precio
             };
 
-            // Crear en Airtable
             console.log('☁️ Enviando a Airtable...');
             const citaAirtable = await crearCitaAirtable(datosCita);
-            console.log('📊 Resultado Airtable:', citaAirtable ? 'ÉXITO' : 'FALLO');
+            console.log('📊 Airtable:', citaAirtable ? 'OK' : 'FAIL');
             
-            // Crear en Supabase
             console.log('🗄️ Enviando a Supabase...');
             const citaSupabase = await crearCitaSupabase(datosCita);
-            console.log('📊 Resultado Supabase:', citaSupabase ? 'ÉXITO' : 'FALLO');
+            console.log('📊 Supabase:', citaSupabase ? 'OK' : 'FAIL');
 
-            citaCreada = citaAirtable; // Airtable es fuente de verdad
-            
-            if (!citaSupabase) {
-              console.warn('⚠️ Cita en Airtable pero falló registro local en Supabase');
-            }
+            citaCreada = citaAirtable;
             
             if (!citaAirtable) {
-              console.error('❌ Falló creación en Airtable - cita no confirmada');
-              mensajeErrorCita = "Hubo un problema técnico al guardar la cita. ¿Podemos intentarlo de nuevo?";
+              mensajeErrorCita = "Hubo un problema técnico al guardar la cita. ¿Intentamos de nuevo?";
             }
           }
         } else {
-          console.log('❌ Faltan datos:', { tieneFecha, tieneHora, tieneCliente: !!cliente?.id });
+          console.log('❌ Faltan datos:', { fecha: tieneFecha, hora: tieneHora, cliente: !!cliente?.id });
         }
       } catch (e) { 
-        console.error('❌ Error procesando JSON:', e.message);
-        console.error('JSON problemático:', jsonMatch[1].substring(0, 100));
+        console.error('❌ Error JSON:', e.message);
       }
     } else {
-      console.warn('⚠️ NO SE ENCONTRÓ JSON EN LA RESPUESTA');
-      console.warn('Respuesta completa:', fullReply);
-      
-      // Si la IA dijo que agendó pero no hay JSON, es un error del modelo
-      if (fullReply.toLowerCase().includes('agendado') || fullReply.toLowerCase().includes('confirmado')) {
-        console.error('🚨 ALERTA: La IA confirmó la cita pero no generó JSON estructurado');
+      console.warn('⚠️ NO SE ENCONTRÓ JSON');
+      if (fullReply.toLowerCase().includes('agendado')) {
+        console.error('🚨 La IA confirmó pero no generó JSON');
       }
     }
 
-    // 8. RESPUESTA FINAL (solo confirma si realmente se creó)
+    // 8. RESPUESTA FINAL
     let cleanReply = fullReply.replace(/DATA_JSON[\s\S]*/, '').trim();
     
     if (mensajeErrorCita) {
@@ -511,14 +582,26 @@ DATA_JSON:{
     } else if (citaCreada) {
       cleanReply += `\n\n✅ Cita registrada correctamente.`;
     } else {
-      // Si no se creó la cita, no dejar que la IA "confirme" falsamente
       if (cleanReply.toLowerCase().includes('agendado') || cleanReply.toLowerCase().includes('queda')) {
         cleanReply += `\n\n⚠️ Por favor confirma los datos para registrar la cita correctamente.`;
       }
     }
+    
+    console.log('📤 Respuesta:', cleanReply.substring(0, 100));
 
-    console.log('📤 Enviando respuesta:', cleanReply.substring(0, 100) + '...');
+    await supabase.from('conversaciones').insert([
+      { telefono: userPhone, rol: 'user', contenido: textoUsuario }, 
+      { telefono: userPhone, rol: 'assistant', contenido: cleanReply }
+    ]);
 
+    res.setHeader('Content-Type', 'text/xml');
+    return res.status(200).send(`<Response><Message>${cleanReply}</Message></Response>`);
+
+  } catch (err) {
+    console.error('❌ Error:', err.message);
+    return res.status(200).send('<Response><Message>Error técnico.</Message></Response>');
+  }
+}
 // Airtable sin cambios (puedes agregar duración si quieres)
 async function crearCitaAirtable(datos) {
   try {
