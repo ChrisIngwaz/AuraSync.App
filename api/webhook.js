@@ -306,156 +306,7 @@ DATA_JSON:{
       messages.push({ role: msg.rol === 'assistant' ? 'assistant' : 'user', content: msg.contenido });
     });
     messages.push({ role: "user", content: textoUsuario });
-
-    const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: "gpt-4o",
-      messages: messages,
-      temperature: 0.3
-    }, { headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` }});
-
-    let fullReply = aiRes.data.choices[0].message.content;
-
-    // 7. PROCESAR JSON Y AGENDAR
-    let datosExtraidos = {};
-    let citaCreada = false;
-    let mensajeErrorCita = null;
-    const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/);
-    
-    if (jsonMatch) {
-      try {
-        datosExtraidos = JSON.parse(jsonMatch[1].trim());
-        
-        // Crear/Actualizar cliente si es nuevo (necesitamos el ID para la cita)
-        if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
-          const { data: nuevoCliente, error: clienteError } = await supabase
-            .from('clientes')
-            .upsert({
-              telefono: userPhone,
-              nombre: datosExtraidos.nombre.trim(),
-              apellido: datosExtraidos.apellido || "",
-              fecha_nacimiento: datosExtraidos.fecha_nacimiento !== "..." ? datosExtraidos.fecha_nacimiento : null
-            }, { onConflict: 'telefono' })
-            .select()
-            .single();
-
-          if (!clienteError && nuevoCliente) {
-            cliente = nuevoCliente;
-          }
-        }
-
-        const tieneFecha = datosExtraidos.cita_fecha && datosExtraidos.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/);
-        const tieneHora = datosExtraidos.cita_hora && datosExtraidos.cita_hora.match(/^\d{2}:\d{2}$/);
-        
-        if (tieneFecha && tieneHora && cliente?.id) {
-          
-          // Obtener IDs relacionales y duración
-          const ids = await obtenerIdsRelacionales(
-            datosExtraidos.cita_servicio,
-            datosExtraidos.cita_especialista !== "..." ? datosExtraidos.cita_especialista : null
-          );
-
-          // Verificar disponibilidad con los IDs reales
-          const verificacion = await verificarDisponibilidad(
-            datosExtraidos.cita_fecha,
-            datosExtraidos.cita_hora,
-            ids.especialistaId,
-            ids.duracion
-          );
-
-          if (!verificacion.disponible) {
-            mensajeErrorCita = verificacion.mensaje;
-          } else {
-            const datosCita = {
-              clienteId: cliente.id,
-              telefono: userPhone,
-              nombre: cliente.nombre || datosExtraidos.nombre,
-              apellido: cliente.apellido || datosExtraidos.apellido || "",
-              fecha: datosExtraidos.cita_fecha,
-              hora: datosExtraidos.cita_hora,
-              servicio: datosExtraidos.cita_servicio !== "..." ? datosExtraidos.cita_servicio : "Servicio",
-    
-    // 7. PROCESAR JSON Y AGENDAR (CON LOGS DETALLADOS)
-    let datosExtraidos = {};
-    let citaCreada = false;
-    let mensajeErrorCita = null;
-    let debugInfo = []; // Para tracking
-    
-    const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/);
-    
-    console.log('🔍 JSON encontrado:', jsonMatch ? 'SÍ' : 'NO');
-    console.log('📝 Respuesta completa de OpenAI:', fullReply.substring(0, 200) + '...');
-    
-    if (jsonMatch) {
-      try {
-        datosExtraidos = JSON.parse(jsonMatch[1].trim());
-        console.log('📊 Datos extraídos:', JSON.stringify(datosExtraidos));
-        
-        // Crear/Actualizar cliente si es nuevo
-        if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
-          console.log('👤 Creando nuevo cliente...');
-          const { data: nuevoCliente, error: clienteError } = await supabase
-            .from('clientes')
-            .upsert({
-              telefono: userPhone,
-              nombre: datosExtraidos.nombre.trim(),
-              apellido: datosExtraidos.apellido || "",
-              fecha_nacimiento: datosExtraidos.fecha_nacimiento !== "..." ? datosExtraidos.fecha_nacimiento : null
-            }, { onConflict: 'telefono' })
-            .select()
-            .single();
-
-          if (clienteError) {
-            console.error('❌ Error creando cliente:', clienteError);
-          } else if (nuevoCliente) {
-            cliente = nuevoCliente;
-            console.log('✅ Cliente creado/actualizado ID:', cliente.id);
-          }
-        }
-
-        const tieneFecha = datosExtraidos.cita_fecha && datosExtraidos.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/);
-        const tieneHora = datosExtraidos.cita_hora && datosExtraidos.cita_hora.match(/^\d{2}:\d{2}$/);
-        
-        console.log('📅 Fecha válida:', tieneFecha ? 'SÍ' : 'NO', '-', datosExtraidos.cita_fecha);
-        console.log('🕐 Hora válida:', tieneHora ? 'SÍ' : 'NO', '-', datosExtraidos.cita_hora);
-        console.log('👤 Cliente ID:', cliente?.id);
-        
-        if (tieneFecha && tieneHora && cliente?.id) {
-          
-          // Obtener IDs relacionales y duración
-          console.log('🔎 Buscando IDs relacionales...');
-          const ids = await obtenerIdsRelacionales(
-            datosExtraidos.cita_servicio,
-            datosExtraidos.cita_especialista !== "..." ? datosExtraidos.cita_especialista : null
-          );
-          
-          console.log('📋 IDs encontrados:', {
-            servicioId: ids.servicioId,
-            especialistaId: ids.especialistaId,
-            duracion: ids.duracion,
-            precio: ids.precio
-          });
-
-          // Verificar disponibilidad
-          console.log('✅ Verificando disponibilidad...');
-          const verificacion = await verificarDisponibilidad(
-            datosExtraidos.cita_fecha,
-            datosExtraidos.cita_hora,
-            ids.especialistaId,
-            ids.duracion
-          );
-
-          if (!verificacion.disponible) {
-            console.log('⚠️ Horario NO disponible:', verificacion.mensaje);
-            mensajeErrorCita = verificacion.mensaje;
-          } else {
-            console.log('✅ Horario disponible, creando cita...');
-            
-            const datosCita = {
-              clienteId: cliente.id,
-              telefono: userPhone,
-              nombre: cliente.nombre || datosExtraidos.nombre,
-
-// ... (todo tu código anterior se mantiene igual hasta la línea del AI response) ...
+    // ... (todo tu código anterior se mantiene igual hasta la línea del AI response) ...
     const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: "gpt-4o",
       messages: messages,
@@ -630,4 +481,9 @@ async function crearCitaAirtable(datos) {
     console.error('Error Airtable:', error.response?.data || error.message);
     return false; 
   }
- }
+}
+        
+
+          
+          
+
