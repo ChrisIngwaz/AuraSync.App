@@ -1,17 +1,15 @@
 {
   "name": "aurasync-whatsapp",
-  "private": true,
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "node api/webhook.js",
     "start": "node api/webhook.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.101.1",
     "axios": "^1.14.0",
-    "dotenv": "^17.4.0",
     "express": "^4.22.1",
-    "twilio": "^5.13.1"
+    "twilio": "^5.13.1",
+    "dotenv": "^17.4.0"
   }
 }
