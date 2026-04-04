@@ -1,4 +1,29 @@
 {
+  "version": 2,
+  "builds": [
+    {
+      "src": "webhook.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "daily-report.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/reporte-diario",
+      "dest": "daily-report.js"
+    },
+    {
+      "src": "/webhook",
+      "dest": "webhook.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "webhook.js"
+    }
+  ],
   "crons": [
     {
       "path": "/api/reporte-diario",
