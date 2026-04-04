@@ -11,7 +11,7 @@ const CONFIG = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY
 };
 
-// ============ FUNCIONES AUXILIARES DE TIEMPO ============
+// ============ TIME UTILITIES ============
 
 function timeToMinutes(hora) {
   const [h, m] = hora.split(':').map(Number);
@@ -25,10 +25,11 @@ function minutesToTime(minutos) {
 }
 
 /**
- * Verifica disponibilidad considerando especialista_id y duración real
+ * VERIFICA DISPONIBILIDAD (Fail-Closed Logic)
  */
 async function verificarDisponibilidad(fecha, hora, especialistaId, duracionMinutos) {
   try {
+    // If no specialist is assigned yet, we assume it's okay but we will assign one later
     if (!especialistaId || especialistaId === '...' || especialistaId === 'Asignar') {
       return { disponible: true, mensaje: null };
     }
@@ -45,26 +46,27 @@ async function verificarDisponibilidad(fecha, hora, especialistaId, duracionMinu
       };
     }
 
-    // Buscar citas existentes para ese especialista y fecha
+    // Search for existing appointments for that specialist on that day
     const { data: citasExistentes, error } = await supabase
       .from('citas')
       .select('fecha_hora, duracion_aux, servicio_aux')
       .eq('especialista_id', especialistaId)
-      .eq('fecha_hora::date', fecha)  // Cast a date para comparar solo la fecha
+      .eq('fecha_hora::date', fecha) 
       .in('estado', ['Confirmada', 'En proceso']);
 
     if (error) throw error;
 
     for (const cita of citasExistentes || []) {
-      const horaExistente = cita.fecha_hora.substring(11, 16); // Extraer HH:MM
+      const horaExistente = cita.fecha_hora.substring(11, 16); 
       const inicioExistente = timeToMinutes(horaExistente);
       const duracionExistente = cita.duracion_aux || 60;
       const finExistente = inicioExistente + duracionExistente;
 
+      // Overlap logic: (StartA < EndB) AND (EndA > StartB)
       if (inicioNueva < finExistente && finNueva > inicioExistente) {
         return {
           disponible: false,
-          mensaje: `Ya tenemos una cita de "${cita.servicio_aux}" a las ${horaExistente} (${duracionExistente} min). ¿Prefieres otro horario o especialista?`
+          mensaje: `El especialista ya tiene una cita de "${cita.servicio_aux}" a las ${horaExistente}.`
         };
       }
     }
@@ -72,12 +74,13 @@ async function verificarDisponibilidad(fecha, hora, especialistaId, duracionMinu
     return { disponible: true, mensaje: null };
   } catch (error) {
     console.error('Error verificando disponibilidad:', error);
-    return { disponible: true, mensaje: null }; // Fallback seguro
+    // CRITICAL: Fail-Closed. If we can't check, we assume it's NOT available to avoid double-booking.
+    return { disponible: false, mensaje: "En este momento no puedo acceder al calendario. ¿Podrías darme un minuto o intentar otro horario?" };
   }
 }
 
 /**
- * Obtiene IDs de servicio y especialista por nombre
+ * RELATIONAL ID RESOLVER (Fuzzy-ish matching)
  */
 async function obtenerIdsRelacionales(servicioNombre, especialistaNombre) {
   try {
@@ -86,12 +89,11 @@ async function obtenerIdsRelacionales(servicioNombre, especialistaNombre) {
     let duracion = 60;
     let precio = 0;
 
-    // Buscar servicio
     if (servicioNombre && servicioNombre !== '...') {
       const { data: serv } = await supabase
         .from('servicios')
         .select('id, duracion, precio')
-        .ilike('nombre', servicioNombre)
+        .ilike('nombre', `%${servicioNombre}%`) // Use wildcards for better matching
         .maybeSingle();
       
       if (serv) {
@@ -101,12 +103,11 @@ async function obtenerIdsRelacionales(servicioNombre, especialistaNombre) {
       }
     }
 
-    // Buscar especialista
     if (especialistaNombre && especialistaNombre !== '...' && especialistaNombre !== 'Asignar') {
       const { data: esp } = await supabase
         .from('especialistas')
         .select('id')
-        .ilike('nombre', especialistaNombre)
+        .ilike('nombre', `%${especialistaNombre}%`)
         .maybeSingle();
       
       if (esp) especialistaId = esp.id;
@@ -120,14 +121,14 @@ async function obtenerIdsRelacionales(servicioNombre, especialistaNombre) {
 }
 
 /**
- * Crea cita en Supabase adaptado a tu esquema relacional
+ * CREATE APPOINTMENT (Single Source of Truth Flow)
  */
-async function crearCitaSupabase(datos) {
+async function registrarCita(datos) {
   try {
-    // Combinar fecha y hora en timestamp
     const fechaHora = `${datos.fecha}T${datos.hora}:00`;
 
-    const { data, error } = await supabase
+    // 1. Write to SUPABASE first (Source of Truth)
+    const { data, error: sError } = await supabase
       .from('citas')
       .insert({
         cliente_id: datos.clienteId,
@@ -142,319 +143,18 @@ async function crearCitaSupabase(datos) {
       .select()
       .single();
 
-    if (error) {
-      // Si es error de FK (servicio/especialista no existe), intentamos sin FKs como fallback
-      if (error.code === '23503') {
-        console.warn('FK no encontrada, guardando con auxiliares nulos');
-        const { data: fallbackData, error: fallbackError } = await supabase
-          .from('citas')
-          .insert({
-            cliente_id: datos.clienteId,
-            fecha_hora: fechaHora,
-            estado: 'Confirmada',
-            nombre_cliente_aux: `${datos.nombre} ${datos.apellido}`.trim(),
-            servicio_aux: datos.servicio,
-            duracion_aux: datos.duracion
-          })
-          .select()
-          .single();
-        
-        if (fallbackError) throw fallbackError;
-        console.log('✅ Cita guardada en Supabase (modo fallback):', fallbackData.id);
-        return true;
-      }
-      throw error;
-    }
+    if (sError) throw sError;
 
-    console.log('✅ Cita guardada en Supabase:', data.id);
-    return true;
+    // 2. Mirror to AIRTABLE (Secondary/Admin view)
+    await crearCitaAirtable(datos);
+
+    return { success: true, id: data.id };
   } catch (error) {
-    console.error('❌ Error guardando en Supabase:', error.message);
-    return false;
+    console.error('❌ Error registrando cita:', error.message);
+    return { success: false, error: error.message };
   }
 }
 
-// ============ HANDLER PRINCIPAL ============
-
-export default async function handler(req, res) {
-  if (req.method !== 'POST') {
-    return res.status(200).send('<Response></Response>');
-  }
-
-  const { Body, From, MediaUrl0 } = req.body;
-  const userPhone = From.replace('whatsapp:', '').trim();
-  
-  console.log(`\n📱 ${userPhone}`);
-
-  try {
-    // 1. PROCESAR AUDIO/TEXTO
-    let textoUsuario = Body || "";
-    
-    if (MediaUrl0) {
-      try {
-        const deepgramRes = await axios.post(
-          "https://api.deepgram.com/v1/listen?model=nova-2&language=es", 
-          { url: MediaUrl0 }, 
-          { 
-            headers: { 'Authorization': `Token ${CONFIG.DEEPGRAM_API_KEY}`, 'Content-Type': 'application/json' },
-            timeout: 15000
-          }
-        );
-        textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
-        console.log('🎤:', textoUsuario);
-      } catch (error) {
-        return res.status(200).send('<Response><Message>Error con audio. Escribime por favor.</Message></Response>');
-      }
-    }
-
-    // 2. CARGAR CLIENTE (incluyendo ID para la relación)
-    let { data: cliente } = await supabase
-      .from('clientes')
-      .select('id, nombre, apellido, fecha_nacimiento')  // Agregado 'id'
-      .eq('telefono', userPhone)
-      .maybeSingle();
-
-    const esNuevo = !cliente?.nombre;
-
-    // 3. RECUPERAR HISTORIAL
-    let historialFiltrado = [];
-    if (!esNuevo) {
-      const { data: mensajes } = await supabase
-        .from('conversaciones')
-        .select('rol, contenido')
-        .eq('telefono', userPhone)
-        .order('created_at', { ascending: false })
-        .limit(6);
-      
-      if (mensajes) historialFiltrado = mensajes.reverse();
-    }
-
-        // 4. DATOS DE NEGOCIO
-    const { data: especialistas } = await supabase.from('especialistas').select('id, nombre, rol, expertise');
-    const { data: servicios } = await supabase.from('servicios').select('nombre, precio, duracion');
-    
-    const especialistasConExpertise = especialistas?.map(e => 
-      `- ${e.nombre} (${e.rol}): ${e.expertise || 'Especialista certificado con amplia experiencia.'}`
-    ).join('\n') || "Nuestro equipo de expertos";
-    
-    const catalogoDetallado = servicios?.map(s => 
-      `${s.nombre} ($${s.precio}, ${s.duracion} min)`
-    ).join(', ') || "servicios";
-    
-    // 5. SYSTEM PROMPT
-    const ahora = new Date();
-    const hoyEcuador = new Intl.DateTimeFormat('es-EC', {
-      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-      timeZone: 'America/Guayaquil'
-    }).format(ahora);
-    const anioActual = ahora.getFullYear();
-
-    const systemPrompt = `Tu nombre es Aura. Eres la coordinadora ejecutiva de AuraSync. Hablas como una profesional experta que conoce el negocio perfectamente: directa, cálida, eficiente y con seguridad en cada palabra. No eres un asistente virtual, eres parte del equipo.
-
-[REGLAS DE CONVERSACIÓN]
-1. NATURALIDAD: Responde con empatía. Si el cliente pide una cita, confirma que hay espacio (sin mencionarle al cliente que estás consultando), antes de pedir más datos. No uses frases prefabricadas.
-2. ASESORÍA SUTIL: Solo sugiere tratamientos adicionales si la conversación fluye hacia ello o si el cliente menciona un problema. No lo fuerces al inicio.
-3. LENGUAJE: Sofisticado pero cercano. Evita el tono robótico. Eres el brazo derecho del local.
-
-[REGLAS DE ORO - NUNCA ROMPAS]
-1. NUNCA digas "déjame verificar", "un momento", "estoy consultando", "permíteme revisar" o "déjame checar". Eso suena a robot de banco. Tú SABES la información o la gestionas directamente sin anunciar procesos internos.
-2. NUNCA combines pensamiento y acción en el mismo mensaje. No digas "Voy a revisar... [pausa ficticia]... ¡Sí hay espacio!" 
-3. Lenguaje ejecutivo: Usa "Te agendo", "Confirmamos", "Queda listo", "Te anoto". NUNCA "Voy a intentar", "Espera mientras...", "Creo que puedo", "Déjame ver si hay espacio".
-
-[FLUJO DE AGENDAMIENTO NATURAL]
-Si el cliente solicita una cita:
-- FALTAN DATOS: Pregunta lo que hace falta de forma conversacional. Ejemplo: "Perfecto, para mañana a las 11:00 tengo a Anita disponible. ¿Prefieres con ella o te gustaría otro horario con Marina?"
-- YA TIENES TODO (fecha, hora, servicio, especialista): Confirma con seguridad absoluta: "Listo, te queda agendado para mañana a las 11:00 con Anita para Manicura Aura Express. ¿Confirmamos?"
-- HAY CONFLICTO (el código te informará): Ofrece alternativas sin dramatizar: "A las 3:00 con Carlos ya tengo ocupado, pero te puedo ofrecer a las 4:00 o a las 3:00 con Elena. ¿Cuál prefieres?"
-
-[ASESORÍA DE ESPECIALISTAS - EXPERTISE REAL]
-Tu equipo y sus fortalezas:
-${especialistasConExpertise}
-
-REGLAS DE RECOMENDACIÓN:
-- SIEMPRE sugiere 1 o 2 especialistas máximo, destacando su expertise específico relacionado al servicio solicitado
-- Si hay solapamiento de habilidades, diferencia por estilo: "Elena es nuestra nail artist creativa para diseños personalizados"
-- Si el cliente NO menciona preferencia, usa la expertise para persuadir: "Para hidratación facial te recomendaría Marina, es facialista holística y sus masajes relajantes son increíbles. ¿Te gustaría con ella?"
-- NUNCA dejes sin opción: si el especialista ideal está ocupado, presenta la alternativa resaltando SU expertise
-
-[SERVICIOS Y DURACIONES]
-${catalogoDetallado}
-Horario: 9:00 a 18:00
-[MANEJO DE OBJECIONES]
-- Si piden un servicio no listado: "Específicamente de pedicura no tengo en el menú, pero puedo agendarte una atención personalizada para tus uñas. ¿Te funciona?"
-- Si la hora está fuera de horario: "Atendemos de 9 a 6. ¿Te funciona a las 9:00 mañana o prefieres otro día?"
-
-[CONTEXTO TEMPORAL]
-- Hoy es ${hoyEcuador}. Año: ${anioActual}
-- Calcula fechas naturales (mañana, pasado, el lunes que viene)
-
-[ESTRUCTURA DE DATOS - INVISIBLE]
-Extrae estos datos de la conversación y ponlos al final en JSON (el usuario no debe ver esto):
-DATA_JSON:{
-  "nombre": "${cliente?.nombre || ''}",
-  "apellido": "${cliente?.apellido || ''}",
-  "fecha_nacimiento": "${cliente?.fecha_nacimiento || ''}",
-  "cita_fecha": "YYYY-MM-DD",
-  "cita_hora": "HH:MM",
-  "cita_servicio": "...",
-  "cita_especialista": "..."
-}`;
-
-    // 6. CONSTRUIR MENSAJES PARA AI
-    const messages = [{ role: "system", content: systemPrompt }];
-    historialFiltrado.forEach(msg => {
-      messages.push({ role: msg.rol === 'assistant' ? 'assistant' : 'user', content: msg.contenido });
-    });
-    messages.push({ role: "user", content: textoUsuario });
-    
-    const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: "gpt-4o",
-      messages: messages,
-      temperature: 0.3
-    }, { headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` }});
-
-    let fullReply = aiRes.data.choices[0].message.content;
-
-    // 7. PROCESAR JSON Y AGENDAR (VERSIÓN CORREGIDA CON LOGS)
-    let datosExtraidos = {};
-    let citaCreada = false;
-    let mensajeErrorCita = null;
-    
-    const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/);
-    
-    console.log('🔍 JSON encontrado:', jsonMatch ? 'SÍ' : 'NO');
-    console.log('📝 Respuesta OpenAI:', fullReply.substring(0, 300));
-    
-    if (jsonMatch) {
-      try {
-        datosExtraidos = JSON.parse(jsonMatch[1].trim());
-        console.log('📊 Datos extraídos:', JSON.stringify(datosExtraidos));
-        
-        // Crear/Actualizar cliente si es nuevo
-        if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
-          console.log('👤 Creando cliente...');
-          const { data: nuevoCliente, error: clienteError } = await supabase
-            .from('clientes')
-            .upsert({
-              telefono: userPhone,
-              nombre: datosExtraidos.nombre.trim(),
-              apellido: datosExtraidos.apellido || "",
-              fecha_nacimiento: datosExtraidos.fecha_nacimiento !== "..." ? datosExtraidos.fecha_nacimiento : null
-            }, { onConflict: 'telefono' })
-            .select()
-            .single();
-
-          if (clienteError) {
-            console.error('❌ Error cliente:', clienteError);
-          } else if (nuevoCliente) {
-            cliente = nuevoCliente;
-            console.log('✅ Cliente ID:', cliente.id);
-          }
-        }
-
-        const tieneFecha = datosExtraidos.cita_fecha && datosExtraidos.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/);
-        const tieneHora = datosExtraidos.cita_hora && datosExtraidos.cita_hora.match(/^\d{2}:\d{2}$/);
-        
-        console.log('📅 Fecha válida:', tieneFecha, '|', datosExtraidos.cita_fecha);
-        console.log('🕐 Hora válida:', tieneHora, '|', datosExtraidos.cita_hora);
-        console.log('👤 Cliente ID:', cliente?.id);
-        
-        if (tieneFecha && tieneHora && cliente?.id) {
-          
-          console.log('🔎 Buscando IDs...');
-          const ids = await obtenerIdsRelacionales(
-            datosExtraidos.cita_servicio,
-            datosExtraidos.cita_especialista !== "..." ? datosExtraidos.cita_especialista : null
-          );
-          
-          console.log('📋 IDs:', { serv: ids.servicioId, esp: ids.especialistaId, dur: ids.duracion });
-
-          console.log('✅ Verificando disponibilidad...');
-          const verificacion = await verificarDisponibilidad(
-            datosExtraidos.cita_fecha,
-            datosExtraidos.cita_hora,
-            ids.especialistaId,
-            ids.duracion
-          );
-
-          if (!verificacion.disponible) {
-            console.log('⚠️ No disponible:', verificacion.mensaje);
-            mensajeErrorCita = verificacion.mensaje;
-          } else {
-            console.log('✅ Disponible, creando cita...');
-            
-            const datosCita = {
-              clienteId: cliente.id,
-              telefono: userPhone,
-              nombre: cliente.nombre || datosExtraidos.nombre,
-              apellido: cliente.apellido || datosExtraidos.apellido || "",
-              fecha: datosExtraidos.cita_fecha,
-              hora: datosExtraidos.cita_hora,
-              servicio: datosExtraidos.cita_servicio !== "..." ? datosExtraidos.cita_servicio : "Servicio",
-              especialista: datosExtraidos.cita_especialista !== "..." ? datosExtraidos.cita_especialista : "Asignar",
-              servicioId: ids.servicioId,
-              especialistaId: ids.especialistaId,
-              duracion: ids.duracion,
-              precio: ids.precio
-            };
-
-            console.log('☁️ Enviando a Airtable...');
-            const citaAirtable = await crearCitaAirtable(datosCita);
-            console.log('📊 Airtable:', citaAirtable ? 'OK' : 'FAIL');
-            
-            console.log('🗄️ Enviando a Supabase...');
-            const citaSupabase = await crearCitaSupabase(datosCita);
-            console.log('📊 Supabase:', citaSupabase ? 'OK' : 'FAIL');
-
-            citaCreada = citaAirtable;
-            
-            if (!citaAirtable) {
-              mensajeErrorCita = "Hubo un problema técnico al guardar la cita. ¿Intentamos de nuevo?";
-            }
-          }
-        } else {
-          console.log('❌ Faltan datos:', { fecha: tieneFecha, hora: tieneHora, cliente: !!cliente?.id });
-        }
-      } catch (e) { 
-        console.error('❌ Error JSON:', e.message);
-      }
-    } else {
-      console.warn('⚠️ NO SE ENCONTRÓ JSON');
-      if (fullReply.toLowerCase().includes('agendado')) {
-        console.error('🚨 La IA confirmó pero no generó JSON');
-      }
-    }
-
-    // 8. RESPUESTA FINAL
-    let cleanReply = fullReply.replace(/DATA_JSON[\s\S]*/, '').trim();
-    
-    if (mensajeErrorCita) {
-      cleanReply += `\n\n${mensajeErrorCita}`;
-    } else if (citaCreada) {
-      cleanReply += `\n\n✅ Cita registrada correctamente.`;
-    } else {
-      if (cleanReply.toLowerCase().includes('agendado') || cleanReply.toLowerCase().includes('queda')) {
-        cleanReply += `\n\n⚠️ Por favor confirma los datos para registrar la cita correctamente.`;
-      }
-    }
-    
-    console.log('📤 Respuesta:', cleanReply.substring(0, 100));
-
-    await supabase.from('conversaciones').insert([
-      { telefono: userPhone, rol: 'user', contenido: textoUsuario }, 
-      { telefono: userPhone, rol: 'assistant', contenido: cleanReply }
-    ]);
-
-    res.setHeader('Content-Type', 'text/xml');
-    return res.status(200).send(`<Response><Message>${cleanReply}</Message></Response>`);
-
-  } catch (err) {
-    console.error('❌ Error:', err.message);
-    return res.status(200).send('<Response><Message>Error técnico.</Message></Response>');
-  }
-}
-
-// Airtable sin cambios 
 async function crearCitaAirtable(datos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
@@ -476,14 +176,173 @@ async function crearCitaAirtable(datos) {
     await axios.post(url, payload, { 
       headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
     });
-    return true;
   } catch (error) { 
-    console.error('Error Airtable:', error.response?.data || error.message);
-    return false; 
+    console.error('Error Airtable Mirroring:', error.message);
+    // We don't throw error here because Supabase already succeeded
   }
 }
+
+// ============ MAIN HANDLER ============
+
+export default async function handler(req, res) {
+  if (req.method !== 'POST') return res.status(200).send('<Response></Response>');
+
+  const { Body, From, MediaUrl0 } = req.body;
+  const userPhone = From.replace('whatsapp:', '').trim();
+  
+  try {
+    // 1. INPUT PROCESSING
+    let textoUsuario = Body || "";
+    if (MediaUrl0) {
+      try {
+        const deepgramRes = await axios.post(
+          "https://api.deepgram.com/v1/listen?model=nova-2&language=es", 
+          { url: MediaUrl0 }, 
+          { headers: { 'Authorization': `Token ${CONFIG.DEEPGRAM_API_KEY}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+        );
+        textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
+      } catch (error) {
+        return res.status(200).send('<Response><Message>Tuve un problema con el audio. ¿Podrías escribirme?</Message></Response>');
+      }
+    }
+
+    // 2. CLIENT RETRIEVAL
+    let { data: cliente } = await supabase
+      .from('clientes')
+      .select('id, nombre, apellido, fecha_nacimiento')
+      .eq('telefono', userPhone)
+      .maybeSingle();
+
+    const esNuevo = !cliente;
+
+    // 3. MEMORY/HISTORY
+    let historialFiltrado = [];
+    if (!esNuevo) {
+      const { data: mensajes } = await supabase
+        .from('conversaciones')
+        .select('rol, contenido')
+        .eq('telefono', userPhone)
+        .order('created_at', { ascending: false })
+        .limit(6);
+      if (mensajes) historialFiltrado = mensajes.reverse();
+    }
+
+    // 4. BUSINESS DATA
+    const { data: especialistas } = await supabase.from('especialistas').select('id, nombre, rol, expertise');
+    const { data: servicios } = await supabase.from('servicios').select('nombre, precio, duracion');
+    
+    const especialistasList = especialistas?.map(e => `- ${e.nombre} (${e.rol}): ${e.expertise || 'Experto certificado'}`).join('\n') || "";
+    const serviciosList = servicios?.map(s => `${s.nombre} ($${s.precio}, ${s.duracion} min)`).join(', ') || "";
+
+    // 5. SYSTEM PROMPT (Refined for deterministic behavior)
+    const ahora = new Date();
+    const hoyEcuador = new Intl.DateTimeFormat('es-EC', {
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'America/Guayaquil'
+    }).format(ahora);
+
+    const systemPrompt = `Tu nombre es Aura, la coordinadora ejecutiva de AuraSync. Eres profesional, directa, cálida y eficiente. 
+
+[ESTILO DE COMUNICACIÓN]
+- No eres un bot, eres parte del equipo. Usa: "Te agendo", "Confirmamos", "Queda listo".
+- NUNCA digas: "Déjame revisar", "Un momento", "Consultando el sistema". Tú manejas la información con seguridad.
+- Si el cliente pide una cita, PROPÓN el horario basándote en la disponibilidad. No confirmes que "está registrado" hasta que el sistema te lo valide.
+
+[REGLAS CRÍTICAS]
+1. NUNCA confirmes que una cita "ya está guardada" en tu respuesta de texto. Di: "Tengo espacio a las 10:00 con Anita, ¿te reservo ese lugar?".
+2. Usa EXACTAMENTE los nombres de servicios y especialistas de la lista proporcionada.
+3. Si falta un dato (fecha, hora, servicio), pídelo de forma natural.
+
+[DATOS DEL NEGOCIO]
+Especialistas:
+${especialistasList}
+Servicios:
+${serviciosList}
+Horario: 9:00 a 18:00. Hoy es ${hoyEcuador}.
+
+[ESTRUCTURA DE SALIDA]
+Al final de tu respuesta, si tienes los datos para una cita, agrega el bloque JSON:
+DATA_JSON:{
+  "nombre": "${cliente?.nombre || '...'} ",
+  "apellido": "${cliente?.apellido || '...'} ",
+  "cita_fecha": "YYYY-MM-DD",
+  "cita_hora": "HH:MM",
+  "cita_servicio": "Nombre Exacto",
+  "cita_especialista": "Nombre Exacto"
+}`;
+
+    // 6. AI EXECUTION
+    const messages = [{ role: "system", content: systemPrompt }, ...historialFiltrado.map(m => ({ role: m.rol, content: m.contenido })), { role: "user", content: textoUsuario }];
+    
+    const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
+      model: "gpt-4o",
+      messages: messages,
+      temperature: 0.3
+    }, { headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` }});
+
+    let fullReply = aiRes.data.choices[0].message.content;
+
+    // 7. DETERMINISTIC VALIDATION & REGISTRATION
+    let finalMessage = fullReply.replace(/DATA_JSON[\s\S]*/, '').trim();
+    const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/);
+    
+    if (jsonMatch) {
+      try {
+        const datosExtraidos = JSON.parse(jsonMatch[1].trim());
         
+        // Handle new client registration
+        if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
+          const { data: nuevoCliente } = await supabase.from('clientes').upsert({
+            telefono: userPhone, nombre: datosExtraidos.nombre.trim(), apellido: datosExtraidos.apellido || ""
+          }, { onConflict: 'telefono' }).select().single();
+          cliente = nuevoCliente;
+        }
 
-          
-          
+        const tieneFecha = datosExtraidos.cita_fecha?.match(/^\d{4}-\d{2}-\d{2}$/);
+        const tieneHora = datosExtraidos.cita_hora?.match(/^\d{2}:\d{2}$/);
 
+        if (tieneFecha && tieneHora && cliente?.id) {
+          const ids = await obtenerIdsRelacionales(datosExtraidos.cita_servicio, datosExtraidos.cita_especialista);
+          const verificacion = await verificarDisponibilidad(datosExtraidos.cita_fecha, datosExtraidos.cita_hora, ids.especialistaId, ids.duracion);
+
+          if (!verificacion.disponible) {
+            finalMessage += `\n\n${verificacion.mensaje} ¿Te gustaría intentar con otro horario?`;
+          } else {
+            const resCita = await registrarCita({
+              clienteId: cliente.id,
+              telefono: userPhone,
+              nombre: cliente.nombre,
+              apellido: cliente.apellido,
+              fecha: datosExtraidos.cita_fecha,
+              hora: datosExtraidos.cita_hora,
+              servicio: datosExtraidos.cita_servicio,
+              especialista: datosExtraidos.cita_especialista,
+              servicioId: ids.servicioId,
+              especialistaId: ids.especialistaId,
+              duracion: ids.duracion,
+              precio: ids.precio
+            });
+
+            if (resCita.success) {
+              finalMessage += `\n\n✅ ¡Listo! Tu cita ha quedado confirmada en nuestro sistema.`;
+            } else {
+              finalMessage += `\n\nHubo un problema técnico al guardar. ¿Podemos intentar de nuevo?`;
+            }
+          }
+        }
+      } catch (e) { console.error('JSON Error:', e); }
+    }
+
+    // 8. FINAL RESPONSE & MEMORY
+    await supabase.from('conversaciones').insert([
+      { telefono: userPhone, rol: 'user', contenido: textoUsuario }, 
+      { telefono: userPhone, rol: 'assistant', contenido: finalMessage }
+    ]);
+
+    res.setHeader('Content-Type', 'text/xml');
+    return res.status(200).send(`<Response><Message>${finalMessage}</Message></Response>`);
+
+  } catch (err) {
+    console.error('Global Error:', err);
+    return res.status(200).send('<Response><Message>Lo siento, tuve un problema técnico. ¿Podrías repetirme eso?</Message></Response>');
+  }
+}
