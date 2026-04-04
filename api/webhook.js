@@ -4,13 +4,16 @@ import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 import twilio from 'twilio';
 
+// Cargar variables de entorno para desarrollo local
 dotenv.config();
 
 const app = express();
+
+// Middlewares para procesar los datos que envía Twilio
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Inicialización de Clientes
+// --- CONFIGURACIÓN Y CLIENTES ---
 const supabase = createClient(
   process.env.SUPABASE_URL || '',
   process.env.SUPABASE_KEY || ''
@@ -30,26 +33,31 @@ const CONFIG = {
 const twilioClient = twilio(CONFIG.TWILIO_ACCOUNT_SID, CONFIG.TWILIO_AUTH_TOKEN);
 const { MessagingResponse } = twilio.twiml;
 
-// ============ UTILIDADES DE TIEMPO ============
+// ============ FUNCIONES DE LÓGICA DE NEGOCIO ============
 
+// Convierte "14:30" a minutos (870) para comparar horarios
 function timeToMinutes(hora) {
+  if (!hora || !hora.includes(':')) return 0;
   const [h, m] = hora.split(':').map(Number);
   return h * 60 + m;
 }
 
 /**
- * VERIFICA DISPONIBILIDAD
+ * Verifica si el especialista está libre en esa fecha y hora
  */
 async function verificarDisponibilidad(fecha, hora, especialistaId, duracionMinutos) {
   try {
+    // Si no hay especialista asignado aún, permitimos avanzar
     if (!especialistaId || especialistaId === '...' || especialistaId === 'Asignar') {
       return { disponible: true, mensaje: null };
     }
 
     const inicioNueva = timeToMinutes(hora);
     const finNueva = inicioNueva + duracionMinutos;
-    const HORA_APERTURA = 540;  // 9:00
-    const HORA_CIERRE = 1080;   // 18:00
+    
+    // Horario de oficina: 9:00 AM (540 min) a 6:00 PM (1080 min)
+    const HORA_APERTURA = 540;
+    const HORA_CIERRE = 1080;
 
     if (inicioNueva < HORA_APERTURA || finNueva > HORA_CIERRE) {
       return { 
@@ -58,6 +66,7 @@ async function verificarDisponibilidad(fecha, hora, especialistaId, duracionMinu
       };
     }
 
+    // Consultar citas existentes en Supabase para ese especialista y día
     const { data: citasExistentes, error } = await supabase
       .from('citas')
       .select('fecha_hora, duracion_aux, servicio_aux')
@@ -73,6 +82,7 @@ async function verificarDisponibilidad(fecha, hora, especialistaId, duracionMinu
       const duracionExistente = cita.duracion_aux || 60;
       const finExistente = inicioExistente + duracionExistente;
 
+      // Lógica de traslape: (Inicio A < Fin B) y (Fin A > Inicio B)
       if (inicioNueva < finExistente && finNueva > inicioExistente) {
         return {
           disponible: false,
@@ -80,28 +90,39 @@ async function verificarDisponibilidad(fecha, hora, especialistaId, duracionMinu
         };
       }
     }
-
     return { disponible: true, mensaje: null };
   } catch (error) {
-    console.error('Error disponibilidad:', error);
-    return { disponible: false, mensaje: "Tuve un pequeño problema al ver la agenda. ¿Me das un segundo?" };
+    console.error('Error en disponibilidad:', error);
+    return { disponible: false, mensaje: "Tuve un problema al verificar la agenda. ¿Me das un segundo?" };
   }
 }
 
 /**
- * RESOLUTOR DE IDs
+ * Busca los IDs reales de Servicio y Especialista en la base de datos
  */
 async function obtenerIdsRelacionales(servicioNombre, especialistaNombre) {
   try {
     let servicioId = null, especialistaId = null, duracion = 60, precio = 0;
 
     if (servicioNombre && servicioNombre !== '...') {
-      const { data: serv } = await supabase.from('servicios').select('id, duracion, precio').ilike('nombre', `%${servicioNombre}%`).maybeSingle();
-      if (serv) { servicioId = serv.id; duracion = serv.duracion || 60; precio = serv.precio || 0; }
+      const { data: serv } = await supabase
+        .from('servicios')
+        .select('id, duracion, precio')
+        .ilike('nombre', `%${servicioNombre}%`)
+        .maybeSingle();
+      if (serv) { 
+        servicioId = serv.id; 
+        duracion = serv.duracion || 60; 
+        precio = serv.precio || 0; 
+      }
     }
 
     if (especialistaNombre && especialistaNombre !== '...' && especialistaNombre !== 'Asignar') {
-      const { data: esp } = await supabase.from('especialistas').select('id').ilike('nombre', `%${especialistaNombre}%`).maybeSingle();
+      const { data: esp } = await supabase
+        .from('especialistas')
+        .select('id')
+        .ilike('nombre', `%${especialistaNombre}%`)
+        .maybeSingle();
       if (esp) especialistaId = esp.id;
     }
 
@@ -112,12 +133,13 @@ async function obtenerIdsRelacionales(servicioNombre, especialistaNombre) {
 }
 
 /**
- * REGISTRO DE CITA
+ * Registra la cita en Supabase y hace el espejo en Airtable
  */
 async function registrarCita(datos) {
   try {
     const fechaHora = `${datos.fecha}T${datos.hora}:00`;
 
+    // 1. Guardar en Supabase
     const { data, error: sError } = await supabase.from('citas').insert({
       cliente_id: datos.clienteId,
       servicio_id: datos.servicioId,
@@ -131,9 +153,9 @@ async function registrarCita(datos) {
 
     if (sError) throw sError;
 
-    // Airtable Mirroring
-    const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-    await axios.post(url, {
+    // 2. Guardar en Airtable (Espejo para el dueño)
+    const airtableUrl = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
+    await axios.post(airtableUrl, {
       records: [{
         fields: {
           "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
@@ -147,83 +169,116 @@ async function registrarCita(datos) {
           "Duración estimada (minutos)": datos.duracion
         }
       }]
-    }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
+    }, { 
+      headers: { 
+        'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 
+        'Content-Type': 'application/json' 
+      } 
+    });
 
     return { success: true, id: data.id };
   } catch (error) {
+    console.error('Error en registro de cita:', error.message);
     return { success: false, error: error.message };
   }
 }
 
-// ============ WEBHOOK PRINCIPAL ============
+// ============ RUTA DEL WEBHOOK (EL CORAZÓN DE AURA) ============
 
-app.post('/webhook', async (req, res) => {
+app.all(['/webhook', '/api/webhook'], async (req, res) => {
+  // Soporte para GET (prueba) y POST (Twilio)
+  if (req.method === 'GET') {
+    return res.status(200).send('AuraSync Webhook está activo y esperando a Twilio.');
+  }
+
   const { Body, From, MediaUrl0 } = req.body;
   const userPhone = From ? From.replace('whatsapp:', '').trim() : '';
   
   if (!userPhone) return res.status(200).send('<Response></Response>');
 
   try {
-    // 1. PROCESAR ENTRADA (Texto o Audio)
+    // 1. PROCESAR ENTRADA: ¿Es texto o es una nota de voz?
     let textoUsuario = Body || "";
     if (MediaUrl0) {
       try {
+        // Transcribir audio con Deepgram (Nova-2 es el modelo más rápido y preciso)
         const deepgramRes = await axios.post("https://api.deepgram.com/v1/listen?model=nova-2&language=es", 
           { url: MediaUrl0 }, 
           { headers: { 'Authorization': `Token ${CONFIG.DEEPGRAM_API_KEY}`, 'Content-Type': 'application/json' } }
         );
         textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
+        console.log('🎙 Audio transcribido:', textoUsuario);
       } catch (error) {
-        console.error('Deepgram Error:', error.message);
+        console.error('Error en Deepgram:', error.message);
       }
     }
 
-    // 2. IDENTIFICAR CLIENTE
-    let { data: cliente } = await supabase.from('clientes').select('id, nombre, apellido, fecha_nacimiento').eq('telefono', userPhone).maybeSingle();
+    // 2. IDENTIFICAR AL CLIENTE EN SUPABASE
+    let { data: cliente } = await supabase
+      .from('clientes')
+      .select('id, nombre, apellido, fecha_nacimiento')
+      .eq('telefono', userPhone)
+      .maybeSingle();
+
     const esNuevo = !cliente;
     const perfilIncompleto = cliente && (!cliente.nombre || !cliente.apellido || !cliente.fecha_nacimiento);
 
-    // 3. RECUPERAR HISTORIAL
-    const { data: mensajes } = await supabase.from('conversaciones').select('rol, contenido').eq('telefono', userPhone).order('created_at', { ascending: false }).limit(10);
+    // 3. RECUPERAR MEMORIA (Últimos 10 mensajes)
+    const { data: mensajes } = await supabase
+      .from('conversaciones')
+      .select('rol, contenido')
+      .eq('telefono', userPhone)
+      .order('created_at', { ascending: false })
+      .limit(10);
     const historial = mensajes ? mensajes.reverse() : [];
 
-    // 4. DATOS DE NEGOCIO
+    // 4. OBTENER DATOS ACTUALES DEL NEGOCIO (Para que Aura sepa qué ofrecer)
     const { data: especialistas } = await supabase.from('especialistas').select('nombre, rol, expertise');
     const { data: servicios } = await supabase.from('servicios').select('nombre, precio, duracion');
-    const especialistasList = especialistas?.map(e => `- ${e.nombre} (${e.rol}): ${e.expertise}`).join('\n') || "";
-    const serviciosList = servicios?.map(s => `${s.nombre} ($${s.precio}, ${s.duracion} min)`).join(', ') || "";
+    
+    const especialistasList = especialistas?.map(e => `- ${e.nombre} (${e.rol}): ${e.expertise}`).join('\n') || "Consultar disponibilidad.";
+    const serviciosList = servicios?.map(s => `${s.nombre} ($${s.precio}, ${s.duracion} min)`).join(', ') || "Ver catálogo.";
 
-    // 5. PERSONALIDAD DE AURA
-    const hoy = new Intl.DateTimeFormat('es-EC', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'America/Guayaquil' }).format(new Date());
+    // 5. CONFIGURAR LA PERSONALIDAD DE AURA (SYSTEM PROMPT)
+    const hoyEcuador = new Intl.DateTimeFormat('es-EC', { 
+      weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'America/Guayaquil' 
+    }).format(new Date());
 
     let systemPrompt = `Eres Aura, la Coordinadora Ejecutiva de AuraSync. Eres la mano derecha de nuestros especialistas y la guía de confianza de nuestros clientes. 
 
 [TU PERSONALIDAD]
-- **Humana y Sofisticada**: Hablas con seguridad y calidez. Eres extremadamente eficiente.
-- **Persuasiva**: "Vendes" la experiencia. Destaca el expertise de los especialistas.
+- **Humana y Sofisticada**: Hablas con elegancia, seguridad y calidez. Eres extremadamente eficiente.
+- **Persuasiva**: No solo agendas, "vendes" la experiencia. Destaca el talento de los especialistas.
 - **Proactiva**: Si un horario está ocupado, ofrece inmediatamente la mejor alternativa.
-- **Lenguaje**: Usa "nosotros", "nuestro equipo", "te he reservado".
+- **Lenguaje**: Usa un tono profesional. Usa "nosotros", "nuestro equipo", "te he reservado".
 
 [REGLAS DE ORO]
 1. **Registro Primero**: Si el cliente es nuevo o le faltan datos (Nombre, Apellido, Fecha de Nacimiento), tu prioridad es obtenerlos con elegancia antes de agendar.
-2. **Venta de Expertise**: Usa la lista de especialistas para persuadir.
-3. **Agenda Perfecta**: Intenta agrupar las citas para optimizar el tiempo.
+2. **Venta de Expertise**: Usa la lista de especialistas para dar confianza.
+3. **Agenda Perfecta**: Intenta agrupar las citas para optimizar el tiempo de los especialistas.
 
-[DATOS]
-Especialistas: ${especialistasList}
+[DATOS DEL NEGOCIO]
+Especialistas:
+${especialistasList}
+
 Servicios: ${serviciosList}
-Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
+
+Hoy es ${hoyEcuador}. Nuestro horario es de 9:00 a 18:00.`;
 
     if (esNuevo || perfilIncompleto) {
-      systemPrompt += `\n[ESTADO: REGISTRO PENDIENTE] Pide Nombre, Apellido y Fecha de Nacimiento (YYYY-MM-DD).`;
+      systemPrompt += `\n\n[ESTADO: REGISTRO PENDIENTE] El cliente no está registrado. Pide Nombre, Apellido y Fecha de Nacimiento (YYYY-MM-DD).`;
     }
 
-    systemPrompt += `\n[SALIDA JSON] Agrega siempre al final: DATA_JSON:{"nombre":"...","apellido":"...","fecha_nacimiento":"...","cita_fecha":"...","cita_hora":"...","cita_servicio":"...","cita_especialista":"..."}`;
+    systemPrompt += `\n\n[SALIDA OBLIGATORIA] Al final de cada respuesta, añade SIEMPRE este JSON oculto: DATA_JSON:{"nombre":"...","apellido":"...","fecha_nacimiento":"...","cita_fecha":"...","cita_hora":"...","cita_servicio":"...","cita_especialista":"..."}`;
 
-    // 6. EJECUCIÓN IA (GPT-4o)
+    // 6. LLAMADA A LA INTELIGENCIA ARTIFICIAL (GPT-4o)
     const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: "gpt-4o",
-      messages: [{ role: "system", content: systemPrompt }, ...historial.map((m) => ({ role: m.rol, content: m.contenido })), { role: "user", content: textoUsuario }],
+      messages: [
+        { role: "system", content: systemPrompt },
+        ...historial.map((m) => ({ role: m.rol, content: m.contenido })),
+        { role: "user", content: textoUsuario }
+      ],
       temperature: 0.3
     }, { headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` }});
 
@@ -231,42 +286,50 @@ Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
     let finalMessage = fullReply.replace(/DATA_JSON[\s\S]*/, '').trim();
     const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/);
     
+    // 7. PROCESAR ACCIONES BASADAS EN LA RESPUESTA DE LA IA
     if (jsonMatch) {
       try {
         const datos = JSON.parse(jsonMatch[1].trim());
         
-        // Registro/Actualización de Cliente
+        // A. Registro de Cliente
         if (datos.nombre !== "..." && datos.apellido !== "..." && datos.fecha_nacimiento.match(/^\d{4}-\d{2}-\d{2}$/)) {
           const { data: upserted } = await supabase.from('clientes').upsert({
-            telefono: userPhone, nombre: datos.nombre, apellido: datos.apellido, fecha_nacimiento: datos.fecha_nacimiento
+            telefono: userPhone, 
+            nombre: datos.nombre, 
+            apellido: datos.apellido, 
+            fecha_nacimiento: datos.fecha_nacimiento
           }, { onConflict: 'telefono' }).select().single();
+          
           if (upserted) {
             cliente = upserted;
-            if (esNuevo) finalMessage += "\n\n✅ ¡Bienvenido a AuraSync! Ya te he registrado en nuestro sistema VIP.";
+            if (esNuevo) finalMessage += "\n\n✅ ¡Bienvenido! Ya te he registrado en nuestro sistema de clientes preferenciales.";
           }
         }
 
-        // Agendamiento
+        // B. Intento de Agendamiento
         if (cliente && !perfilIncompleto && datos.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/) && datos.cita_hora.match(/^\d{2}:\d{2}$/)) {
           const ids = await obtenerIdsRelacionales(datos.cita_servicio, datos.cita_especialista);
           const disp = await verificarDisponibilidad(datos.cita_fecha, datos.cita_hora, ids.especialistaId, ids.duracion);
 
           if (!disp.disponible) {
-            finalMessage += `\n\n${disp.mensaje} ¿Te gustaría que busquemos otro horario?`;
+            finalMessage += `\n\n${disp.mensaje || "Ese horario no está disponible."} ¿Buscamos otra opción?`;
           } else {
             const resCita = await registrarCita({
               clienteId: cliente.id, telefono: userPhone, nombre: cliente.nombre, apellido: cliente.apellido,
               fecha: datos.cita_fecha, hora: datos.cita_hora, servicio: datos.cita_servicio, especialista: datos.cita_especialista,
               servicioId: ids.servicioId, especialistaId: ids.especialistaId, duracion: ids.duracion, precio: ids.precio
             });
-            if (resCita.success) finalMessage += `\n\n✅ ¡Listo! Tu cita ha quedado confirmada. Te esperamos.`;
+            if (resCita.success) finalMessage += `\n\n✅ ¡Excelente! Tu cita ha quedado confirmada. Nos vemos pronto.`;
           }
         }
-      } catch (e) { console.error('JSON Error'); }
+      } catch (e) { console.error('Error al procesar JSON de Aura'); }
     }
 
-    // 7. MEMORIA Y RESPUESTA
-    await supabase.from('conversaciones').insert([{ telefono: userPhone, rol: 'user', contenido: textoUsuario }, { telefono: userPhone, rol: 'assistant', contenido: finalMessage }]);
+    // 8. GUARDAR EN EL HISTORIAL Y ENVIAR RESPUESTA A WHATSAPP
+    await supabase.from('conversaciones').insert([
+      { telefono: userPhone, rol: 'user', contenido: textoUsuario },
+      { telefono: userPhone, rol: 'assistant', contenido: finalMessage }
+    ]);
 
     const twiml = new MessagingResponse();
     twiml.message(finalMessage);
@@ -274,19 +337,21 @@ Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
     return res.status(200).send(twiml.toString());
 
   } catch (err) {
-    console.error('Global Error:', err.message);
+    console.error('Error Crítico en Webhook:', err.message);
     const twiml = new MessagingResponse();
-    twiml.message('Lo siento, tuve un problema técnico. ¿Podrías repetirme eso?');
+    twiml.message('Mil disculpas, tuve un inconveniente técnico. ¿Podrías repetirme eso?');
     res.setHeader('Content-Type', 'text/xml');
     return res.status(200).send(twiml.toString());
   }
 });
 
-// COMPATIBILIDAD CON VERCEL
+// EXPORTAR PARA VERCEL
 export default app;
 
-// Inicio local (Solo si no estamos en producción)
+// INICIO LOCAL (Solo para pruebas fuera de Vercel)
 if (process.env.NODE_ENV !== 'production') {
   const PORT = process.env.PORT || 3000;
-  app.listen(PORT, '0.0.0.0', () => console.log(`AuraSync Online en puerto ${PORT}`));
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 AuraSync Online en puerto ${PORT}`);
+  });
 }
