@@ -1,15 +1,10 @@
 import express from 'express';
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import twilio from 'twilio';
 
 dotenv.config();
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(express.json());
@@ -43,7 +38,7 @@ function timeToMinutes(hora) {
 }
 
 /**
- * VERIFICA DISPONIBILIDAD (Fail-Closed Logic)
+ * VERIFICA DISPONIBILIDAD
  */
 async function verificarDisponibilidad(fecha, hora, especialistaId, duracionMinutos) {
   try {
@@ -94,7 +89,7 @@ async function verificarDisponibilidad(fecha, hora, especialistaId, duracionMinu
 }
 
 /**
- * RESOLUTOR DE IDs (Fuzzy Matching)
+ * RESOLUTOR DE IDs
  */
 async function obtenerIdsRelacionales(servicioNombre, especialistaNombre) {
   try {
@@ -117,13 +112,12 @@ async function obtenerIdsRelacionales(servicioNombre, especialistaNombre) {
 }
 
 /**
- * REGISTRO DE CITA (Supabase -> Airtable)
+ * REGISTRO DE CITA
  */
 async function registrarCita(datos) {
   try {
     const fechaHora = `${datos.fecha}T${datos.hora}:00`;
 
-    // 1. Registro en Supabase (Fuente de Verdad)
     const { data, error: sError } = await supabase.from('citas').insert({
       cliente_id: datos.clienteId,
       servicio_id: datos.servicioId,
@@ -137,7 +131,7 @@ async function registrarCita(datos) {
 
     if (sError) throw sError;
 
-    // 2. Sincronización con Airtable
+    // Airtable Mirroring
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     await axios.post(url, {
       records: [{
@@ -161,7 +155,7 @@ async function registrarCita(datos) {
   }
 }
 
-// ============ WEBHOOK PRINCIPAL (WhatsApp Sandbox) ============
+// ============ WEBHOOK PRINCIPAL ============
 
 app.post('/webhook', async (req, res) => {
   const { Body, From, MediaUrl0 } = req.body;
@@ -170,7 +164,7 @@ app.post('/webhook', async (req, res) => {
   if (!userPhone) return res.status(200).send('<Response></Response>');
 
   try {
-    // 1. PROCESAR ENTRADA (Texto o Notas de Voz)
+    // 1. PROCESAR ENTRADA (Texto o Audio)
     let textoUsuario = Body || "";
     if (MediaUrl0) {
       try {
@@ -199,7 +193,7 @@ app.post('/webhook', async (req, res) => {
     const especialistasList = especialistas?.map(e => `- ${e.nombre} (${e.rol}): ${e.expertise}`).join('\n') || "";
     const serviciosList = servicios?.map(s => `${s.nombre} ($${s.precio}, ${s.duracion} min)`).join(', ') || "";
 
-    // 5. PERSONALIDAD DE AURA (System Prompt)
+    // 5. PERSONALIDAD DE AURA
     const hoy = new Intl.DateTimeFormat('es-EC', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'America/Guayaquil' }).format(new Date());
 
     let systemPrompt = `Eres Aura, la Coordinadora Ejecutiva de AuraSync. Eres la mano derecha de nuestros especialistas y la guía de confianza de nuestros clientes. 
@@ -271,7 +265,7 @@ Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
       } catch (e) { console.error('JSON Error'); }
     }
 
-    // 7. MEMORIA Y RESPUESTA (TwiML)
+    // 7. MEMORIA Y RESPUESTA
     await supabase.from('conversaciones').insert([{ telefono: userPhone, rol: 'user', contenido: textoUsuario }, { telefono: userPhone, rol: 'assistant', contenido: finalMessage }]);
 
     const twiml = new MessagingResponse();
@@ -288,10 +282,11 @@ Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
   }
 });
 
-// Frontend & Static Files
-const distPath = path.join(process.cwd(), 'dist');
-app.use(express.static(distPath));
-app.get('*', (req, res) => res.sendFile(path.join(distPath, 'index.html')));
+// COMPATIBILIDAD CON VERCEL
+export default app;
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`AuraSync Online en puerto ${PORT}`));
+// Inicio local (Solo si no estamos en producción)
+if (process.env.NODE_ENV !== 'production') {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, '0.0.0.0', () => console.log(`AuraSync Online en puerto ${PORT}`));
+}
