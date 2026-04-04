@@ -29,7 +29,7 @@ const CONFIG = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   TWILIO_ACCOUNT_SID: process.env.TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN,
-  TWILIO_PHONE_NUMBER: process.env.TWILIO_PHONE_NUMBER // Ej: whatsapp:+14155238886
+  TWILIO_PHONE_NUMBER: process.env.TWILIO_PHONE_NUMBER
 };
 
 const twilioClient = twilio(CONFIG.TWILIO_ACCOUNT_SID, CONFIG.TWILIO_AUTH_TOKEN);
@@ -37,15 +37,15 @@ const { MessagingResponse } = twilio.twiml;
 
 // ============ UTILIDADES DE TIEMPO ============
 
-function timeToMinutes(hora: string) {
+function timeToMinutes(hora) {
   const [h, m] = hora.split(':').map(Number);
   return h * 60 + m;
 }
 
 /**
- * VERIFICA DISPONIBILIDAD (Lógica de Agenda Perfecta)
+ * VERIFICA DISPONIBILIDAD (Fail-Closed Logic)
  */
-async function verificarDisponibilidad(fecha: string, hora: string, especialistaId: string | null, duracionMinutos: number) {
+async function verificarDisponibilidad(fecha, hora, especialistaId, duracionMinutos) {
   try {
     if (!especialistaId || especialistaId === '...' || especialistaId === 'Asignar') {
       return { disponible: true, mensaje: null };
@@ -94,9 +94,9 @@ async function verificarDisponibilidad(fecha: string, hora: string, especialista
 }
 
 /**
- * RESOLUTOR DE IDs (Supabase)
+ * RESOLUTOR DE IDs (Fuzzy Matching)
  */
-async function obtenerIdsRelacionales(servicioNombre: string, especialistaNombre: string) {
+async function obtenerIdsRelacionales(servicioNombre, especialistaNombre) {
   try {
     let servicioId = null, especialistaId = null, duracion = 60, precio = 0;
 
@@ -117,12 +117,13 @@ async function obtenerIdsRelacionales(servicioNombre: string, especialistaNombre
 }
 
 /**
- * REGISTRO DE CITA (Supabase + Airtable)
+ * REGISTRO DE CITA (Supabase -> Airtable)
  */
-async function registrarCita(datos: any) {
+async function registrarCita(datos) {
   try {
     const fechaHora = `${datos.fecha}T${datos.hora}:00`;
 
+    // 1. Registro en Supabase (Fuente de Verdad)
     const { data, error: sError } = await supabase.from('citas').insert({
       cliente_id: datos.clienteId,
       servicio_id: datos.servicioId,
@@ -136,7 +137,7 @@ async function registrarCita(datos: any) {
 
     if (sError) throw sError;
 
-    // Airtable Mirroring
+    // 2. Sincronización con Airtable
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     await axios.post(url, {
       records: [{
@@ -155,7 +156,7 @@ async function registrarCita(datos: any) {
     }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
 
     return { success: true, id: data.id };
-  } catch (error: any) {
+  } catch (error) {
     return { success: false, error: error.message };
   }
 }
@@ -169,14 +170,18 @@ app.post('/webhook', async (req, res) => {
   if (!userPhone) return res.status(200).send('<Response></Response>');
 
   try {
-    // 1. PROCESAR ENTRADA (Texto o Audio)
+    // 1. PROCESAR ENTRADA (Texto o Notas de Voz)
     let textoUsuario = Body || "";
     if (MediaUrl0) {
-      const deepgramRes = await axios.post("https://api.deepgram.com/v1/listen?model=nova-2&language=es", 
-        { url: MediaUrl0 }, 
-        { headers: { 'Authorization': `Token ${CONFIG.DEEPGRAM_API_KEY}`, 'Content-Type': 'application/json' } }
-      );
-      textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
+      try {
+        const deepgramRes = await axios.post("https://api.deepgram.com/v1/listen?model=nova-2&language=es", 
+          { url: MediaUrl0 }, 
+          { headers: { 'Authorization': `Token ${CONFIG.DEEPGRAM_API_KEY}`, 'Content-Type': 'application/json' } }
+        );
+        textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
+      } catch (error) {
+        console.error('Deepgram Error:', error.message);
+      }
     }
 
     // 2. IDENTIFICAR CLIENTE
@@ -224,7 +229,7 @@ Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
     // 6. EJECUCIÓN IA (GPT-4o)
     const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: "gpt-4o",
-      messages: [{ role: "system", content: systemPrompt }, ...historial.map((m: any) => ({ role: m.rol, content: m.contenido })), { role: "user", content: textoUsuario }],
+      messages: [{ role: "system", content: systemPrompt }, ...historial.map((m) => ({ role: m.rol, content: m.contenido })), { role: "user", content: textoUsuario }],
       temperature: 0.3
     }, { headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` }});
 
@@ -275,8 +280,10 @@ Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
     return res.status(200).send(twiml.toString());
 
   } catch (err) {
+    console.error('Global Error:', err.message);
     const twiml = new MessagingResponse();
     twiml.message('Lo siento, tuve un problema técnico. ¿Podrías repetirme eso?');
+    res.setHeader('Content-Type', 'text/xml');
     return res.status(200).send(twiml.toString());
   }
 });
@@ -286,4 +293,5 @@ const distPath = path.join(process.cwd(), 'dist');
 app.use(express.static(distPath));
 app.get('*', (req, res) => res.sendFile(path.join(distPath, 'index.html')));
 
-app.listen(3000, '0.0.0.0', () => console.log('AuraSync Online en puerto 3000'));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => console.log(`AuraSync Online en puerto ${PORT}`));
