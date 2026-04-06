@@ -15,12 +15,6 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Inicialización de Clientes
-console.log('🔑 Verificando llaves maestras...');
-console.log('- Supabase URL:', process.env.SUPABASE_URL ? '✅ OK' : '❌ FALTANTE');
-console.log('- Twilio SID:', process.env.TWILIO_ACCOUNT_SID ? '✅ OK' : '❌ FALTANTE');
-console.log('- OpenAI Key:', process.env.OPENAI_API_KEY ? '✅ OK' : '❌ FALTANTE');
-
 const supabase = createClient(
   process.env.SUPABASE_URL || '',
   process.env.SUPABASE_KEY || ''
@@ -37,7 +31,6 @@ const CONFIG = {
   TWILIO_PHONE_NUMBER: process.env.TWILIO_PHONE_NUMBER
 };
 
-const twilioClient = twilio(CONFIG.TWILIO_ACCOUNT_SID, CONFIG.TWILIO_AUTH_TOKEN);
 const { MessagingResponse } = twilio.twiml;
 
 // ============ UTILIDADES DE TIEMPO ============
@@ -48,7 +41,7 @@ function timeToMinutes(hora) {
 }
 
 /**
- * VERIFICA DISPONIBILIDAD
+ * VERIFICA DISPONIBILIDAD (Corregido y Robusto)
  */
 async function verificarDisponibilidad(fecha, hora, especialistaId, duracionMinutos) {
   try {
@@ -68,17 +61,19 @@ async function verificarDisponibilidad(fecha, hora, especialistaId, duracionMinu
       };
     }
 
+    // Consulta exacta por rango de fecha
     const { data: citasExistentes, error } = await supabase
       .from('citas')
       .select('fecha_hora, duracion_aux, servicio_aux')
       .eq('especialista_id', especialistaId)
-      .eq('fecha_hora::date', fecha) 
+      .gte('fecha_hora', `${fecha}T00:00:00`)
+      .lte('fecha_hora', `${fecha}T23:59:59`)
       .in('estado', ['Confirmada', 'En proceso']);
 
     if (error) throw error;
 
     for (const cita of citasExistentes || []) {
-      const horaExistente = cita.fecha_hora.substring(11, 16); 
+      const horaExistente = cita.fecha_hora.includes('T') ? cita.fecha_hora.split('T')[1].substring(0, 5) : cita.fecha_hora.substring(11, 16);
       const inicioExistente = timeToMinutes(horaExistente);
       const duracionExistente = cita.duracion_aux || 60;
       const finExistente = inicioExistente + duracionExistente;
@@ -93,40 +88,31 @@ async function verificarDisponibilidad(fecha, hora, especialistaId, duracionMinu
 
     return { disponible: true, mensaje: null };
   } catch (error) {
-    console.error('Error disponibilidad:', error);
-    return { disponible: false, mensaje: "Tuve un pequeño problema al ver la agenda. ¿Me das un segundo?" };
+    console.error('❌ Error disponibilidad:', error.message);
+    return { disponible: false, mensaje: "Tuve un problema al consultar la agenda. Por favor, intenta en un momento." };
   }
 }
 
-/**
- * RESOLUTOR DE IDs
- */
 async function obtenerIdsRelacionales(servicioNombre, especialistaNombre) {
   try {
     let servicioId = null, especialistaId = null, duracion = 60, precio = 0;
-
     if (servicioNombre && servicioNombre !== '...') {
       const { data: serv } = await supabase.from('servicios').select('id, duracion, precio').ilike('nombre', `%${servicioNombre}%`).maybeSingle();
       if (serv) { servicioId = serv.id; duracion = serv.duracion || 60; precio = serv.precio || 0; }
     }
-
     if (especialistaNombre && especialistaNombre !== '...' && especialistaNombre !== 'Asignar') {
       const { data: esp } = await supabase.from('especialistas').select('id').ilike('nombre', `%${especialistaNombre}%`).maybeSingle();
       if (esp) especialistaId = esp.id;
     }
-
     return { servicioId, especialistaId, duracion, precio };
   } catch (error) {
     return { servicioId: null, especialistaId: null, duracion: 60, precio: 0 };
   }
 }
 
-/**
- * BUSCA LA PRÓXIMA CITA DEL CLIENTE
- */
 async function buscarCitaProxima(clienteId) {
   try {
-    const { data, error } = await supabase
+    const { data } = await supabase
       .from('citas')
       .select('*')
       .eq('cliente_id', clienteId)
@@ -135,57 +121,31 @@ async function buscarCitaProxima(clienteId) {
       .order('fecha_hora', { ascending: true })
       .limit(1)
       .maybeSingle();
-    
-    if (error) throw error;
     return data;
-  } catch (error) {
-    console.error('Error buscando cita:', error);
-    return null;
-  }
+  } catch (error) { return null; }
 }
 
-/**
- * ACTUALIZA UNA CITA EXISTENTE
- */
 async function actualizarCita(citaId, nuevosDatos) {
   try {
-    const fechaHora = `${nuevosDatos.fecha}T${nuevosDatos.hora}:00`;
-    
-    // 1. Actualizar en Supabase
-    const { data, error: sError } = await supabase
-      .from('citas')
-      .update({
-        servicio_id: nuevosDatos.servicioId,
-        especialista_id: nuevosDatos.especialistaId,
-        fecha_hora: fechaHora,
-        servicio_aux: nuevosDatos.servicio,
-        duracion_aux: nuevosDatos.duracion
-      })
-      .eq('id', citaId)
-      .select()
-      .single();
+    const fechaHora = `${nuevosDatos.fecha}T${nuevosDatos.hora}:00-05:00`;
+    await supabase.from('citas').update({
+      servicio_id: nuevosDatos.servicioId,
+      especialista_id: nuevosDatos.especialistaId,
+      fecha_hora: fechaHora,
+      servicio_aux: nuevosDatos.servicio,
+      duracion_aux: nuevosDatos.duracion
+    }).eq('id', citaId);
 
-    if (sError) throw sError;
-
-    // 2. Actualizar en Airtable
-    const baseId = CONFIG.AIRTABLE_BASE_ID;
-    const tableName = encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME);
     const formula = encodeURIComponent(`AND({Teléfono} = '${nuevosDatos.telefono}', {Estado} = 'Confirmada')`);
-    const searchUrl = `https://api.airtable.com/v0/${baseId}/${tableName}?filterByFormula=${formula}&sort%5B0%5D%5Bfield%5D=Fecha&sort%5B0%5D%5Bdirection%5D=asc`;
-    
-    const searchRes = await axios.get(searchUrl, {
+    const searchRes = await axios.get(`https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}?filterByFormula=${formula}`, {
       headers: { Authorization: `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
     });
 
-    const records = searchRes.data.records || [];
-    if (records.length > 0) {
-      const airtableRecordId = records[0].id;
-      const updateUrl = `https://api.airtable.com/v0/${baseId}/${tableName}/${airtableRecordId}`;
-      
-      await axios.patch(updateUrl, {
+    if (searchRes.data.records?.length > 0) {
+      await axios.patch(`https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}/${searchRes.data.records[0].id}`, {
         fields: {
           "Servicio": nuevosDatos.servicio,
-          "Fecha": fechaHora, // Enviamos el timestamp completo (Fecha + Hora)
+          "Fecha": fechaHora,
           "Hora": nuevosDatos.hora,
           "Especialista": nuevosDatos.especialista,
           "Importe estimado": nuevosDatos.precio,
@@ -193,61 +153,29 @@ async function actualizarCita(citaId, nuevosDatos) {
         }
       }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
     }
-
     return { success: true };
-  } catch (error) {
-    console.error('Error actualizando cita:', error);
-    return { success: false, error: error.message };
-  }
+  } catch (error) { return { success: false }; }
 }
 
-/**
- * CANCELA UNA CITA
- */
 async function cancelarCita(citaId, telefono) {
   try {
-    // 1. Cancelar en Supabase
-    const { error: sError } = await supabase
-      .from('citas')
-      .update({ estado: 'Cancelada' })
-      .eq('id', citaId);
-
-    if (sError) throw sError;
-
-    // 2. Cancelar en Airtable
-    const baseId = CONFIG.AIRTABLE_BASE_ID;
-    const tableName = encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME);
+    await supabase.from('citas').update({ estado: 'Cancelada' }).eq('id', citaId);
     const formula = encodeURIComponent(`AND({Teléfono} = '${telefono}', {Estado} = 'Confirmada')`);
-    const searchUrl = `https://api.airtable.com/v0/${baseId}/${tableName}?filterByFormula=${formula}`;
-    
-    const searchRes = await axios.get(searchUrl, {
+    const searchRes = await axios.get(`https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}?filterByFormula=${formula}`, {
       headers: { Authorization: `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
     });
-
-    const records = searchRes.data.records || [];
-    if (records.length > 0) {
-      const airtableRecordId = records[0].id;
-      const updateUrl = `https://api.airtable.com/v0/${baseId}/${tableName}/${airtableRecordId}`;
-      
-      await axios.patch(updateUrl, {
+    if (searchRes.data.records?.length > 0) {
+      await axios.patch(`https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}/${searchRes.data.records[0].id}`, {
         fields: { "Estado": "Cancelada" }
       }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
     }
-
     return { success: true };
-  } catch (error) {
-    console.error('Error cancelando cita:', error);
-    return { success: false, error: error.message };
-  }
+  } catch (error) { return { success: false }; }
 }
 
-/**
- * REGISTRO DE CITA
- */
 async function registrarCita(datos) {
   try {
-    const fechaHora = `${datos.fecha}T${datos.hora}:00`;
-
+    const fechaHora = `${datos.fecha}T${datos.hora}:00-05:00`;
     const { data, error: sError } = await supabase.from('citas').insert({
       cliente_id: datos.clienteId,
       servicio_id: datos.servicioId,
@@ -261,15 +189,13 @@ async function registrarCita(datos) {
 
     if (sError) throw sError;
 
-    // 2. Guardar en Airtable (Espejo para el dueño)
-    const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-    await axios.post(url, {
+    await axios.post(`https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`, {
       records: [{
         fields: {
           "ID_Supabase": data.id,
           "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
           "Servicio": datos.servicio,
-          "Fecha": fechaHora, // Enviamos el timestamp completo (Fecha + Hora)
+          "Fecha": fechaHora,
           "Hora": datos.hora,
           "Especialista": datos.especialista,
           "Teléfono": datos.telefono,
@@ -281,96 +207,71 @@ async function registrarCita(datos) {
     }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
 
     return { success: true, id: data.id };
-  } catch (error) {
-    return { success: false, error: error.message };
-  }
+  } catch (error) { return { success: false }; }
 }
 
-// ============ WEBHOOK PRINCIPAL (WhatsApp Sandbox) ============
+// ============ WEBHOOK PRINCIPAL ============
 
-// Health Check para verificar que Aura está viva
-app.get('/webhook', (req, res) => res.status(200).send('AuraSync Webhook is Active! 🚀'));
-app.get('/', (req, res) => res.status(200).send('AuraSync Server is Running! 🚀'));
+app.get('/webhook', (req, res) => res.status(200).send('AuraSync Active! 🚀'));
+app.get('/', (req, res) => res.status(200).send('AuraSync Running! 🚀'));
 
-// AURA RESPONDE A TODO: Si Twilio manda a / o a /webhook, Aura responde igual.
 app.post('*', async (req, res) => {
-  console.log('📩 ¡LLEGÓ UN MENSAJE! Procesando...');
+  console.log('📩 ¡LLEGÓ UN MENSAJE!');
   const { Body, From, MediaUrl0 } = req.body;
-  // Normalizamos el teléfono: quitamos 'whatsapp:', espacios y el '+' para evitar errores de coincidencia
   const userPhone = From ? From.replace('whatsapp:', '').replace('+', '').trim() : '';
   
   if (!userPhone) return res.status(200).send('<Response></Response>');
 
   try {
-    // 1. PROCESAR ENTRADA (Texto o Audio)
     let textoUsuario = Body || "";
     let finalMessage = "";
 
     if (MediaUrl0) {
-      console.log('🎙️ Procesando nota de voz de Twilio:', MediaUrl0);
       try {
         const deepgramRes = await axios.post("https://api.deepgram.com/v1/listen?model=nova-2&language=es&smart_format=true&punctuate=true", 
           { url: MediaUrl0 }, 
           { headers: { 'Authorization': `Token ${CONFIG.DEEPGRAM_API_KEY}`, 'Content-Type': 'application/json' } }
         );
         textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
-        console.log('📝 Transcripción exitosa:', textoUsuario);
       } catch (error) {
-        console.error('❌ Error en Deepgram:', error.response?.data || error.message);
-        finalMessage = "Lo siento, tuve un problema al escuchar tu audio. ¿Podrías escribírmelo o intentarlo de nuevo?";
+        finalMessage = "Lo siento, tuve un problema al escuchar tu audio. ¿Podrías escribírmelo?";
       }
     }
 
-    // Si no hay error en el audio, procedemos con la IA
     if (!finalMessage) {
-      // 2. IDENTIFICAR CLIENTE
       let { data: cliente } = await supabase.from('clientes').select('id, nombre, apellido, fecha_nacimiento').or(`telefono.eq.${userPhone},telefono.eq.+${userPhone}`).maybeSingle();
-      
-      console.log(`👤 Identificando: ${userPhone} | Cliente encontrado: ${cliente ? cliente.nombre : 'NO'}`);
-
       const esNuevo = !cliente;
       const perfilIncompleto = cliente && (!cliente.nombre || !cliente.apellido || !cliente.fecha_nacimiento);
 
-      // 3. RECUPERAR HISTORIAL
       const { data: mensajes } = await supabase.from('conversaciones').select('rol, contenido').eq('telefono', userPhone).order('created_at', { ascending: false }).limit(10);
       const historial = mensajes ? mensajes.reverse() : [];
 
-      // 4. DATOS DE NEGOCIO
       const { data: especialistas } = await supabase.from('especialistas').select('nombre, rol, expertise');
       const { data: servicios } = await supabase.from('servicios').select('nombre, precio, duracion');
       const especialistasList = especialistas?.map(e => `- ${e.nombre} (${e.rol}): ${e.expertise}`).join('\n') || "";
       const serviciosList = servicios?.map(s => `${s.nombre} ($${s.precio}, ${s.duracion} min)`).join(', ') || "";
 
-      // 5. PERSONALIDAD DE AURA (System Prompt)
       const hoy = new Intl.DateTimeFormat('es-EC', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'America/Guayaquil' }).format(new Date());
 
-      let systemPrompt = `Eres Aura, la Coordinadora Ejecutiva de AuraSync. Eres la mano derecha de nuestros especialistas y la guía de confianza de nuestros clientes. 
+      let systemPrompt = `Eres Aura, la Coordinadora Ejecutiva de AuraSync. Sofisticada, humana y extremadamente eficiente.
 
-[TU PERSONALIDAD]
-- **Humana y Sofisticada**: Hablas con seguridad y calidez. Eres extremadamente eficiente.
-- **Persuasiva**: "Vendes" la experiencia. Destaca el expertise de los especialistas.
-- **Proactiva**: Si un horario está ocupado, ofrece inmediatamente la mejor alternativa.
-- **Gestión de Citas**: Puedes agendar, reagendar (cambiar fecha/hora) o cancelar citas.
-- **Lenguaje**: Usa "nosotros", "nuestro equipo", "te he reservado".
+[IDENTIDAD]
+- Hablas con el titular del número ${userPhone}.
+- Perfil: ${cliente ? cliente.nombre + ' ' + cliente.apellido : 'DESCONOCIDO'}.
 
 [REGLAS DE ORO]
-1. **Registro Primero**: Si el cliente es nuevo o le faltan datos (Nombre, Apellido, Fecha de Nacimiento), tu prioridad es obtenerlos con elegancia antes de agendar.
-2. **Venta de Expertise**: Usa la lista de especialistas para persuadir.
-3. **Agenda Perfecta**: Intenta agrupar las citas para optimizar el tiempo.
-4. **Reagendamiento/Cancelación**: Si el cliente pide cambiar o cancelar, identifica la intención y usa la acción correspondiente en el JSON.
+1. **SI YA LO CONOCES**: Tienes PROHIBIDO pedirle su nombre, apellido o fecha de nacimiento. Salúdalo y ayuda directo.
+2. **SI ES NUEVO**: Pide sus datos (Nombre, Apellido, Fecha de Nacimiento YYYY-MM-DD) antes de agendar.
+3. **CITAS PARA TERCEROS**: Si agenda para un hijo o amigo, pregunta el nombre de esa persona para la cita, pero NO intentes registrar un nuevo perfil de cliente. Mantén el perfil del titular intacto.
+4. **DISPONIBILIDAD**: Horario 9:00 a 18:00. Si está ocupado, ofrece alternativas reales.
 
 [DATOS]
 Especialistas: ${especialistasList}
 Servicios: ${serviciosList}
-Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
+Hoy es ${hoy}.
 
-      if (esNuevo || perfilIncompleto) {
-        systemPrompt += `\n[ESTADO: REGISTRO PENDIENTE] Pide Nombre, Apellido y Fecha de Nacimiento (YYYY-MM-DD).`;
-      }
+SALIDA JSON: DATA_JSON:{"accion":"agendar|reagendar|cancelar","nombre":"...","apellido":"...","fecha_nacimiento":"...","cita_fecha":"...","cita_hora":"...","cita_servicio":"...","cita_especialista":"..."}`;
 
-      systemPrompt += `\n[SALIDA JSON] Agrega siempre al final: DATA_JSON:{"accion":"agendar|reagendar|cancelar","nombre":"...","apellido":"...","fecha_nacimiento":"...","cita_fecha":"...","cita_hora":"...","cita_servicio":"...","cita_especialista":"..."}`;
-
-      // 6. EJECUCIÓN IA (GPT-4o)
       const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
         model: "gpt-4o",
         messages: [{ role: "system", content: systemPrompt }, ...historial.map((m) => ({ role: m.rol, content: m.contenido })), { role: "user", content: textoUsuario }],
@@ -385,70 +286,56 @@ Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
         try {
           const datos = JSON.parse(jsonMatch[1].trim());
           
-          // Registro/Actualización de Cliente
-          if (datos.nombre !== "..." && datos.apellido !== "..." && datos.fecha_nacimiento.match(/^\d{4}-\d{2}-\d{2}$/)) {
+          if ((esNuevo || perfilIncompleto) && datos.nombre !== "..." && datos.apellido !== "..." && datos.fecha_nacimiento.match(/^\d{4}-\d{2}-\d{2}$/)) {
             const { data: upserted } = await supabase.from('clientes').upsert({
               telefono: userPhone, nombre: datos.nombre, apellido: datos.apellido, fecha_nacimiento: datos.fecha_nacimiento
             }, { onConflict: 'telefono' }).select().single();
-            if (upserted) {
-              cliente = upserted;
-              if (esNuevo) finalMessage += "\n\n✅ ¡Bienvenido a AuraSync! Ya te he registrado en nuestro sistema VIP.";
-            }
+            if (upserted) cliente = upserted;
           }
 
-          // B. Gestión de Citas (Agendar, Reagendar, Cancelar)
           if (cliente && !perfilIncompleto && datos.accion) {
             const citaExistente = await buscarCitaProxima(cliente.id);
-
-            if (datos.accion === 'cancelar') {
-              if (citaExistente) {
-                const res = await cancelarCita(citaExistente.id, userPhone);
-                if (res.success) finalMessage += `\n\n✅ Entendido. He cancelado tu cita con éxito. Espero verte pronto en otra ocasión.`;
-              } else {
-                finalMessage += `\n\nNo encontré ninguna cita próxima para cancelar. ¿Deseas agendar una nueva?`;
-              }
-            } 
-            else if (datos.accion === 'reagendar' || datos.accion === 'agendar') {
+            if (datos.accion === 'cancelar' && citaExistente) {
+              await cancelarCita(citaExistente.id, userPhone);
+              finalMessage += `\n\n✅ Cita cancelada con éxito.`;
+            } else if (datos.accion === 'reagendar' || datos.accion === 'agendar') {
               if (datos.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/) && datos.cita_hora.match(/^\d{2}:\d{2}$/)) {
                 const ids = await obtenerIdsRelacionales(datos.cita_servicio, datos.cita_especialista);
                 const disp = await verificarDisponibilidad(datos.cita_fecha, datos.cita_hora, ids.especialistaId, ids.duracion);
 
                 if (!disp.disponible) {
-                  finalMessage += `\n\n${disp.mensaje} ¿Te gustaría que busquemos otro horario?`;
+                  finalMessage += `\n\n${disp.mensaje}`;
                 } else {
                   if (datos.accion === 'reagendar' && citaExistente) {
-                    const res = await actualizarCita(citaExistente.id, {
+                    await actualizarCita(citaExistente.id, {
                       clienteId: cliente.id, telefono: userPhone,
                       fecha: datos.cita_fecha, hora: datos.cita_hora, servicio: datos.cita_servicio || citaExistente.servicio_aux, especialista: datos.cita_especialista,
                       servicioId: ids.servicioId || citaExistente.servicio_id, especialistaId: ids.especialistaId, duracion: ids.duracion, precio: ids.precio
                     });
-                    if (res.success) finalMessage += `\n\n✅ ¡Listo! He movido tu cita con éxito. Nos vemos el ${datos.cita_fecha} a las ${datos.cita_hora}.`;
+                    finalMessage += `\n\n✅ Cita movida al ${datos.cita_fecha} a las ${datos.cita_hora}.`;
                   } else {
-                    const resCita = await registrarCita({
+                    await registrarCita({
                       clienteId: cliente.id, telefono: userPhone, nombre: cliente.nombre, apellido: cliente.apellido,
                       fecha: datos.cita_fecha, hora: datos.cita_hora, servicio: datos.cita_servicio, especialista: datos.cita_especialista,
                       servicioId: ids.servicioId, especialistaId: ids.especialistaId, duracion: ids.duracion, precio: ids.precio
                     });
-                    if (resCita.success) finalMessage += `\n\n✅ ¡Listo! Tu cita ha quedado confirmada. Te esperamos.`;
+                    finalMessage += `\n\n✅ Cita confirmada para el ${datos.cita_fecha} a las ${datos.cita_hora}.`;
                   }
                 }
               }
             }
           }
-        } catch (e) { console.error('JSON Error:', e.message); }
+        } catch (e) { console.error('JSON Error'); }
       }
     }
 
-    // 7. MEMORIA Y RESPUESTA (TwiML)
     await supabase.from('conversaciones').insert([{ telefono: userPhone, rol: 'user', contenido: textoUsuario }, { telefono: userPhone, rol: 'assistant', contenido: finalMessage }]);
-
     const twiml = new MessagingResponse();
     twiml.message(finalMessage);
     res.setHeader('Content-Type', 'text/xml');
     return res.status(200).send(twiml.toString());
-
   } catch (err) {
-    console.error('❌ GLOBAL ERROR:', err.stack || err.message);
+    console.error('❌ ERROR:', err.message);
     const twiml = new MessagingResponse();
     twiml.message('Lo siento, tuve un problema técnico. ¿Podrías repetirme eso?');
     res.setHeader('Content-Type', 'text/xml');
@@ -457,9 +344,6 @@ Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 AuraSync Online en puerto ${PORT}`);
-  console.log(`🔗 Webhook listo en: /webhook`);
-});
+app.listen(PORT, '0.0.0.0', () => console.log(`🚀 AuraSync Online`));
 
 export default app;
