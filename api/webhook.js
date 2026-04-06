@@ -296,7 +296,8 @@ app.get('/', (req, res) => res.status(200).send('AuraSync Server is Running! �
 app.post('*', async (req, res) => {
   console.log('📩 ¡LLEGÓ UN MENSAJE! Procesando...');
   const { Body, From, MediaUrl0 } = req.body;
-  const userPhone = From ? From.replace('whatsapp:', '').trim() : '';
+  // Normalizamos el teléfono: quitamos 'whatsapp:', espacios y el '+' para evitar errores de coincidencia
+  const userPhone = From ? From.replace('whatsapp:', '').replace('+', '').trim() : '';
   
   if (!userPhone) return res.status(200).send('<Response></Response>');
 
@@ -323,7 +324,10 @@ app.post('*', async (req, res) => {
     // Si no hay error en el audio, procedemos con la IA
     if (!finalMessage) {
       // 2. IDENTIFICAR CLIENTE
-      let { data: cliente } = await supabase.from('clientes').select('id, nombre, apellido, fecha_nacimiento').eq('telefono', userPhone).maybeSingle();
+      let { data: cliente } = await supabase.from('clientes').select('id, nombre, apellido, fecha_nacimiento').or(`telefono.eq.${userPhone},telefono.eq.+${userPhone}`).maybeSingle();
+      
+      console.log(`👤 Identificando: ${userPhone} | Cliente encontrado: ${cliente ? cliente.nombre : 'NO'}`);
+
       const esNuevo = !cliente;
       const perfilIncompleto = cliente && (!cliente.nombre || !cliente.apellido || !cliente.fecha_nacimiento);
 
