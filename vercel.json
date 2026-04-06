@@ -38,10 +38,6 @@
     {
       "src": "/api/webhook",
       "dest": "api/webhook.js"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "api/webhook.js"
     }
   ],
   "crons": [
