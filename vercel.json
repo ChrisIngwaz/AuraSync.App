@@ -1,9 +1,57 @@
 {
   "version": 2,
+  "builds": [
+    {
+      "src": "api/webhook.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/daily-report.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/reminders.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/sync-airtable.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/reporte-diario",
+      "dest": "api/daily-report.js"
+    },
+    {
+      "src": "/api/recordatorios",
+      "dest": "api/reminders.js"
+    },
+    {
+      "src": "/api/sync-airtable",
+      "dest": "api/sync-airtable.js"
+    },
+    {
+      "src": "/webhook",
+      "dest": "api/webhook.js"
+    },
+    {
+      "src": "/api/webhook",
+      "dest": "api/webhook.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "api/webhook.js"
+    }
+  ],
   "crons": [
     {
-      "path": "/api/daily-report",
-      "schedule": "0 20 * * *"
+      "path": "/api/reporte-diario",
+      "schedule": "0 2 * * *"
+    },
+    {
+      "path": "/api/recordatorios",
+      "schedule": "0 2 * * *"
     }
   ]
 }
