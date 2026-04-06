@@ -151,6 +151,7 @@ async function actualizarCita(citaId, nuevosDatos) {
   try {
     const fechaHora = `${nuevosDatos.fecha}T${nuevosDatos.hora}:00`;
     
+    // 1. Actualizar en Supabase
     const { data, error: sError } = await supabase
       .from('citas')
       .update({
@@ -166,6 +167,7 @@ async function actualizarCita(citaId, nuevosDatos) {
 
     if (sError) throw sError;
 
+    // 2. Actualizar en Airtable
     const baseId = CONFIG.AIRTABLE_BASE_ID;
     const tableName = encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME);
     const formula = encodeURIComponent(`AND({Teléfono} = '${nuevosDatos.telefono}', {Estado} = 'Confirmada')`);
@@ -183,7 +185,7 @@ async function actualizarCita(citaId, nuevosDatos) {
       await axios.patch(updateUrl, {
         fields: {
           "Servicio": nuevosDatos.servicio,
-          "Fecha": nuevosDatos.fecha,
+          "Fecha": fechaHora, // Enviamos el timestamp completo (Fecha + Hora)
           "Hora": nuevosDatos.hora,
           "Especialista": nuevosDatos.especialista,
           "Importe estimado": nuevosDatos.precio,
@@ -204,6 +206,7 @@ async function actualizarCita(citaId, nuevosDatos) {
  */
 async function cancelarCita(citaId, telefono) {
   try {
+    // 1. Cancelar en Supabase
     const { error: sError } = await supabase
       .from('citas')
       .update({ estado: 'Cancelada' })
@@ -211,6 +214,7 @@ async function cancelarCita(citaId, telefono) {
 
     if (sError) throw sError;
 
+    // 2. Cancelar en Airtable
     const baseId = CONFIG.AIRTABLE_BASE_ID;
     const tableName = encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME);
     const formula = encodeURIComponent(`AND({Teléfono} = '${telefono}', {Estado} = 'Confirmada')`);
@@ -257,6 +261,7 @@ async function registrarCita(datos) {
 
     if (sError) throw sError;
 
+    // 2. Guardar en Airtable (Espejo para el dueño)
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     await axios.post(url, {
       records: [{
@@ -264,7 +269,7 @@ async function registrarCita(datos) {
           "ID_Supabase": data.id,
           "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
           "Servicio": datos.servicio,
-          "Fecha": datos.fecha,
+          "Fecha": fechaHora, // Enviamos el timestamp completo (Fecha + Hora)
           "Hora": datos.hora,
           "Especialista": datos.especialista,
           "Teléfono": datos.telefono,
@@ -296,6 +301,7 @@ app.post('*', async (req, res) => {
   if (!userPhone) return res.status(200).send('<Response></Response>');
 
   try {
+    // 1. PROCESAR ENTRADA (Texto o Audio)
     let textoUsuario = Body || "";
     if (MediaUrl0) {
       try {
@@ -309,18 +315,22 @@ app.post('*', async (req, res) => {
       }
     }
 
+    // 2. IDENTIFICAR CLIENTE
     let { data: cliente } = await supabase.from('clientes').select('id, nombre, apellido, fecha_nacimiento').eq('telefono', userPhone).maybeSingle();
     const esNuevo = !cliente;
     const perfilIncompleto = cliente && (!cliente.nombre || !cliente.apellido || !cliente.fecha_nacimiento);
 
+    // 3. RECUPERAR HISTORIAL
     const { data: mensajes } = await supabase.from('conversaciones').select('rol, contenido').eq('telefono', userPhone).order('created_at', { ascending: false }).limit(10);
     const historial = mensajes ? mensajes.reverse() : [];
 
+    // 4. DATOS DE NEGOCIO
     const { data: especialistas } = await supabase.from('especialistas').select('nombre, rol, expertise');
     const { data: servicios } = await supabase.from('servicios').select('nombre, precio, duracion');
     const especialistasList = especialistas?.map(e => `- ${e.nombre} (${e.rol}): ${e.expertise}`).join('\n') || "";
     const serviciosList = servicios?.map(s => `${s.nombre} ($${s.precio}, ${s.duracion} min)`).join(', ') || "";
 
+    // 5. PERSONALIDAD DE AURA (System Prompt)
     const hoy = new Intl.DateTimeFormat('es-EC', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'America/Guayaquil' }).format(new Date());
 
     let systemPrompt = `Eres Aura, la Coordinadora Ejecutiva de AuraSync. Eres la mano derecha de nuestros especialistas y la guía de confianza de nuestros clientes. 
@@ -349,6 +359,7 @@ Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
 
     systemPrompt += `\n[SALIDA JSON] Agrega siempre al final: DATA_JSON:{"accion":"agendar|reagendar|cancelar","nombre":"...","apellido":"...","fecha_nacimiento":"...","cita_fecha":"...","cita_hora":"...","cita_servicio":"...","cita_especialista":"..."}`;
 
+    // 6. EJECUCIÓN IA (GPT-4o)
     const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: "gpt-4o",
       messages: [{ role: "system", content: systemPrompt }, ...historial.map((m) => ({ role: m.rol, content: m.contenido })), { role: "user", content: textoUsuario }],
@@ -363,6 +374,7 @@ Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
       try {
         const datos = JSON.parse(jsonMatch[1].trim());
         
+        // Registro/Actualización de Cliente
         if (datos.nombre !== "..." && datos.apellido !== "..." && datos.fecha_nacimiento.match(/^\d{4}-\d{2}-\d{2}$/)) {
           const { data: upserted } = await supabase.from('clientes').upsert({
             telefono: userPhone, nombre: datos.nombre, apellido: datos.apellido, fecha_nacimiento: datos.fecha_nacimiento
@@ -373,6 +385,7 @@ Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
           }
         }
 
+        // B. Gestión de Citas (Agendar, Reagendar, Cancelar)
         if (cliente && !perfilIncompleto && datos.accion) {
           const citaExistente = await buscarCitaProxima(cliente.id);
 
@@ -414,6 +427,7 @@ Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
       } catch (e) { console.error('JSON Error'); }
     }
 
+    // 7. MEMORIA Y RESPUESTA (TwiML)
     await supabase.from('conversaciones').insert([{ telefono: userPhone, rol: 'user', contenido: textoUsuario }, { telefono: userPhone, rol: 'assistant', contenido: finalMessage }]);
 
     const twiml = new MessagingResponse();
