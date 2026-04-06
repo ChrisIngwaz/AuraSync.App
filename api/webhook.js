@@ -283,7 +283,11 @@ async function registrarCita(datos) {
 
 // ============ WEBHOOK PRINCIPAL (WhatsApp Sandbox) ============
 
+// Health Check para verificar que Aura está viva
+app.get('/webhook', (req, res) => res.status(200).send('AuraSync Webhook is Active! 🚀'));
+
 app.post('/webhook', async (req, res) => {
+  console.log('📩 Mensaje recibido en el Webhook...');
   const { Body, From, MediaUrl0 } = req.body;
   const userPhone = From ? From.replace('whatsapp:', '').trim() : '';
   
@@ -433,5 +437,4 @@ Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', () => console.log(`AuraSync Online en puerto ${PORT}`));
+export default app;
