@@ -2,7 +2,6 @@ import axios from 'axios';
 
 export default async function handler(req, res) {
   try {
-    // 1. Validar variables de entorno
     if (!process.env.TWILIO_ACCOUNT_SID || !process.env.TWILIO_AUTH_TOKEN) {
       throw new Error('Faltan credenciales de Twilio');
     }
@@ -15,14 +14,13 @@ export default async function handler(req, res) {
     
     const twilioNumber = process.env.TWILIO_NUMBER?.trim().replace('whatsapp:', '') || '14155238886';
     const fromFinal = `whatsapp:${twilioNumber}`;
-
-    // 2. LISTA DE DESTINATARIOS (Dueño y Administrador)
+    
+    // LISTA DE DESTINATARIOS (Dueño y Administrador)
     const destinatarios = [
       'whatsapp:+593995430859', // Dueño
-      'whatsapp:+593XXXXXXXXX'  // CAMBIA ESTO por el número del Administrador
+      'whatsapp:+593995430859'  // Administrador (Asegúrate de poner el número real)
     ];
 
-    // 3. Obtener fecha actual en Ecuador
     const ahora = new Date();
     const opciones = { 
       timeZone: 'America/Guayaquil',
@@ -32,7 +30,7 @@ export default async function handler(req, res) {
     };
     
     const formatter = new Intl.DateTimeFormat('en-CA', opciones);
-    const hoy = formatter.format(ahora); 
+    const hoy = formatter.format(ahora);
     
     const fechaFormateada = ahora.toLocaleDateString('es-EC', { 
       weekday: 'long', 
@@ -41,7 +39,6 @@ export default async function handler(req, res) {
       timeZone: 'America/Guayaquil'
     });
 
-    // 4. Consulta a Airtable
     const baseId = process.env.AIRTABLE_BASE_ID;
     const tableName = encodeURIComponent(process.env.AIRTABLE_TABLE_NAME || 'Citas');
     const formula = `{Fecha} = '${hoy}'`;
@@ -58,9 +55,8 @@ export default async function handler(req, res) {
     });
 
     const citas = airtableRes.data.records || [];
-    let mensaje = "";
 
-    // 5. Construir el mensaje
+    let mensaje = "";
     if (citas.length === 0) {
       mensaje = `📊 *AURA SYNC - Reporte Diario*\n\n📅 ${fechaFormateada}\n\n⚠️ *No hubo citas registradas hoy.*\n\n📌 No se registraron atenciones en el sistema para esta fecha.`;
     } else {
@@ -76,11 +72,15 @@ export default async function handler(req, res) {
         
         granTotal += importe;
         
-        if (!servicios[servicio]) servicios[servicio] = { cantidad: 0, total: 0 };
+        if (!servicios[servicio]) {
+          servicios[servicio] = { cantidad: 0, total: 0 };
+        }
         servicios[servicio].cantidad += 1;
         servicios[servicio].total += importe;
         
-        if (!especialistas[especialista]) especialistas[especialista] = { citas: 0, ingresos: 0 };
+        if (!especialistas[especialista]) {
+          especialistas[especialista] = { citas: 0, ingresos: 0 };
+        }
         especialistas[especialista].citas += 1;
         especialistas[especialista].ingresos += importe;
       });
@@ -88,41 +88,47 @@ export default async function handler(req, res) {
       mensaje = `📊 *AURA SYNC - Reporte Diario*\n`;
       mensaje += `━━━━━━━━━━━━━━━\n`;
       mensaje += `📅 ${fechaFormateada.toUpperCase()}\n\n`;
+      
       mensaje += `*📈 RESUMEN EJECUTIVO*\n`;
       mensaje += `• Total Citas: ${citas.length}\n`;
       mensaje += `• Ingresos del Día: $${granTotal.toFixed(2)}\n`;
       mensaje += `• Promedio por Cita: $${(granTotal / citas.length).toFixed(2)}\n\n`;
-      mensaje += `*💇‍♀️ DETALLE POR SERVICIO*\n`;
       
+      mensaje += `*💇‍♀️ DETALLE POR SERVICIO*\n`;
       Object.entries(servicios).forEach(([nombre, datos]) => {
         mensaje += `\n▪️ *${nombre}*\n`;
         mensaje += `   Citas: ${datos.cantidad}  |  $${datos.total.toFixed(2)}\n`;
       });
       
       mensaje += `\n`;
-      const topEspecialista = Object.entries(especialistas).sort((a, b) => b[1].citas - a[1].citas)[0];
+      
+      const topEspecialista = Object.entries(especialistas)
+        .sort((a, b) => b[1].citas - a[1].citas)[0];
+      
       if (topEspecialista) {
         mensaje += `*⭐ ESPECIALISTA DESTACADO*\n`;
         mensaje += `👤 ${topEspecialista[0]}\n`;
         mensaje += `   ${topEspecialista[1].citas} citas | $${topEspecialista[1].ingresos.toFixed(2)}\n\n`;
       }
+      
       mensaje += `━━━━━━━━━━━━━━━\n`;
       mensaje += `*💰 GRAN TOTAL: $${granTotal.toFixed(2)}*\n`;
       mensaje += `━━━━━━━━━━━━━━━\n`;
       mensaje += `_Reporte generado automáticamente_`;
     }
 
-    // 6. ENVIAR A TODOS LOS DESTINATARIOS
-    const envios = destinatarios.map(numero => 
-      enviarWhatsApp(fromFinal, numero, mensaje, sid, token)
-    );
+    // Enviar a todos los destinatarios
+    for (const to of destinatarios) {
+      try {
+        await enviarWhatsApp(fromFinal, to, mensaje, sid, token);
+      } catch (err) {
+        console.error(`Error enviando reporte a ${to}:`, err.message);
+      }
+    }
     
-    await Promise.all(envios);
-    
-    return res.status(200).json({ success: true, message: "Reportes enviados correctamente" });
+    return res.status(200).json({ success: true, total: citas.length, fecha: hoy });
 
   } catch (error) {
-    console.error('Error en reporte:', error.message);
     return res.status(500).json({ error: "Error en envío", detalle: error.message });
   }
 }
@@ -133,8 +139,8 @@ async function enviarWhatsApp(from, to, body, sid, token) {
   params.append('From', from);
   params.append('Body', body);
   const auth = Buffer.from(`${sid}:${token}`).toString('base64');
-  return axios.post(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
+  await axios.post(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,
     params.toString(),
-    { headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' } }
+    { headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 15000 }
   );
 }
