@@ -15,7 +15,7 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ============ DIAGNÓSTICO DE INICIO ============
+// Inicialización de Clientes
 console.log('🔑 Verificando llaves maestras...');
 console.log('- Supabase URL:', process.env.SUPABASE_URL ? '✅ OK' : '❌ FALTANTE');
 console.log('- Twilio SID:', process.env.TWILIO_ACCOUNT_SID ? '✅ OK' : '❌ FALTANTE');
@@ -281,13 +281,14 @@ async function registrarCita(datos) {
   }
 }
 
-// ============ WEBHOOK PRINCIPAL ============
+// ============ WEBHOOK PRINCIPAL (WhatsApp Sandbox) ============
 
-// Health Checks
+// Health Check para verificar que Aura está viva
 app.get('/webhook', (req, res) => res.status(200).send('AuraSync Webhook is Active! 🚀'));
 app.get('/', (req, res) => res.status(200).send('AuraSync Server is Running! 🚀'));
 
-app.post('/webhook', async (req, res) => {
+// AURA RESPONDE A TODO: Si Twilio manda a / o a /webhook, Aura responde igual.
+app.post('*', async (req, res) => {
   console.log('📩 ¡LLEGÓ UN MENSAJE! Procesando...');
   const { Body, From, MediaUrl0 } = req.body;
   const userPhone = From ? From.replace('whatsapp:', '').trim() : '';
@@ -328,14 +329,14 @@ app.post('/webhook', async (req, res) => {
 - **Humana y Sofisticada**: Hablas con seguridad y calidez. Eres extremadamente eficiente.
 - **Persuasiva**: "Vendes" la experiencia. Destaca el expertise de los especialistas.
 - **Proactiva**: Si un horario está ocupado, ofrece inmediatamente la mejor alternativa.
-- **Gestión de Citas**: Puedes agendar, reagendar o cancelar citas.
+- **Gestión de Citas**: Puedes agendar, reagendar (cambiar fecha/hora) o cancelar citas.
 - **Lenguaje**: Usa "nosotros", "nuestro equipo", "te he reservado".
 
 [REGLAS DE ORO]
-1. **Registro Primero**: Si el cliente es nuevo o le faltan datos, tu prioridad es obtenerlos.
+1. **Registro Primero**: Si el cliente es nuevo o le faltan datos (Nombre, Apellido, Fecha de Nacimiento), tu prioridad es obtenerlos con elegancia antes de agendar.
 2. **Venta de Expertise**: Usa la lista de especialistas para persuadir.
-3. **Agenda Perfecta**: Intenta agrupar las citas.
-4. **Reagendamiento/Cancelación**: Identifica la intención y usa la acción correspondiente.
+3. **Agenda Perfecta**: Intenta agrupar las citas para optimizar el tiempo.
+4. **Reagendamiento/Cancelación**: Si el cliente pide cambiar o cancelar, identifica la intención y usa la acción correspondiente en el JSON.
 
 [DATOS]
 Especialistas: ${especialistasList}
@@ -346,7 +347,7 @@ Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
       systemPrompt += `\n[ESTADO: REGISTRO PENDIENTE] Pide Nombre, Apellido y Fecha de Nacimiento (YYYY-MM-DD).`;
     }
 
-    systemPrompt += `\n[SALIDA JSON] DATA_JSON:{"accion":"agendar|reagendar|cancelar","nombre":"...","apellido":"...","fecha_nacimiento":"...","cita_fecha":"...","cita_hora":"...","cita_servicio":"...","cita_especialista":"..."}`;
+    systemPrompt += `\n[SALIDA JSON] Agrega siempre al final: DATA_JSON:{"accion":"agendar|reagendar|cancelar","nombre":"...","apellido":"...","fecha_nacimiento":"...","cita_fecha":"...","cita_hora":"...","cita_servicio":"...","cita_especialista":"..."}`;
 
     const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: "gpt-4o",
@@ -378,9 +379,9 @@ Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
           if (datos.accion === 'cancelar') {
             if (citaExistente) {
               const res = await cancelarCita(citaExistente.id, userPhone);
-              if (res.success) finalMessage += `\n\n✅ Entendido. He cancelado tu cita con éxito.`;
+              if (res.success) finalMessage += `\n\n✅ Entendido. He cancelado tu cita con éxito. Espero verte pronto en otra ocasión.`;
             } else {
-              finalMessage += `\n\nNo encontré ninguna cita próxima para cancelar.`;
+              finalMessage += `\n\nNo encontré ninguna cita próxima para cancelar. ¿Deseas agendar una nueva?`;
             }
           } 
           else if (datos.accion === 'reagendar' || datos.accion === 'agendar') {
@@ -389,7 +390,7 @@ Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
               const disp = await verificarDisponibilidad(datos.cita_fecha, datos.cita_hora, ids.especialistaId, ids.duracion);
 
               if (!disp.disponible) {
-                finalMessage += `\n\n${disp.mensaje}`;
+                finalMessage += `\n\n${disp.mensaje} ¿Te gustaría que busquemos otro horario?`;
               } else {
                 if (datos.accion === 'reagendar' && citaExistente) {
                   const res = await actualizarCita(citaExistente.id, {
@@ -397,14 +398,14 @@ Hoy es ${hoy}. Horario: 9:00 a 18:00.`;
                     fecha: datos.cita_fecha, hora: datos.cita_hora, servicio: datos.cita_servicio || citaExistente.servicio_aux, especialista: datos.cita_especialista,
                     servicioId: ids.servicioId || citaExistente.servicio_id, especialistaId: ids.especialistaId, duracion: ids.duracion, precio: ids.precio
                   });
-                  if (res.success) finalMessage += `\n\n✅ ¡Listo! He movido tu cita al ${datos.cita_fecha} a las ${datos.cita_hora}.`;
+                  if (res.success) finalMessage += `\n\n✅ ¡Listo! He movido tu cita con éxito. Nos vemos el ${datos.cita_fecha} a las ${datos.cita_hora}.`;
                 } else {
                   const resCita = await registrarCita({
                     clienteId: cliente.id, telefono: userPhone, nombre: cliente.nombre, apellido: cliente.apellido,
                     fecha: datos.cita_fecha, hora: datos.cita_hora, servicio: datos.cita_servicio, especialista: datos.cita_especialista,
                     servicioId: ids.servicioId, especialistaId: ids.especialistaId, duracion: ids.duracion, precio: ids.precio
                   });
-                  if (resCita.success) finalMessage += `\n\n✅ ¡Listo! Tu cita ha quedado confirmada.`;
+                  if (resCita.success) finalMessage += `\n\n✅ ¡Listo! Tu cita ha quedado confirmada. Te esperamos.`;
                 }
               }
             }
