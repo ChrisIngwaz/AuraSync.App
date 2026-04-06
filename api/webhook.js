@@ -101,7 +101,7 @@ async function registrarCita(datos) {
   return { success: true, id: data.id };
 }
 
-// ============ ENDPOINTS DE AUTOMATIZACIÓN (REPORTES Y RECORDATORIOS) ============
+// ============ ENDPOINTS DE AUTOMATIZACIÓN ============
 
 app.get('/api/reporte-diario', async (req, res) => {
   try {
@@ -109,7 +109,7 @@ app.get('/api/reporte-diario', async (req, res) => {
     const { data: citas } = await supabase.from('citas').select('servicio_aux, duracion_aux').gte('fecha_hora', `${hoy}T00:00:00`).lte('fecha_hora', `${hoy}T23:59:59`).eq('estado', 'Confirmada');
     const total = citas?.length || 0;
     const resumen = `📊 *Reporte AuraSync - ${hoy}*\n- Citas totales: ${total}\n- Estado: Operativo`;
-    await twilioClient.messages.create({ body: resumen, from: `whatsapp:+${CONFIG.TWILIO_PHONE_NUMBER}`, to: `whatsapp:+593987654321` }); // Cambiar al número del dueño
+    await twilioClient.messages.create({ body: resumen, from: `whatsapp:+${CONFIG.TWILIO_PHONE_NUMBER}`, to: `whatsapp:+593987654321` });
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -126,15 +126,11 @@ app.get('/api/recordatorios', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ============ SINCRONIZACIÓN AIRTABLE -> SUPABASE ============
-
 app.post('/airtable-sync', async (req, res) => {
   const auth = req.headers['authorization'];
   if (auth !== `Bearer ${CONFIG.AIRTABLE_SYNC_TOKEN}`) return res.status(401).json({ error: 'No autorizado' });
-  
   const { id_supabase, fecha, hora, especialista, servicio, estado } = req.body;
   if (!id_supabase) return res.status(400).json({ error: 'Falta ID_Supabase' });
-
   try {
     const updates = {};
     if (fecha && hora) updates.fecha_hora = `${fecha}T${hora}:00-05:00`;
@@ -159,62 +155,89 @@ app.post('*', async (req, res) => {
   try {
     let textoUsuario = Body || "";
     if (MediaUrl0) {
-      const dr = await axios.post("https://api.deepgram.com/v1/listen?model=nova-2&language=es", { url: MediaUrl0 }, { headers: { 'Authorization': `Token ${CONFIG.DEEPGRAM_API_KEY}` } });
+      const dr = await axios.post("https://api.deepgram.com/v1/listen?model=nova-2&language=es&smart_format=true", { url: MediaUrl0 }, { headers: { 'Authorization': `Token ${CONFIG.DEEPGRAM_API_KEY}` } });
       textoUsuario = dr.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
     }
 
+    // 1. Obtener Perfil y Datos
     let { data: cliente } = await supabase.from('clientes').select('*').or(`telefono.eq.${userPhone},telefono.eq.+${userPhone}`).maybeSingle();
     const { data: esp } = await supabase.from('especialistas').select('nombre, rol, expertise');
     const { data: serv } = await supabase.from('servicios').select('nombre, precio, duracion');
     const hoy = new Intl.DateTimeFormat('es-EC', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'America/Guayaquil' }).format(new Date());
 
-    const systemPrompt = `Eres Aura, la Coordinadora Ejecutiva de AuraSync. Eres la mano derecha de nuestros especialistas y la guía de confianza de nuestros clientes. Hablas con ${cliente ? cliente.nombre : 'un cliente nuevo'} (${userPhone}).
+    // 2. Obtener Historial (MEMORIA)
+    const { data: mensajes } = await supabase.from('conversaciones').select('rol, contenido').eq('telefono', userPhone).order('created_at', { ascending: false }).limit(6);
+    const historial = mensajes ? mensajes.reverse() : [];
 
-[TU PERSONALIDAD]
-- **Humana y Sofisticada**: Hablas con seguridad y calidez. Eres extremadamente eficiente.
-- **Persuasiva**: "Vendes" la experiencia. Destaca el expertise de los especialistas.
-- **Proactiva**: Si un horario está ocupado, ofrece inmediatamente la mejor alternativa.
-- **Directa**: NO repitas saludos ni frases de cortesía ("espero que estés bien", "excelente día") en cada mensaje. Si ya están conversando, ve directo al grano.
+    // 3. System Prompt Perfeccionado (ELITE PROFILE)
+    const systemPrompt = `Eres Aura, la Coordinadora Ejecutiva de AuraSync. No eres un bot, eres una profesional sofisticada, cálida y extremadamente eficiente. Tu misión es que el cliente sienta que está tratando con la mejor asistente personal del mundo.
+
+[TU PERFIL]
+- **Lenguaje Impecable**: Usas un español elegante, profesional y cercano. Evitas frases robóticas.
+- **Asesora y Persuasiva**: No solo agendas, sino que "vendes" la experiencia. Conoces el expertise de cada especialista y lo usas para recomendar al mejor según el servicio solicitado.
+- **Memoria Ejecutiva**: Si el cliente ya mencionó un detalle (servicio, hora, fecha, especialista), NO lo preguntes de nuevo. Úsalo para avanzar.
+- **Eficiencia Total**: Tu objetivo es cerrar la cita en el menor número de pasos posible. Si tienes toda la información, confirma de inmediato.
+- **Calidez Humana**: Reconoces al cliente por su nombre si ya lo conoces. Si es una conversación fluida, no repitas saludos innecesarios.
 
 [REGLAS DE ORO]
-1. **SALUDOS**: Saluda SOLO en el primer mensaje. En los siguientes, continúa la conversación de forma fluida sin repetir "Hola" ni presentaciones.
-2. **SI YA EXISTE**: Tienes terminantemente PROHIBIDO pedirle su nombre, apellido o fecha de nacimiento. Ya es parte de la casa.
-3. **SI ES NUEVO**: Tu prioridad es obtener su Nombre, Apellido, Ciudad y Fecha de Nacimiento (YYYY-MM-DD) con elegancia antes de agendar.
-4. **CITAS PARA TERCEROS**: Si agenda para un hijo o amigo, pregunta el nombre de esa persona para la cita, pero aclara que el perfil del teléfono seguirá siendo del titular. NO intentes registrar un nuevo perfil.
-5. **AGENDA**: Horario 9:00 a 20:00. Especialistas: ${esp?.map(e=>e.nombre).join(', ')}. Servicios: ${serv?.map(s=>s.nombre).join(', ')}.
+1. **ASESORÍA INTELIGENTE**: Usa el campo "expertise" de los especialistas para promoverlos. Si alguien pide un servicio, di algo como: "Para ese servicio te recomiendo a [Nombre], es nuestra experta en [Expertise]".
+2. **ANTICIPACIÓN**: Si el cliente dice "Corte de pelo mañana a las 10", no preguntes "¿Qué servicio quieres?". Di: "Excelente elección. Mañana a las 10:00 tengo disponibilidad con Ricardo y Elena. ¿Con quién prefieres agendar?".
+3. **FLUJO NATURAL**: Si el cliente elige a Elena, no preguntes "¿Qué servicio?". Di: "Perfecto, Elena te atenderá para tu Corte de Cabello Premium mañana a las 10:00. ¿Confirmamos?".
+4. **DATOS DEL CLIENTE**: Si ya conoces a ${cliente ? cliente.nombre : 'el cliente'}, trátalo como un invitado VIP. No pidas datos que ya tenemos.
+5. **CITAS PARA TERCEROS**: Si es para un hijo, anota el nombre en la nota de la cita, pero el titular sigue siendo el dueño del teléfono.
 
-Hoy es ${hoy}.
+[CONTEXTO]
+- Especialistas: ${esp?.map(e => `${e.nombre} (${e.rol}: ${e.expertise})`).join(', ')}
+- Servicios: ${serv?.map(s => `${s.nombre} ($${s.precio}, ${s.duracion} min)`).join(', ')}
+- Horario: 9:00 a 18:00.
+- Hoy es ${hoy}.
+
 DATA_JSON:{"accion":"agendar|reagendar|cancelar","nombre":"...","apellido":"...","fecha_nacimiento":"...","cita_fecha":"...","cita_hora":"...","cita_servicio":"...","cita_especialista":"..."}`;
-    
+
+    // 4. Llamada a IA con Memoria
     const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: "gpt-4o", messages: [{ role: "system", content: systemPrompt }, { role: "user", content: textoUsuario }], temperature: 0.3
+      model: "gpt-4o", 
+      messages: [
+        { role: "system", content: systemPrompt }, 
+        ...historial.map(m => ({ role: m.rol, content: m.contenido })), 
+        { role: "user", content: textoUsuario }
+      ], 
+      temperature: 0.3
     }, { headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` }});
 
     let fullReply = aiRes.data.choices[0].message.content;
     let finalMessage = fullReply.replace(/DATA_JSON[\s\S]*/, '').trim();
     const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/);
 
+    // 5. Procesamiento de Acciones
     if (jsonMatch) {
       const d = JSON.parse(jsonMatch[1]);
       if (!cliente && d.nombre !== "...") {
         const { data: n } = await supabase.from('clientes').upsert({ telefono: userPhone, nombre: d.nombre, apellido: d.apellido, fecha_nacimiento: d.fecha_nacimiento }, { onConflict: 'telefono' }).select().single();
         cliente = n;
       }
-      if (cliente && d.accion) {
+      if (cliente && d.accion && d.cita_fecha !== "..." && d.cita_hora !== "...") {
         const ids = await obtenerIdsRelacionales(d.cita_servicio, d.cita_especialista);
         const disp = await verificarDisponibilidad(d.cita_fecha, d.cita_hora, ids.especialistaId, ids.duracion);
         if (disp.disponible) {
           await registrarCita({ clienteId: cliente.id, telefono: userPhone, nombre: cliente.nombre, apellido: cliente.apellido, fecha: d.cita_fecha, hora: d.cita_hora, servicio: d.cita_servicio, especialista: d.cita_especialista, servicioId: ids.servicioId, especialistaId: ids.especialistaId, duracion: ids.duracion, precio: ids.precio });
-          finalMessage += `\n\n✅ Cita confirmada.`;
-        } else { finalMessage += `\n\n${disp.mensaje}`; }
+          if (!finalMessage.includes("confirmada")) finalMessage += `\n\n✅ Cita confirmada con éxito.`;
+        } else if (disp.mensaje) {
+          finalMessage += `\n\n${disp.mensaje}`;
+        }
       }
     }
 
+    // 6. Guardar Conversación y Responder
+    await supabase.from('conversaciones').insert([{ telefono: userPhone, rol: 'user', contenido: textoUsuario }, { telefono: userPhone, rol: 'assistant', contenido: finalMessage }]);
     const twiml = new MessagingResponse();
     twiml.message(finalMessage);
     res.setHeader('Content-Type', 'text/xml');
     return res.status(200).send(twiml.toString());
-  } catch (e) { res.status(200).send('<Response><Message>Error técnico.</Message></Response>'); }
+  } catch (e) { 
+    console.error(e);
+    res.status(200).send('<Response><Message>Aura está procesando mucha información, ¿podrías repetirme eso?</Message></Response>'); 
+  }
 });
 
 app.listen(3000, '0.0.0.0', () => console.log('🚀 AuraSync Online'));
