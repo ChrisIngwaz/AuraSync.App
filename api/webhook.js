@@ -33,162 +33,32 @@ const { MessagingResponse } = twilio.twiml;
 
 // ============ RUTAS DE LA API ============
 
-app.post('/api/sync-airtable', syncAirtable);
-app.get('/api/daily-report', dailyReport);
-app.get('/api/reminders', reminders);
+app.get(['/', '/webhook', '/api/webhook'], (req, res) => {
+  res.status(200).send('🚀 AuraSync Online - Webhook listo para recibir mensajes de WhatsApp.');
+});
 
-// ============ UTILIDADES DE TIEMPO ============
-
-function timeToMinutes(hora) {
-  if (!hora || typeof hora !== 'string') return 0;
-  const [h, m] = hora.split(':').map(Number);
-  return h * 60 + m;
-}
-
-// ============ FUNCIONES DE APOYO ============
-
-async function verificarDisponibilidad(fecha, hora, especialistaId, duracionMinutos) {
-  try {
-    if (!especialistaId || especialistaId === '...' || especialistaId === 'Asignar') return { disponible: true };
-    
-    const inicioNueva = timeToMinutes(hora);
-    const finNueva = inicioNueva + duracionMinutos;
-    
-    // Horario de atención: 9:00 a 18:00
-    if (inicioNueva < 540 || finNueva > 1080) {
-      return { disponible: false, mensaje: "Esa hora está fuera de nuestro horario de atención (9:00 - 18:00)." };
-    }
-
-    const { data: citasExistentes } = await supabase
-      .from('citas')
-      .select('fecha_hora, duracion_aux, servicio_aux')
-      .eq('especialista_id', especialistaId)
-      .gte('fecha_hora', `${fecha}T00:00:00`)
-      .lte('fecha_hora', `${fecha}T23:59:59`)
-      .in('estado', ['Confirmada', 'En proceso']);
-
-    for (const cita of citasExistentes || []) {
-      const horaExistente = cita.fecha_hora.includes('T') ? cita.fecha_hora.split('T')[1].substring(0, 5) : cita.fecha_hora.substring(11, 16);
-      const inicioExistente = timeToMinutes(horaExistente);
-      const finExistente = inicioExistente + (cita.duracion_aux || 60);
-      
-      if (inicioNueva < finExistente && finNueva > inicioExistente) {
-        return { disponible: false, mensaje: `El especialista ya tiene una cita de "${cita.servicio_aux}" a las ${horaExistente}.` };
-      }
-    }
-    return { disponible: true };
-  } catch (error) { 
-    console.error('Error disponibilidad:', error);
-    return { disponible: false, mensaje: "Error al verificar la agenda." }; 
-  }
-}
-
-async function obtenerIdsRelacionales(servicioNombre, especialistaNombre) {
-  let res = { servicioId: null, especialistaId: null, duracion: 60, precio: 0 };
-  if (servicioNombre && servicioNombre !== '...') {
-    const { data: s } = await supabase.from('servicios').select('id, duracion, precio').ilike('nombre', `%${servicioNombre}%`).maybeSingle();
-    if (s) { res.servicioId = s.id; res.duracion = s.duracion; res.precio = s.precio; }
-  }
-  if (especialistaNombre && especialistaNombre !== '...' && especialistaNombre !== 'Asignar') {
-    const { data: e } = await supabase.from('especialistas').select('id').ilike('nombre', `%${especialistaNombre}%`).maybeSingle();
-    if (e) res.especialistaId = e.id;
-  }
-  return res;
-}
-
-async function registrarCita(datos) {
-  const fechaHora = `${datos.fecha}T${datos.hora}:00-05:00`;
-  const { data, error } = await supabase.from('citas').insert({
-    cliente_id: datos.clienteId,
-    servicio_id: datos.servicioId,
-    especialista_id: datos.especialistaId,
-    fecha_hora: fechaHora,
-    estado: 'Confirmada',
-    nombre_cliente_aux: `${datos.nombre} ${datos.apellido}`.trim(),
-    servicio_aux: datos.servicio,
-    duracion_aux: datos.duracion
-  }).select().single();
-
-  if (error) throw error;
-
-  // Sincronizar con Airtable
-  await axios.post(`https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`, {
-    records: [{ fields: {
-      "ID_Supabase": data.id,
-      "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
-      "Servicio": datos.servicio,
-      "Fecha": datos.fecha,
-      "Hora": datos.hora,
-      "Especialista": datos.especialista,
-      "Teléfono": datos.telefono,
-      "Estado": "Confirmada",
-      "Importe estimado": datos.precio,
-      "Duración estimada (minutos)": datos.duracion
-    } }]
-  }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
-
-  return { success: true, id: data.id };
-}
-
-async function reagendarCita(citaId, nuevaFecha, nuevaHora) {
-  const fechaHora = `${nuevaFecha}T${nuevaHora}:00-05:00`;
-  const { error } = await supabase.from('citas').update({
-    fecha_hora: fechaHora,
-    estado: 'Confirmada'
-  }).eq('id', citaId);
-
-  if (error) throw error;
-
-  // Actualizar en Airtable
-  const airtableUrl = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-  const formula = encodeURIComponent(`{ID_Supabase} = '${citaId}'`);
-  const searchRes = await axios.get(`${airtableUrl}?filterByFormula=${formula}`, {
-    headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
-  });
-
-  if (searchRes.data.records.length > 0) {
-    const airtableId = searchRes.data.records[0].id;
-    await axios.patch(airtableUrl, {
-      records: [{
-        id: airtableId,
-        fields: { "Fecha": nuevaFecha, "Hora": nuevaHora, "Estado": "Confirmada" }
-      }]
-    }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
-  }
-  return { success: true };
-}
-
-async function cancelarCita(citaId) {
-  const { error } = await supabase.from('citas').update({ estado: 'Cancelada' }).eq('id', citaId);
-  if (error) throw error;
-
-  const airtableUrl = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-  const formula = encodeURIComponent(`{ID_Supabase} = '${citaId}'`);
-  const searchRes = await axios.get(`${airtableUrl}?filterByFormula=${formula}`, {
-    headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
-  });
-
-  if (searchRes.data.records.length > 0) {
-    const airtableId = searchRes.data.records[0].id;
-    await axios.patch(airtableUrl, {
-      records: [{ id: airtableId, fields: { "Estado": "Cancelada" } }]
-    }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
-  }
-  return { success: true };
-}
-
-// ============ WEBHOOK PRINCIPAL ============
-
-app.post('/webhook', async (req, res) => {
+app.post(['/', '/webhook', '/api/webhook'], async (req, res) => {
   const { Body, From, MediaUrl0 } = req.body;
+  
+  // Log básico para depuración en Vercel/Cloud Run
+  console.log(`[${new Date().toISOString()}] Solicitud recibida de ${From || 'Desconocido'}`);
+  
   const userPhone = From ? From.replace('whatsapp:', '').replace('+', '').trim() : '';
-  if (!userPhone) return res.status(200).send('<Response></Response>');
+  if (!userPhone) {
+    console.log('⚠️ No se detectó número de teléfono en la solicitud.');
+    return res.status(200).send('<Response></Response>');
+  }
 
   try {
     let textoUsuario = Body || "";
     if (MediaUrl0) {
-      const dr = await axios.post("https://api.deepgram.com/v1/listen?model=nova-2&language=es&smart_format=true", { url: MediaUrl0 }, { headers: { 'Authorization': `Token ${CONFIG.DEEPGRAM_API_KEY}` } });
+      console.log('🎙️ Procesando nota de voz...');
+      const dr = await axios.post("https://api.deepgram.com/v1/listen?model=nova-2&language=es&smart_format=true", 
+        { url: MediaUrl0 }, 
+        { headers: { 'Authorization': `Token ${CONFIG.DEEPGRAM_API_KEY}`, 'Content-Type': 'application/json' } }
+      );
       textoUsuario = dr.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
+      console.log(`📝 Transcripción: "${textoUsuario}"`);
     }
 
     // 1. Obtener Perfil y Datos
@@ -297,15 +167,160 @@ DATA_JSON:{"accion":"agendar|reagendar|cancelar","nombre":"...","apellido":"..."
 
     // 6. Guardar Conversación y Responder
     await supabase.from('conversaciones').insert([{ telefono: userPhone, rol: 'user', contenido: textoUsuario }, { telefono: userPhone, rol: 'assistant', contenido: finalMessage }]);
+    
     const twiml = new MessagingResponse();
     twiml.message(finalMessage);
     res.setHeader('Content-Type', 'text/xml');
+    console.log('✅ Respuesta enviada con éxito.');
     return res.status(200).send(twiml.toString());
   } catch (e) { 
-    console.error(e);
+    console.error('❌ Error en el Webhook:', e.message);
     res.status(200).send('<Response><Message>Aura está procesando mucha información, ¿podrías repetirme eso?</Message></Response>'); 
   }
 });
 
-app.listen(3000, '0.0.0.0', () => console.log('🚀 AuraSync Online'));
+// ============ UTILIDADES DE TIEMPO ============
+
+function timeToMinutes(hora) {
+  if (!hora || typeof hora !== 'string') return 0;
+  const [h, m] = hora.split(':').map(Number);
+  return h * 60 + m;
+}
+
+// ============ FUNCIONES DE APOYO ============
+
+async function verificarDisponibilidad(fecha, hora, especialistaId, duracionMinutos) {
+  try {
+    if (!especialistaId || especialistaId === '...' || especialistaId === 'Asignar') return { disponible: true };
+    
+    const inicioNueva = timeToMinutes(hora);
+    const finNueva = inicioNueva + duracionMinutos;
+    
+    if (inicioNueva < 540 || finNueva > 1080) {
+      return { disponible: false, mensaje: "Esa hora está fuera de nuestro horario de atención (9:00 - 18:00)." };
+    }
+
+    const { data: citasExistentes } = await supabase
+      .from('citas')
+      .select('fecha_hora, duracion_aux, servicio_aux')
+      .eq('especialista_id', especialistaId)
+      .gte('fecha_hora', `${fecha}T00:00:00`)
+      .lte('fecha_hora', `${fecha}T23:59:59`)
+      .in('estado', ['Confirmada', 'En proceso']);
+
+    for (const cita of citasExistentes || []) {
+      const horaExistente = cita.fecha_hora.includes('T') ? cita.fecha_hora.split('T')[1].substring(0, 5) : cita.fecha_hora.substring(11, 16);
+      const inicioExistente = timeToMinutes(horaExistente);
+      const finExistente = inicioExistente + (cita.duracion_aux || 60);
+      
+      if (inicioNueva < finExistente && finNueva > inicioExistente) {
+        return { disponible: false, mensaje: `El especialista ya tiene una cita de "${cita.servicio_aux}" a las ${horaExistente}.` };
+      }
+    }
+    return { disponible: true };
+  } catch (error) { 
+    console.error('Error disponibilidad:', error);
+    return { disponible: false, mensaje: "Error al verificar la agenda." }; 
+  }
+}
+
+async function obtenerIdsRelacionales(servicioNombre, especialistaNombre) {
+  let res = { servicioId: null, especialistaId: null, duracion: 60, precio: 0 };
+  if (servicioNombre && servicioNombre !== '...') {
+    const { data: s } = await supabase.from('servicios').select('id, duracion, precio').ilike('nombre', `%${servicioNombre}%`).maybeSingle();
+    if (s) { res.servicioId = s.id; res.duracion = s.duracion; res.precio = s.precio; }
+  }
+  if (especialistaNombre && especialistaNombre !== '...' && especialistaNombre !== 'Asignar') {
+    const { data: e } = await supabase.from('especialistas').select('id').ilike('nombre', `%${especialistaNombre}%`).maybeSingle();
+    if (e) res.especialistaId = e.id;
+  }
+  return res;
+}
+
+async function registrarCita(datos) {
+  const fechaHora = `${datos.fecha}T${datos.hora}:00-05:00`;
+  const { data, error } = await supabase.from('citas').insert({
+    cliente_id: datos.clienteId,
+    servicio_id: datos.servicioId,
+    especialista_id: datos.especialistaId,
+    fecha_hora: fechaHora,
+    estado: 'Confirmada',
+    nombre_cliente_aux: `${datos.nombre} ${datos.apellido}`.trim(),
+    servicio_aux: datos.servicio,
+    duracion_aux: datos.duracion
+  }).select().single();
+
+  if (error) throw error;
+
+  await axios.post(`https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`, {
+    records: [{ fields: {
+      "ID_Supabase": data.id,
+      "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
+      "Servicio": datos.servicio,
+      "Fecha": datos.fecha,
+      "Hora": datos.hora,
+      "Especialista": datos.especialista,
+      "Teléfono": datos.telefono,
+      "Estado": "Confirmada",
+      "Importe estimado": datos.precio,
+      "Duración estimada (minutos)": datos.duracion
+    } }]
+  }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
+
+  return { success: true, id: data.id };
+}
+
+async function reagendarCita(citaId, nuevaFecha, nuevaHora) {
+  const fechaHora = `${nuevaFecha}T${nuevaHora}:00-05:00`;
+  const { error } = await supabase.from('citas').update({
+    fecha_hora: fechaHora,
+    estado: 'Confirmada'
+  }).eq('id', citaId);
+
+  if (error) throw error;
+
+  const airtableUrl = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
+  const formula = encodeURIComponent(`{ID_Supabase} = '${citaId}'`);
+  const searchRes = await axios.get(`${airtableUrl}?filterByFormula=${formula}`, {
+    headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
+  });
+
+  if (searchRes.data.records.length > 0) {
+    const airtableId = searchRes.data.records[0].id;
+    await axios.patch(airtableUrl, {
+      records: [{
+        id: airtableId,
+        fields: { "Fecha": nuevaFecha, "Hora": nuevaHora, "Estado": "Confirmada" }
+      }]
+    }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
+  }
+  return { success: true };
+}
+
+async function cancelarCita(citaId) {
+  const { error } = await supabase.from('citas').update({ estado: 'Cancelada' }).eq('id', citaId);
+  if (error) throw error;
+
+  const airtableUrl = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
+  const formula = encodeURIComponent(`{ID_Supabase} = '${citaId}'`);
+  const searchRes = await axios.get(`${airtableUrl}?filterByFormula=${formula}`, {
+    headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
+  });
+
+  if (searchRes.data.records.length > 0) {
+    const airtableId = searchRes.data.records[0].id;
+    await axios.patch(airtableUrl, {
+      records: [{ id: airtableId, fields: { "Estado": "Cancelada" } }]
+    }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
+  }
+  return { success: true };
+}
+
+// ============ OTRAS RUTAS ============
+
+app.post('/api/sync-airtable', syncAirtable);
+app.get('/api/daily-report', dailyReport);
+app.get('/api/reminders', reminders);
+
+app.listen(3000, '0.0.0.0', () => console.log('🚀 AuraSync Online en puerto 3000'));
 export default app;
