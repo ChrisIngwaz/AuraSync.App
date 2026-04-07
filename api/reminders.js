@@ -11,7 +11,7 @@ export default async function handler(req, res) {
     const twilioNumber = process.env.TWILIO_NUMBER?.trim().replace('whatsapp:', '') || '14155238886';
     const fromFinal = `whatsapp:${twilioNumber}`;
 
-    // 1. Obtener fecha de MAÑANA en Ecuador
+    // 1. Obtener fecha de MAÑANA en la zona horaria local (Ecuador)
     const ahora = new Date();
     const mañana = new Date(ahora);
     mañana.setDate(mañana.getDate() + 1);
@@ -20,7 +20,7 @@ export default async function handler(req, res) {
     const formatter = new Intl.DateTimeFormat('en-CA', opciones);
     const fechaMañana = formatter.format(mañana); 
 
-    // 2. Consultar Airtable para las citas de mañana
+    // 2. Consultar Airtable para las citas confirmadas de mañana
     const baseId = process.env.AIRTABLE_BASE_ID;
     const tableName = encodeURIComponent(process.env.AIRTABLE_TABLE_NAME || 'Citas');
     const formula = encodeURIComponent(`AND({Fecha} = '${fechaMañana}', {Estado} = 'Confirmada')`);
@@ -33,7 +33,7 @@ export default async function handler(req, res) {
     const citas = airtableRes.data.records || [];
     console.log(`🔔 Procesando ${citas.length} recordatorios para el ${fechaMañana}...`);
 
-    // 3. Enviar recordatorios
+    // 3. Enviar recordatorios con un tono sofisticado y profesional
     for (const cita of citas) {
       const f = cita.fields;
       const telefono = f["Teléfono"];
@@ -50,7 +50,7 @@ export default async function handler(req, res) {
         `⏰ *Hora*: ${hora}\n` +
         `💆‍♀️ *Servicio*: ${servicio}\n\n` +
         `Estamos preparando todo para brindarte la mejor experiencia. ¡Te esperamos!\n\n` +
-        `_Si necesitas reprogramar, solo dímelo por aquí._`;
+        `_Si necesitas reprogramar o cancelar, solo dímelo por aquí y yo me encargo._`;
 
       try {
         await enviarWhatsApp(fromFinal, `whatsapp:${telefono}`, mensajePremium, sid, token);
