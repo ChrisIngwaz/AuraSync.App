@@ -18,7 +18,7 @@ export default async function handler(req, res) {
     // LISTA DE DESTINATARIOS (Dueño y Administrador)
     const destinatarios = [
       'whatsapp:+593995430859', // Dueño
-      'whatsapp:+593995430859'  // Administrador (Asegúrate de poner el número real)
+      'whatsapp:+593995430859'  // Administrador
     ];
 
     const ahora = new Date();
@@ -58,7 +58,7 @@ export default async function handler(req, res) {
 
     let mensaje = "";
     if (citas.length === 0) {
-      mensaje = `📊 *AURA SYNC - Reporte Diario*\n\n📅 ${fechaFormateada}\n\n⚠️ *No hubo citas registradas hoy.*\n\n📌 No se registraron atenciones en el sistema para esta fecha.`;
+      mensaje = `📊 *AURA SYNC - Reporte Diario*\n\n📅 ${fechaFormateada.toUpperCase()}\n\n⚠️ *No hubo citas registradas hoy.*\n\n📌 No se registraron atenciones en el sistema para esta fecha.`;
     } else {
       let granTotal = 0;
       const servicios = {};
@@ -69,20 +69,23 @@ export default async function handler(req, res) {
         const importe = parseFloat(f["Importe estimado"] || 0);
         const servicio = f.Servicio || "Sin especificar";
         const especialista = f.Especialista || "Sin asignar";
+        const estado = f.Estado || "Confirmada";
         
-        granTotal += importe;
-        
-        if (!servicios[servicio]) {
-          servicios[servicio] = { cantidad: 0, total: 0 };
+        if (estado === "Confirmada" || estado === "Completada") {
+          granTotal += importe;
+          
+          if (!servicios[servicio]) {
+            servicios[servicio] = { cantidad: 0, total: 0 };
+          }
+          servicios[servicio].cantidad += 1;
+          servicios[servicio].total += importe;
+          
+          if (!especialistas[especialista]) {
+            especialistas[especialista] = { citas: 0, ingresos: 0 };
+          }
+          especialistas[especialista].citas += 1;
+          especialistas[especialista].ingresos += importe;
         }
-        servicios[servicio].cantidad += 1;
-        servicios[servicio].total += importe;
-        
-        if (!especialistas[especialista]) {
-          especialistas[especialista] = { citas: 0, ingresos: 0 };
-        }
-        especialistas[especialista].citas += 1;
-        especialistas[especialista].ingresos += importe;
       });
 
       mensaje = `📊 *AURA SYNC - Reporte Diario*\n`;
@@ -92,7 +95,7 @@ export default async function handler(req, res) {
       mensaje += `*📈 RESUMEN EJECUTIVO*\n`;
       mensaje += `• Total Citas: ${citas.length}\n`;
       mensaje += `• Ingresos del Día: $${granTotal.toFixed(2)}\n`;
-      mensaje += `• Promedio por Cita: $${(granTotal / citas.length).toFixed(2)}\n\n`;
+      mensaje += `• Promedio por Cita: $${citas.length > 0 ? (granTotal / citas.length).toFixed(2) : '0.00'}\n\n`;
       
       mensaje += `*💇‍♀️ DETALLE POR SERVICIO*\n`;
       Object.entries(servicios).forEach(([nombre, datos]) => {
@@ -114,7 +117,7 @@ export default async function handler(req, res) {
       mensaje += `━━━━━━━━━━━━━━━\n`;
       mensaje += `*💰 GRAN TOTAL: $${granTotal.toFixed(2)}*\n`;
       mensaje += `━━━━━━━━━━━━━━━\n`;
-      mensaje += `_Reporte generado automáticamente_`;
+      mensaje += `_Reporte generado automáticamente por Aura_`;
     }
 
     // Enviar a todos los destinatarios
@@ -129,6 +132,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ success: true, total: citas.length, fecha: hoy });
 
   } catch (error) {
+    console.error('Error en reporte:', error);
     return res.status(500).json({ error: "Error en envío", detalle: error.message });
   }
 }
