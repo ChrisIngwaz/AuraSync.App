@@ -20,26 +20,30 @@ export default async function handler(req, res) {
     console.log(`🔄 Sincronizando cita ${id_supabase} desde Airtable...`);
 
     // 1. Resolver IDs de servicio y especialista si han cambiado
-    let servicio_id = null;
-    let especialista_id = null;
+    let updateData = {};
 
     if (servicio) {
       const { data: s } = await supabase.from('servicios').select('id').ilike('nombre', `%${servicio}%`).maybeSingle();
-      if (s) servicio_id = s.id;
+      if (s) {
+        updateData.servicio_id = s.id;
+        updateData.servicio_aux = servicio;
+      }
     }
 
     if (especialista) {
       const { data: e } = await supabase.from('especialistas').select('id').ilike('nombre', `%${especialista}%`).maybeSingle();
-      if (e) especialista_id = e.id;
+      if (e) {
+        updateData.especialista_id = e.id;
+      }
     }
 
-    // 2. Actualizar en Supabase
-    const updateData = {};
-    if (fecha && hora) updateData.fecha_hora = `${fecha}T${hora}:00`;
-    if (estado) updateData.estado = estado;
-    if (servicio_id) updateData.servicio_id = servicio_id;
-    if (especialista_id) updateData.especialista_id = especialista_id;
-    if (servicio) updateData.servicio_aux = servicio;
+    // 2. Preparar datos de actualización (Fecha, Hora, Estado)
+    if (fecha && hora) {
+      updateData.fecha_hora = `${fecha}T${hora}:00-05:00`;
+    }
+    if (estado) {
+      updateData.estado = estado;
+    }
 
     const { error } = await supabase
       .from('citas')
@@ -48,7 +52,7 @@ export default async function handler(req, res) {
 
     if (error) throw error;
 
-    return res.status(200).json({ success: true });
+    return res.status(200).json({ success: true, message: `Cita ${id_supabase} sincronizada correctamente.` });
 
   } catch (error) {
     console.error('❌ Error en sincronización:', error.message);
