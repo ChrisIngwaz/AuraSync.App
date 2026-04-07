@@ -111,57 +111,74 @@ DATA_JSON:{"accion":"agendar|reagendar|cancelar","nombre":"...","apellido":"..."
     let finalMessage = fullReply.replace(/DATA_JSON[\s\S]*/, '').trim();
     const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/);
 
+    console.log(`🤖 Respuesta de IA: "${finalMessage.substring(0, 50)}..."`);
+
     // 5. Procesamiento de Acciones
     if (jsonMatch) {
-      const d = JSON.parse(jsonMatch[1]);
-      
-      // Registro de Usuario
-      if (!cliente && d.nombre !== "..." && d.apellido !== "..." && d.ciudad !== "..." && d.fecha_nacimiento.match(/^\d{4}-\d{2}-\d{2}$/)) {
-        const { data: n } = await supabase.from('clientes').upsert({ 
-          telefono: userPhone, 
-          nombre: d.nombre, 
-          apellido: d.apellido, 
-          ciudad: d.ciudad,
-          fecha_nacimiento: d.fecha_nacimiento 
-        }, { onConflict: 'telefono' }).select().single();
-        cliente = n;
-        finalMessage += `\n\n✅ ¡Bienvenido a AuraSync, ${d.nombre}! Ya estás registrado.`;
-      }
+      try {
+        const d = JSON.parse(jsonMatch[1]);
+        console.log('📦 JSON detectado:', JSON.stringify(d));
+        
+        // Registro de Usuario
+        if (!cliente && d.nombre !== "..." && d.apellido !== "..." && d.ciudad !== "..." && d.fecha_nacimiento && d.fecha_nacimiento.match(/^\d{4}-\d{2}-\d{2}$/)) {
+          console.log('👤 Registrando nuevo cliente...');
+          const { data: n } = await supabase.from('clientes').upsert({ 
+            telefono: userPhone, 
+            nombre: d.nombre, 
+            apellido: d.apellido, 
+            ciudad: d.ciudad,
+            fecha_nacimiento: d.fecha_nacimiento 
+          }, { onConflict: 'telefono' }).select().single();
+          cliente = n;
+          finalMessage += `\n\n✅ ¡Bienvenido a AuraSync, ${d.nombre}! Ya estás registrado.`;
+        }
 
-      // Acciones de Cita
-      if (cliente && d.accion) {
-        if (d.accion === 'agendar' && d.cita_fecha !== "..." && d.cita_hora !== "...") {
-          const ids = await obtenerIdsRelacionales(d.cita_servicio, d.cita_especialista);
-          const disp = await verificarDisponibilidad(d.cita_fecha, d.cita_hora, ids.especialistaId, ids.duracion);
-          if (disp.disponible) {
-            await registrarCita({ clienteId: cliente.id, telefono: userPhone, nombre: cliente.nombre, apellido: cliente.apellido, fecha: d.cita_fecha, hora: d.cita_hora, servicio: d.cita_servicio, especialista: d.cita_especialista, servicioId: ids.servicioId, especialistaId: ids.especialistaId, duracion: ids.duracion, precio: ids.precio });
-            if (!finalMessage.includes("confirmada")) finalMessage += `\n\n✅ Cita confirmada con éxito.`;
-          } else {
-            finalMessage += `\n\n⚠️ ${disp.mensaje}`;
-          }
-        } else if (d.accion === 'reagendar' && d.cita_fecha !== "..." && d.cita_hora !== "...") {
-          const { data: citaProxima } = await supabase.from('citas').select('id').eq('cliente_id', cliente.id).gte('fecha_hora', new Date().toISOString()).eq('estado', 'Confirmada').order('fecha_hora', { ascending: true }).limit(1).maybeSingle();
-          if (citaProxima) {
+        // Acciones de Cita
+        if (cliente && d.accion) {
+          if (d.accion === 'agendar' && d.cita_fecha !== "..." && d.cita_hora !== "...") {
+            console.log('📅 Intentando agendar cita...');
             const ids = await obtenerIdsRelacionales(d.cita_servicio, d.cita_especialista);
             const disp = await verificarDisponibilidad(d.cita_fecha, d.cita_hora, ids.especialistaId, ids.duracion);
             if (disp.disponible) {
-              await reagendarCita(citaProxima.id, d.cita_fecha, d.cita_hora);
-              finalMessage += `\n\n✅ Tu cita ha sido reprogramada para el ${d.cita_fecha} a las ${d.cita_hora}.`;
+              await registrarCita({ clienteId: cliente.id, telefono: userPhone, nombre: cliente.nombre, apellido: cliente.apellido, fecha: d.cita_fecha, hora: d.cita_hora, servicio: d.cita_servicio, especialista: d.cita_especialista, servicioId: ids.servicioId, especialistaId: ids.especialistaId, duracion: ids.duracion, precio: ids.precio });
+              finalMessage += `\n\n✅ *Cita confirmada con éxito*`;
+              console.log('✅ Cita agendada correctamente.');
             } else {
               finalMessage += `\n\n⚠️ ${disp.mensaje}`;
+              console.log(`⚠️ No disponible: ${disp.mensaje}`);
             }
-          } else {
-            finalMessage += `\n\n⚠️ No encontré ninguna cita próxima para reprogramar.`;
+          } else if (d.accion === 'reagendar' && d.cita_fecha !== "..." && d.cita_hora !== "...") {
+            console.log('🔄 Intentando reagendar cita...');
+            const { data: citaProxima } = await supabase.from('citas').select('id').eq('cliente_id', cliente.id).gte('fecha_hora', new Date().toISOString()).eq('estado', 'Confirmada').order('fecha_hora', { ascending: true }).limit(1).maybeSingle();
+            if (citaProxima) {
+              const ids = await obtenerIdsRelacionales(d.cita_servicio, d.cita_especialista);
+              const disp = await verificarDisponibilidad(d.cita_fecha, d.cita_hora, ids.especialistaId, ids.duracion);
+              if (disp.disponible) {
+                await reagendarCita(citaProxima.id, d.cita_fecha, d.cita_hora);
+                finalMessage += `\n\n✅ *Cita reprogramada con éxito*`;
+                console.log('✅ Cita reagendada.');
+              } else {
+                finalMessage += `\n\n⚠️ ${disp.mensaje}`;
+              }
+            } else {
+              finalMessage += `\n\n⚠️ No encontré ninguna cita próxima para reprogramar.`;
+            }
+          } else if (d.accion === 'cancelar') {
+            console.log('🚫 Intentando cancelar cita...');
+            const { data: citaProxima } = await supabase.from('citas').select('id').eq('cliente_id', cliente.id).gte('fecha_hora', new Date().toISOString()).eq('estado', 'Confirmada').order('fecha_hora', { ascending: true }).limit(1).maybeSingle();
+            if (citaProxima) {
+              await cancelarCita(citaProxima.id);
+              finalMessage += `\n\n✅ *Cita cancelada correctamente*`;
+              console.log('✅ Cita cancelada.');
+            } else {
+              finalMessage += `\n\n⚠️ No encontré ninguna cita próxima para cancelar.`;
+            }
           }
-        } else if (d.accion === 'cancelar') {
-          const { data: citaProxima } = await supabase.from('citas').select('id').eq('cliente_id', cliente.id).gte('fecha_hora', new Date().toISOString()).eq('estado', 'Confirmada').order('fecha_hora', { ascending: true }).limit(1).maybeSingle();
-          if (citaProxima) {
-            await cancelarCita(citaProxima.id);
-            finalMessage += `\n\n✅ Tu cita ha sido cancelada correctamente.`;
-          } else {
-            finalMessage += `\n\n⚠️ No encontré ninguna cita próxima para cancelar.`;
-          }
+        } else if (!cliente && d.accion === 'agendar') {
+          console.log('⚠️ Intento de agendar sin cliente registrado.');
         }
+      } catch (jsonErr) {
+        console.error('❌ Error parseando JSON de la IA:', jsonErr.message);
       }
     }
 
@@ -196,6 +213,7 @@ async function verificarDisponibilidad(fecha, hora, especialistaId, duracionMinu
     const inicioNueva = timeToMinutes(hora);
     const finNueva = inicioNueva + duracionMinutos;
     
+    // Horario de atención: 9:00 a 18:00
     if (inicioNueva < 540 || finNueva > 1080) {
       return { disponible: false, mensaje: "Esa hora está fuera de nuestro horario de atención (9:00 - 18:00)." };
     }
@@ -252,6 +270,7 @@ async function registrarCita(datos) {
 
   if (error) throw error;
 
+  // Sincronizar con Airtable
   await axios.post(`https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`, {
     records: [{ fields: {
       "ID_Supabase": data.id,
@@ -279,6 +298,7 @@ async function reagendarCita(citaId, nuevaFecha, nuevaHora) {
 
   if (error) throw error;
 
+  // Actualizar en Airtable
   const airtableUrl = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
   const formula = encodeURIComponent(`{ID_Supabase} = '${citaId}'`);
   const searchRes = await axios.get(`${airtableUrl}?filterByFormula=${formula}`, {
