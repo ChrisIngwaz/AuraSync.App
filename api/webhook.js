@@ -13,21 +13,9 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// CORRECCIÓN: Crear cliente SIN cache de schema para evitar PGRST204
 const supabase = createClient(
   process.env.SUPABASE_URL || '',
-  process.env.SUPABASE_KEY || '',
-  {
-    db: {
-      schema: 'public'
-    },
-    global: {
-      headers: {
-        'Accept-Profile': 'public',
-        'Content-Profile': 'public'
-      }
-    }
-  }
+  process.env.SUPABASE_KEY || ''
 );
 
 const CONFIG = {
@@ -43,10 +31,10 @@ const CONFIG = {
 
 const { MessagingResponse } = twilio.twiml;
 
-// ============ RUTAS DE LA API ============
+// ============ WEBHOOK PRINCIPAL ============
 
 app.get(['/', '/webhook', '/api/webhook'], (req, res) => {
-  res.status(200).send('🚀 AuraSync Online - Webhook listo para recibir mensajes de WhatsApp.');
+  res.status(200).send('🚀 AuraSync Online');
 });
 
 app.post(['/', '/webhook', '/api/webhook'], async (req, res) => {
@@ -72,8 +60,8 @@ app.post(['/', '/webhook', '/api/webhook'], async (req, res) => {
 
   try {
     // ========== PROCESAMIENTO DE AUDIO ==========
-    if (MediaUrl0) {
-      console.log('🎙️ Procesando nota de voz con Deepgram...');
+    if (MediaUrl0 && !respuestaParaUsuario) {
+      console.log('🎙️ Procesando nota de voz...');
       try {
         const dr = await axios.post(
           "https://api.deepgram.com/v1/listen?model=nova-2&language=es&smart_format=true", 
@@ -90,13 +78,12 @@ app.post(['/', '/webhook', '/api/webhook'], async (req, res) => {
         console.log(`✅ Transcripción: "${textoUsuario}"`);
       } catch (audioError) {
         console.error('❌ Error Deepgram:', audioError.message);
-        textoUsuario = "[Error procesando audio]";
-        respuestaParaUsuario = "Disculpa, no pude escuchar tu nota de voz claramente. ¿Podrías escribirme o enviarla de nuevo? 🎙️";
+        respuestaParaUsuario = "Disculpa, no pude escuchar tu nota de voz claramente. ¿Podrías escribirme? 🎙️";
       }
     }
 
     // ========== OBTENER CONTEXTO ==========
-    console.log('🔍 Obteniendo contexto de base de datos...');
+    console.log('🔍 Obteniendo contexto...');
     
     const { data: cliente, error: clienteError } = await supabase
       .from('clientes')
@@ -105,7 +92,7 @@ app.post(['/', '/webhook', '/api/webhook'], async (req, res) => {
       .maybeSingle();
     
     if (clienteError) console.error('⚠️ Error consultando cliente:', clienteError.message);
-    console.log(cliente ? `👤 Cliente encontrado: ${cliente.nombre} ${cliente.apellido}` : '👤 Cliente NUEVO');
+    console.log(cliente ? `👤 Cliente: ${cliente.nombre}` : '👤 Cliente NUEVO');
 
     const { data: esp, error: espError } = await supabase.from('especialistas').select('id, nombre, rol, expertise');
     if (espError) console.error('⚠️ Error especialistas:', espError.message);
@@ -113,7 +100,6 @@ app.post(['/', '/webhook', '/api/webhook'], async (req, res) => {
     const { data: serv, error: servError } = await supabase.from('servicios').select('id, nombre, precio, duracion');
     if (servError) console.error('⚠️ Error servicios:', servError.message);
 
-    // Timezone Ecuador forzado
     const hoy = new Date().toLocaleDateString('es-EC', { 
       weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', 
       timeZone: 'America/Guayaquil' 
@@ -127,77 +113,142 @@ app.post(['/', '/webhook', '/api/webhook'], async (req, res) => {
       .limit(6);
     const historial = mensajes ? mensajes.reverse() : [];
 
-    // ========== SYSTEM PROMPT PREMIUM ==========
-    const systemPrompt = `Eres Aura, la Coordinadora Ejecutiva de AuraSync. No eres un bot, eres una profesional sofisticada, cálida y extremadamente eficiente. Tu misión es que el cliente sienta que está tratando con la mejor asistente personal del mundo.
+    // ========== SYSTEM PROMPT ==========
+    const systemPrompt = `Eres Aura, Coordinadora Ejecutiva de AuraSync. Profesional, cálida, humana. NUNCA digas que eres IA.
 
-[TU ESENCIA]
-- Lenguaje impecable: español elegante, profesional y cercano
-- NUNCA digas "soy una IA", "como asistente virtual", o frases robóticas
-- Usa emojis con moderación y naturalidad ✨💫🌸
-- Reconoces al cliente por nombre si ya existe en el sistema
-- Eficiencia total: cierras citas en mínimos mensajes, sin dar vueltas
+[REGLAS DE ORO]
+1. Cliente REGISTRADO (ya tienes sus datos): NO pidas nombre, ciudad, fecha nacimiento. Solo confirma la cita.
+2. Cliente NUEVO: pide nombre, ciudad, fecha nacimiento (YYYY-MM-DD) ANTES de agendar.
+3. Si propones horario alternativo (ej: "17:15 en lugar de 17:00") y usuario acepta: CONFIRMA la cita inmediatamente.
+4. Si usuario dice "sí", "ok", "dale", "perfecto": está aceptando tu última propuesta. Confirma la cita.
 
-[CONTEXTO DEL SISTEMA]
-- Especialistas disponibles: ${esp?.map(e => `${e.nombre} (${e.rol}: ${e.expertise})`).join(', ') || 'Consultar disponibilidad'}
-- Servicios: ${serv?.map(s => `${s.nombre} $${s.precio}, ${s.duracion}min`).join(', ') || 'Consultar catálogo'}
-- Horario atención: 9:00 a 18:00 (hora Ecuador)
-- Fecha hoy: ${hoy}
-- Cliente actual: ${cliente ? `${cliente.nombre} ${cliente.apellido} (REGISTRADO - VIP)` : 'NUEVO - requiere registro'}
+[CONTEXTO]
+- Especialistas: ${esp?.map(e => `${e.nombre} (${e.rol})`).join(', ') || 'Consultar'}
+- Servicios: ${serv?.map(s => `${s.nombre} $${s.precio}, ${s.duracion}min`).join(', ') || 'Consultar'}
+- Horario: 9:00 a 18:00 (Ecuador)
+- Hoy: ${hoy}
+- Cliente actual: ${cliente ? `${cliente.nombre} (REGISTRADO)` : 'NUEVO - requiere registro'}
 
-[REGLAS DE ORO - ZERO ERRORES]
-1. Si cliente REGISTRADO: NO pidas nombre, apellido, ciudad ni fecha de nacimiento
-2. Si cliente NUEVO: pide con elegancia los 4 datos antes de agendar
-3. Si cliente dice "cita mañana 3pm con Elena para manicura": CONFIRMA directamente, no preguntes de nuevo
-4. Anticipación: ofrece horarios alternativos si el solicitado no está disponible
-5. Coordinación perfecta: verifica que especialista + horario + servicio = disponible real
-
-[FORMATO OBLIGATORIO]
-AL FINAL de cada respuesta, en línea separada, incluye SIEMPRE:
+[FORMATO OBLIGATORIO AL FINAL]
 DATA_JSON:{"accion":"none"|"agendar"|"reagendar"|"cancelar","nombre":"${cliente?.nombre || '...'}","apellido":"${cliente?.apellido || '...'}","ciudad":"${cliente?.ciudad || '...'}","fecha_nacimiento":"${cliente?.fecha_nacimiento || '...'}","cita_fecha":"YYYY-MM-DD","cita_hora":"HH:MM","cita_servicio":"...","cita_especialista":"..."}`;
 
     // ========== LLAMADA A OPENAI ==========
-    console.log('🤖 Consultando a OpenAI GPT-4o...');
-    
-    try {
-      const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
-        model: "gpt-4o", 
-        messages: [
-          { role: "system", content: systemPrompt }, 
-          ...historial.map(m => ({ role: m.rol, content: m.contenido })), 
-          { role: "user", content: textoUsuario }
-        ], 
-        temperature: 0.25,
-        max_tokens: 400
-      }, { 
-        headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` },
-        timeout: 12000
-      });
+    if (!respuestaParaUsuario) {
+      console.log('🤖 Consultando OpenAI...');
       
-      const fullReply = aiRes.data.choices[0].message.content;
-      console.log('📝 RESPUESTA OPENAI:', fullReply.substring(0, 300) + (fullReply.length > 300 ? '...' : ''));
+      try {
+        const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
+          model: "gpt-4o", 
+          messages: [
+            { role: "system", content: systemPrompt }, 
+            ...historial.map(m => ({ role: m.rol, content: m.contenido })), 
+            { role: "user", content: textoUsuario }
+          ], 
+          temperature: 0.2,
+          max_tokens: 400
+        }, { 
+          headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` },
+          timeout: 12000
+        });
+        
+        const fullReply = aiRes.data.choices[0].message.content;
+        console.log('📝 RESPUESTA:', fullReply.substring(0, 200) + '...');
+        
+        const { mensajeLimpio, datosAccion } = extraerJSON(fullReply);
+        respuestaParaUsuario = mensajeLimpio;
+        accionData = datosAccion;
+        
+      } catch (aiError) {
+        console.error('❌ Error OpenAI:', aiError.message);
+        respuestaParaUsuario = cliente 
+          ? `Disculpa ${cliente.nombre}, ¿me repetirías qué servicio necesitas? 💫`
+          : `Hola, bienvenido a AuraSync. ¿Me regalas tu nombre completo, ciudad y fecha de nacimiento? ✨`;
+      }
+    }
+
+    // ========== DETECTAR CONFIRMACIÓN SIMPLE ==========
+    if ((!accionData || accionData.accion === 'none') && cliente && !respuestaParaUsuario) {
+      const textoLower = textoUsuario.toLowerCase().trim();
+      const confirmaciones = ['sí', 'si', 'ok', 'vale', 'perfecto', 'dale', 'bueno', 'sí por favor', 'sí gracias', 'sí, gracias', 'sí dale', 'ok dale', 'sí, dale', 'perfecto, dale'];
       
-      // Extraer JSON y mensaje limpio
-      const { mensajeLimpio, datosAccion } = extraerJSON(fullReply);
-      respuestaParaUsuario = mensajeLimpio;
-      accionData = datosAccion;
+      const esConfirmacion = confirmaciones.some(c => textoLower === c || textoLower.startsWith(c));
       
-    } catch (aiError) {
-      console.error('❌ Error OpenAI:', aiError.message);
-      // Mensaje humano, sin exponer error técnico
-      respuestaParaUsuario = cliente 
-        ? `Disculpa ${cliente.nombre}, tuve un pequeño lapsus. ¿Me repetirías qué servicio necesitas y para cuándo? 💫`
-        : `Hola, bienvenido a AuraSync. Para atenderte con nuestro servicio VIP, ¿me regalas tu nombre completo, ciudad y fecha de nacimiento? ✨`;
+      if (esConfirmacion) {
+        // Buscar última propuesta de Aura
+        const ultimaRespuestaAura = historial
+          .filter(m => m.rol === 'assistant')
+          .pop()?.contenido || '';
+        
+        console.log('🔍 Última propuesta de Aura:', ultimaRespuestaAura.substring(0, 100));
+        
+        // Extraer hora propuesta (formato HH:MM)
+        const horaMatch = ultimaRespuestaAura.match(/(\d{1,2}):(\d{2})/);
+        const horaPropuesta = horaMatch ? `${horaMatch[1].padStart(2,'0')}:${horaMatch[2]}` : null;
+        
+        // Extraer fecha mencionada (hoy, mañana, o fecha específica)
+        let fechaPropuesta = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' });
+        if (ultimaRespuestaAura.toLowerCase().includes('mañana')) {
+          const manana = new Date();
+          manana.setDate(manana.getDate() + 1);
+          fechaPropuesta = manana.toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' });
+        }
+        
+        // Detectar servicio del contexto
+        let servicioDetectado = null;
+        for (const s of serv || []) {
+          if (ultimaRespuestaAura.toLowerCase().includes(s.nombre.toLowerCase())) {
+            servicioDetectado = s;
+            break;
+          }
+        }
+        // Fallback: si menciona "corte" o "cabello"
+        if (!servicioDetectado && (ultimaRespuestaAura.toLowerCase().includes('corte') || ultimaRespuestaAura.toLowerCase().includes('cabello'))) {
+          servicioDetectado = serv?.find(s => s.nombre.toLowerCase().includes('corte'));
+        }
+        
+        // Detectar especialista del contexto
+        let especialistaDetectado = null;
+        for (const e of esp || []) {
+          if (ultimaRespuestaAura.toLowerCase().includes(e.nombre.toLowerCase())) {
+            especialistaDetectado = e;
+            break;
+          }
+        }
+        
+        if (horaPropuesta && servicioDetectado) {
+          console.log('✅ CONFIRMACIÓN DETECTADA:', {
+            fecha: fechaPropuesta,
+            hora: horaPropuesta,
+            servicio: servicioDetectado.nombre,
+            especialista: especialistaDetectado?.nombre || 'No especificado'
+          });
+          
+          accionData = {
+            accion: "agendar",
+            nombre: cliente.nombre,
+            apellido: cliente.apellido || '',
+            ciudad: cliente.ciudad || '',
+            fecha_nacimiento: cliente.fecha_nacimiento || '',
+            cita_fecha: fechaPropuesta,
+            cita_hora: horaPropuesta,
+            cita_servicio: servicioDetectado.nombre,
+            cita_especialista: especialistaDetectado?.nombre || "..."
+          };
+          
+          respuestaParaUsuario = ""; // Se sobreescribirá con confirmación real
+        }
+      }
     }
 
     // ========== PROCESAR ACCIONES ==========
-    if (accionData && accionData.accion && accionData.accion !== 'none') {
-      console.log(`🎯 Procesando acción: ${accionData.accion}`);
+    if (accionData && accionData.accion && accionData.accion !== 'none' && !respuestaParaUsuario) {
+      console.log(`🎯 Acción: ${accionData.accion}`);
       
       let clienteActivo = cliente;
 
-      // ----- REGISTRO DE NUEVO CLIENTE -----
+      // ----- REGISTRO NUEVO CLIENTE -----
       if (!cliente && esRegistroCompleto(accionData)) {
-        console.log('📝 Registrando nuevo cliente VIP...');
+        console.log('📝 Registrando cliente...');
         
         const { data: nuevoCliente, error: registroError } = await supabase
           .from('clientes')
@@ -213,73 +264,46 @@ DATA_JSON:{"accion":"none"|"agendar"|"reagendar"|"cancelar","nombre":"${cliente?
           .single();
         
         if (registroError) {
-          console.error('❌ ERROR REGISTRO CLIENTE:', registroError);
-          respuestaParaUsuario = `Tuve un inconveniente registrando tus datos. ¿Lo intentamos de nuevo? Solo dime tu nombre, ciudad y fecha de nacimiento una vez más. 🙏`;
+          console.error('❌ Error registro:', registroError);
+          respuestaParaUsuario = `Tuve un inconveniente registrando tus datos. ¿Lo intentamos de nuevo? 🙏`;
           accionData = null;
         } else {
           console.log('✅ Cliente registrado:', nuevoCliente.id);
           clienteActivo = nuevoCliente;
           
-          // Reprocesar la acción de cita ahora que tenemos cliente
           if (accionData.accion === 'agendar') {
             const resultadoCita = await procesarAccionCita(accionData, nuevoCliente, userPhone, esp, serv);
-            if (resultadoCita.exito) {
-              respuestaParaUsuario = `¡Perfecto ${nuevoCliente.nombre}! Ya estás en nuestro sistema VIP y tu cita está confirmada. 🌟\n\n${resultadoCita.mensaje}`;
-            } else {
-              respuestaParaUsuario = `Bienvenido ${nuevoCliente.nombre}, ya tienes tu perfil activo. ${resultadoCita.mensaje}`;
-            }
+            respuestaParaUsuario = resultadoCita.exito 
+              ? `¡Perfecto ${nuevoCliente.nombre}! Ya estás registrado y tu cita confirmada. 🌟\n\n${resultadoCita.mensaje}`
+              : `Bienvenido ${nuevoCliente.nombre}. ${resultadoCita.mensaje}`;
           } else {
-            respuestaParaUsuario = `¡Bienvenido ${nuevoCliente.nombre}! Tu perfil VIP está activo. ¿En qué puedo ayudarte hoy? ✨`;
+            respuestaParaUsuario = `¡Bienvenido ${nuevoCliente.nombre}! Tu perfil VIP está activo. ¿En qué puedo ayudarte? ✨`;
           }
-          accionData = null; // Ya procesamos todo
+          accionData = null;
         }
       } else if (!cliente && accionData.accion === 'agendar') {
-        console.log('⚠️ Intento de agendar sin registro completo');
-        respuestaParaUsuario = `💎 Para darte el servicio VIP que mereces, necesito completar tu registro primero. ¿Me compartes tu nombre completo, ciudad y fecha de nacimiento (YYYY-MM-DD)?`;
+        respuestaParaUsuario = `Para darte nuestro servicio VIP, necesito tu nombre completo, ciudad y fecha de nacimiento. ¿Me los compartes? 💎`;
         accionData = null;
       }
 
-      // ----- ACCIONES DE CITA (para clientes ya registrados) -----
-      if (clienteActivo && clienteActivo.id && accionData && accionData.accion !== 'none') {
-        
-        if (!esp || !Array.isArray(esp) || esp.length === 0 || !serv || !Array.isArray(serv) || serv.length === 0) {
-          console.error('❌ ERROR: No se cargaron especialistas o servicios');
-          respuestaParaUsuario = "Dame un momento, estoy revisando la agenda. ¿Me das un segundo? 🌸";
+      // ----- CITAS PARA CLIENTES REGISTRADOS -----
+      if (clienteActivo && clienteActivo.id && accionData && accionData.accion !== 'none' && !respuestaParaUsuario) {
+        if (!esp?.length || !serv?.length) {
+          respuestaParaUsuario = "Dame un momento, estoy revisando la agenda... 🌸";
         } else {
-          console.log('🔍 DEBUG - Procesando cita:', {
-            accion: accionData.accion,
-            clienteId: clienteActivo.id,
-            numEsp: esp.length,
-            numServ: serv.length,
-            fecha: accionData.cita_fecha,
-            hora: accionData.cita_hora,
-            servicio: accionData.cita_servicio,
-            especialista: accionData.cita_especialista
-          });
-
           const resultado = await procesarAccionCita(accionData, clienteActivo, userPhone, esp, serv);
-          
-          if (resultado.exito && resultado.mensaje) {
-            respuestaParaUsuario = resultado.mensaje;
-            console.log('✅ Cita procesada exitosamente');
-          } else if (!resultado.exito && resultado.mensaje) {
-            respuestaParaUsuario = resultado.mensaje;
-            console.log('❌ Error procesando cita:', resultado.mensaje);
-          }
+          respuestaParaUsuario = resultado.mensaje;
         }
       }
-    } else {
-      console.log('ℹ️ Sin acción de cita detectada');
     }
 
-    // ========== GUARDAR CONVERSACIÓN ==========
+    // ========== GUARDAR Y RESPONDER ==========
     console.log('💾 Guardando conversación...');
     await supabase.from('conversaciones').insert([
       { telefono: userPhone, rol: 'user', contenido: textoUsuario, created_at: new Date().toISOString() },
       { telefono: userPhone, rol: 'assistant', contenido: respuestaParaUsuario, created_at: new Date().toISOString() }
     ]);
 
-    // ========== RESPONDER ==========
     const twiml = new MessagingResponse();
     twiml.message(respuestaParaUsuario);
     res.setHeader('Content-Type', 'text/xml');
@@ -290,20 +314,19 @@ DATA_JSON:{"accion":"none"|"agendar"|"reagendar"|"cancelar","nombre":"${cliente?
     return res.status(200).send(twiml.toString());
 
   } catch (error) { 
-    console.error('❌❌❌ ERROR CRÍTICO EN WEBHOOK:', error);
-    console.error(error.stack);
+    console.error('❌❌❌ ERROR CRÍTICO:', error);
+    console.error('Stack:', error.stack);
     
     const twiml = new MessagingResponse();
-    twiml.message("Aura tuvo un momento de distracción ejecutiva. ¿Podemos intentarlo de nuevo? 🌸");
+    twiml.message("Disculpa, tuve un momento de distracción. ¿Me repites por favor? 🌸");
     res.setHeader('Content-Type', 'text/xml');
     return res.status(200).send(twiml.toString());
   }
 });
 
-// ============ FUNCIÓN AUXILIAR: EXTRAER JSON ============
+// ============ FUNCIONES AUXILIARES ============
 
 function extraerJSON(fullReply) {
-  // Buscar JSON al final del mensaje
   const jsonMatch = fullReply.match(/DATA_JSON\s*:\s*(\{[\s\S]*?\})\s*$/i);
   
   if (jsonMatch) {
@@ -312,209 +335,123 @@ function extraerJSON(fullReply) {
       const mensaje = fullReply.replace(/DATA_JSON[\s\S]*/i, '').trim();
       return { mensajeLimpio: mensaje, datosAccion: datos };
     } catch (e) {
-      console.log('⚠️ JSON encontrado pero inválido:', e.message);
-    }
-  }
-  
-  // Intentar otros patrones si el primero falla
-  const patrones = [
-    /DATA_JSON\s*:\s*(\{[\s\S]*?\})\s*\n/i,
-    /DATA_JSON\s*:\s*(\{[\s\S]*?\})/i,
-    /DATA_JSON\s+(\{[\s\S]*?\})/i
-  ];
-  
-  for (const pattern of patrones) {
-    const match = fullReply.match(pattern);
-    if (match) {
-      try {
-        const datos = JSON.parse(match[1]);
-        const mensaje = fullReply.replace(/DATA_JSON[\s\S]*/i, '').trim();
-        return { mensajeLimpio: mensaje, datosAccion: datos };
-      } catch (e) {
-        continue;
-      }
+      console.log('⚠️ JSON inválido:', e.message);
     }
   }
   
   return { mensajeLimpio: fullReply, datosAccion: null };
 }
 
-// ============ FUNCIÓN AUXILIAR: VERIFICAR REGISTRO COMPLETO ============
-
 function esRegistroCompleto(accionData) {
-  return accionData && 
-         accionData.nombre && accionData.nombre !== "..." && 
-         accionData.apellido && accionData.apellido !== "..." &&
-         accionData.ciudad && accionData.ciudad !== "..." &&
-         accionData.fecha_nacimiento && /^\d{4}-\d{2}-\d{2}$/.test(accionData.fecha_nacimiento);
+  return accionData?.nombre && accionData.nombre !== "..." && 
+         accionData?.apellido && accionData.apellido !== "..." &&
+         accionData?.ciudad && accionData.ciudad !== "..." &&
+         accionData?.fecha_nacimiento && /^\d{4}-\d{2}-\d{2}$/.test(accionData.fecha_nacimiento);
 }
 
-// ============ FUNCIÓN CENTRAL DE ACCIONES ============
+// ============ PROCESAR ACCIONES DE CITA ============
 
 async function procesarAccionCita(datos, cliente, telefono, especialistasLista, serviciosLista) {
-  console.log(`\n🎯 PROCESANDO ACCIÓN: ${datos.accion?.toUpperCase() || 'DESCONOCIDA'}`);
-  console.log(`👤 Cliente: ${cliente?.nombre} ${cliente?.apellido} (ID: ${cliente?.id})`);
+  console.log(`\n🎯 PROCESANDO: ${datos.accion?.toUpperCase()}`);
   
-  const resultado = { exito: false, mensaje: '', error: null };
+  const resultado = { exito: false, mensaje: '' };
 
   try {
-    if (!datos || typeof datos !== 'object') {
-      return { ...resultado, mensaje: 'No entendí bien qué necesitas. ¿Me lo explicas de nuevo? 🌸' };
+    if (!datos?.accion) {
+      return { ...resultado, mensaje: '¿Qué te gustaría hacer? Agendar, reprogramar o cancelar? 💫' };
     }
 
-    if (!datos.accion) {
-      return { ...resultado, mensaje: '¿Qué te gustaría hacer? Agendar, reprogramar o cancelar una cita? 💫' };
-    }
-
-    if (!especialistasLista || !Array.isArray(especialistasLista) || especialistasLista.length === 0) {
-      console.error('❌ ERROR: especialistasLista vacía');
-      return { ...resultado, mensaje: 'Estoy revisando la disponibilidad de nuestros especialistas. Un momento por favor. ✨' };
-    }
-
-    if (!serviciosLista || !Array.isArray(serviciosLista) || serviciosLista.length === 0) {
-      console.error('❌ ERROR: serviciosLista vacía');
-      return { ...resultado, mensaje: 'Estoy consultando nuestros servicios. Dame un segundo. 🌸' };
+    if (!especialistasLista?.length || !serviciosLista?.length) {
+      return { ...resultado, mensaje: 'Estoy revisando disponibilidad. Un momento... 🌸' };
     }
 
     // ----- AGENDAR -----
     if (datos.accion === 'agendar') {
-      console.log('📋 Datos agendar:', {
-        fecha: datos.cita_fecha,
-        hora: datos.cita_hora,
-        servicio: datos.cita_servicio,
-        especialista: datos.cita_especialista
-      });
-
-      if (!datos.cita_fecha || datos.cita_fecha === "..." || 
-          !datos.cita_hora || datos.cita_hora === "...") {
-        return { ...resultado, mensaje: 'Para agendarte necesito saber qué día y a qué hora te gustaría. ¿Me dices? 📅' };
+      
+      if (!datos.cita_fecha || datos.cita_fecha === "..." || !datos.cita_hora || datos.cita_hora === "...") {
+        return { ...resultado, mensaje: '¿Para qué fecha y hora te gustaría tu cita? 📅' };
       }
 
       // Buscar servicio
       let servicio = null;
       if (datos.cita_servicio && datos.cita_servicio !== "...") {
-        const busquedaServicio = datos.cita_servicio.toLowerCase().trim();
+        const busqueda = datos.cita_servicio.toLowerCase().trim();
         servicio = serviciosLista.find(s => 
-          s.nombre && (
-            s.nombre.toLowerCase().includes(busquedaServicio) ||
-            busquedaServicio.includes(s.nombre.toLowerCase())
-          )
+          s.nombre.toLowerCase().includes(busqueda) || busqueda.includes(s.nombre.toLowerCase())
         );
+      }
+
+      // Fallback para "corte"
+      if (!servicio && datos.cita_servicio?.toLowerCase().includes('corte')) {
+        servicio = serviciosLista.find(s => s.nombre.toLowerCase().includes('corte'));
+      }
+
+      if (!servicio) {
+        const lista = serviciosLista.map(s => s.nombre).join(', ');
+        return { ...resultado, mensaje: `¿Qué servicio te gustaría? Tenemos: ${lista} 💫` };
       }
 
       // Buscar especialista
       let especialista = null;
       if (datos.cita_especialista && datos.cita_especialista !== "...") {
-        const busquedaEsp = datos.cita_especialista.toLowerCase().trim();
+        const busqueda = datos.cita_especialista.toLowerCase().trim();
         especialista = especialistasLista.find(e => 
-          e.nombre && (
-            e.nombre.toLowerCase().includes(busquedaEsp) ||
-            busquedaEsp.includes(e.nombre.toLowerCase())
-          )
+          e.nombre.toLowerCase().includes(busqueda) || busqueda.includes(e.nombre.toLowerCase())
         );
       }
 
-      console.log('🔍 Búsqueda resultados:', {
-        servicioBuscado: datos.cita_servicio,
-        servicioEncontrado: servicio?.nombre || 'NO',
-        especialistaBuscado: datos.cita_especialista,
-        especialistaEncontrado: especialista?.nombre || 'NO'
-      });
-
-      if (!servicio) {
-        const disponibles = serviciosLista.map(s => s.nombre).join(', ');
-        return { ...resultado, mensaje: `Hmm, no tengo registrado "${datos.cita_servicio}" en este momento. Te cuento que manejamos: ${disponibles}. ¿Cuál te interesa? 💫` };
-      }
-
+      // Si no hay especialista, usar el primero disponible o pedir
       if (!especialista) {
-        const disponibles = especialistasLista.map(e => e.nombre).join(', ');
-        if (!datos.cita_especialista || datos.cita_especialista === '...') {
-          return { ...resultado, mensaje: `¿Con quién te gustaría atenderte? Tenemos disponibles: ${disponibles} 👩‍💼` };
-        }
-        return { ...resultado, mensaje: `No encontré a "${datos.cita_especialista}" en nuestro equipo. Nuestros especialistas son: ${disponibles}. ¿Con quién prefieres? ✨` };
+        // Asignar el primer especialista como default (o pedir según tu preferencia)
+        especialista = especialistasLista[0];
+        console.log('⚠️ Especialista no especificado, usando default:', especialista.nombre);
       }
 
       // Verificar disponibilidad
       console.log('🔍 Verificando disponibilidad...');
-      const disponible = await verificarDisponibilidadRobusta(
-        datos.cita_fecha, 
-        datos.cita_hora, 
-        especialista.id, 
-        servicio.duracion
+      const disponible = await verificarDisponibilidad(
+        datos.cita_fecha, datos.cita_hora, especialista.id, servicio.duracion
       );
 
       if (!disponible.ok) {
         return { ...resultado, mensaje: disponible.mensaje };
       }
 
-      // CREAR CITA EN SUPABASE
-      console.log('💾 Creando cita en Supabase...');
-      const fechaHoraISO = `${datos.cita_fecha}T${datos.cita_hora}:00-05:00`;
+      // ===== INSERT EN SUPABASE (COLUMNAS EXACTAS DE TU TABLA) =====
+      console.log('💾 Creando cita...');
       
+      const citaData = {
+        cliente_id: cliente.id,
+        servicio_id: servicio.id,
+        especialista_id: especialista.id,
+        fecha_hora: `${datos.cita_fecha}T${datos.cita_hora}:00-05:00`,
+        estado: 'Confirmada',
+        nombre_cliente_aux: `${cliente.nombre} ${cliente.apellido || ''}`.trim(),
+        servicio_aux: servicio.nombre,
+        duracion_aux: servicio.duracion,
+        created_at: new Date().toISOString()
+        // NO incluir: precio (no existe), telefono_aux (no existe), motivo_cancelacion (null)
+      };
+
       const { data: citaCreada, error: errorCita } = await supabase
         .from('citas')
-        .insert({
-          cliente_id: cliente.id,
-          servicio_id: servicio.id,
-          especialista_id: especialista.id,
-          fecha_hora: fechaHoraISO,
-          estado: 'Confirmada',
-          nombre_cliente_aux: `${cliente.nombre} ${cliente.apellido}`.trim(),
-          servicio_aux: servicio.nombre,
-          duracion_aux: servicio.duracion,
-          precio: servicio.precio,
-          telefono_aux: telefono,
-          created_at: new Date().toISOString()
-        })
+        .insert(citaData)
         .select()
         .single();
 
       if (errorCita) {
         console.error('❌ ERROR SUPABASE:', errorCita);
-        if (errorCita.message && errorCita.message.includes('Could not find')) {
-          console.log('⚠️ Intentando insert sin campo problemático...');
-          const { data: citaCreadaRetry, error: errorRetry } = await supabase
-            .from('citas')
-            .insert({
-              cliente_id: cliente.id,
-              servicio_id: servicio.id,
-              especialista_id: especialista.id,
-              fecha_hora: fechaHoraISO,
-              estado: 'Confirmada',
-              nombre_cliente_aux: `${cliente.nombre} ${cliente.apellido}`.trim(),
-              servicio_aux: servicio.nombre,
-              duracion_aux: servicio.duracion,
-              telefono_aux: telefono,
-              created_at: new Date().toISOString()
-            })
-            .select()
-            .single();
-          
-          if (errorRetry) {
-            throw new Error(`Error al guardar cita (retry): ${errorRetry.message}`);
-          }
-          
-          if (!citaCreadaRetry || !citaCreadaRetry.id) {
-            throw new Error('Supabase no retornó ID de cita (retry)');
-          }
-          
-          console.log('✅ Cita creada en Supabase (sin precio):', citaCreadaRetry.id);
-          
-          return await sincronizarAirtableYResponder(
-            citaCreadaRetry, cliente, telefono, servicio, especialista, datos, resultado
-          );
-        }
-        
         throw new Error(`Error al guardar cita: ${errorCita.message}`);
       }
 
-      if (!citaCreada || !citaCreada.id) {
+      if (!citaCreada?.id) {
         throw new Error('Supabase no retornó ID de cita');
       }
 
-      console.log('✅ Cita creada en Supabase:', citaCreada.id);
+      console.log('✅ Cita creada:', citaCreada.id);
 
-      return await sincronizarAirtableYResponder(
+      // Sincronizar con Airtable
+      return await sincronizarAirtable(
         citaCreada, cliente, telefono, servicio, especialista, datos, resultado
       );
     }
@@ -522,7 +459,7 @@ async function procesarAccionCita(datos, cliente, telefono, especialistasLista, 
     // ----- REAGENDAR -----
     else if (datos.accion === 'reagendar') {
       if (!datos.cita_fecha || !datos.cita_hora) {
-        return { ...resultado, mensaje: 'Para reprogramar necesito la nueva fecha y hora. ¿Cuándo te funciona mejor? 📅' };
+        return { ...resultado, mensaje: '¿Para cuándo quieres reprogramar? 📅' };
       }
 
       const { data: citaActual } = await supabase
@@ -536,14 +473,12 @@ async function procesarAccionCita(datos, cliente, telefono, especialistasLista, 
         .maybeSingle();
 
       if (!citaActual) {
-        return { ...resultado, mensaje: 'No encontré citas próximas para reprogramar. ¿Quieres agendar una nueva? 💫' };
+        return { ...resultado, mensaje: 'No encontré citas próximas para reprogramar. 💫' };
       }
 
-      const disponible = await verificarDisponibilidadRobusta(
-        datos.cita_fecha,
-        datos.cita_hora,
-        citaActual.especialista_id,
-        citaActual.duracion_aux || 60
+      const duracion = citaActual.duracion_aux || 60;
+      const disponible = await verificarDisponibilidad(
+        datos.cita_fecha, datos.cita_hora, citaActual.especialista_id, duracion
       );
 
       if (!disponible.ok) {
@@ -592,7 +527,7 @@ async function procesarAccionCita(datos, cliente, telefono, especialistasLista, 
 
       return {
         exito: true,
-        mensaje: `🔄 *Cita Reprogramada*\n\n"${citaActual.servicio_aux}" ahora:\n📅 ${formatearFecha(datos.cita_fecha)} a las ${datos.cita_hora}\n\n¡Nos vemos! ✨`
+        mensaje: `🔄 Cita reprogramada para el ${formatearFecha(datos.cita_fecha)} a las ${datos.cita_hora}. ¡Nos vemos! ✨`
       };
     }
 
@@ -600,7 +535,7 @@ async function procesarAccionCita(datos, cliente, telefono, especialistasLista, 
     else if (datos.accion === 'cancelar') {
       const { data: citaActual } = await supabase
         .from('citas')
-        .select('id, servicio_aux, fecha_hora')
+        .select('id, fecha_hora, servicio_aux')
         .eq('cliente_id', cliente.id)
         .eq('estado', 'Confirmada')
         .gte('fecha_hora', new Date().toISOString())
@@ -609,13 +544,14 @@ async function procesarAccionCita(datos, cliente, telefono, especialistasLista, 
         .maybeSingle();
 
       if (!citaActual) {
-        return { ...resultado, mensaje: 'No encontré citas próximas para cancelar. ¿Necesitas agendar una? 💫' };
+        return { ...resultado, mensaje: 'No encontré citas próximas para cancelar. 💫' };
       }
 
       const { error: cancelError } = await supabase
         .from('citas')
         .update({ 
           estado: 'Cancelada',
+          motivo_cancelacion: 'Cancelada por cliente vía WhatsApp',
           updated_at: new Date().toISOString()
         })
         .eq('id', citaActual.id);
@@ -651,38 +587,31 @@ async function procesarAccionCita(datos, cliente, telefono, especialistasLista, 
 
       return {
         exito: true,
-        mensaje: `🚫 *Cita Cancelada*\n\n"${citaActual.servicio_aux}" para el ${formatearFecha(citaActual.fecha_hora.split('T')[0])} cancelada.\n\n¿Agendamos otra? 💫`
+        mensaje: `🚫 Cita de "${citaActual.servicio_aux}" cancelada. ¿Agendamos otra? 💫`
       };
     }
 
-    else {
-      return { ...resultado, mensaje: '¿Qué te gustaría hacer? Puedes agendar, reprogramar o cancelar tu cita. ✨' };
-    }
+    return { ...resultado, mensaje: '¿Cómo puedo ayudarte hoy? ✨' };
 
   } catch (error) {
-    console.error('❌ ERROR EN procesarAccionCita:', error);
-    return {
-      exito: false,
-      mensaje: 'Tuve un pequeño contratiempo. ¿Lo intentamos de nuevo? 🌸',
-      error: error.message
-    };
+    console.error('❌ ERROR procesarAccionCita:', error);
+    return { exito: false, mensaje: 'Tuve un pequeño contratiempo. ¿Lo intentamos de nuevo? 🌸' };
   }
 }
 
-// ============ FUNCIÓN AUXILIAR PARA SINCRONIZAR AIRTABLE ============
+// ============ SINCRONIZAR AIRTABLE ============
 
-async function sincronizarAirtableYResponder(citaCreada, cliente, telefono, servicio, especialista, datos, resultado) {
-  console.log('☁️ Sincronizando con Airtable...');
-  let airtableOk = false;
+async function sincronizarAirtable(citaCreada, cliente, telefono, servicio, especialista, datos, resultado) {
+  console.log('☁️ Sincronizando Airtable...');
   
   try {
-    const airtableRes = await axios.post(
+    await axios.post(
       `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`,
       {
         records: [{
           fields: {
             "ID_Supabase": citaCreada.id,
-            "Cliente": `${cliente.nombre} ${cliente.apellido}`.trim(),
+            "Cliente": `${cliente.nombre} ${cliente.apellido || ''}`.trim(),
             "Servicio": servicio.nombre,
             "Fecha": datos.cita_fecha,
             "Hora": datos.cita_hora,
@@ -691,6 +620,7 @@ async function sincronizarAirtableYResponder(citaCreada, cliente, telefono, serv
             "Estado": "Confirmada",
             "Importe estimado": servicio.precio,
             "Duración estimada (minutos)": servicio.duracion,
+            "Email de cliente": cliente.email || '',
             "Fecha creación": new Date().toISOString()
           }
         }]
@@ -704,18 +634,14 @@ async function sincronizarAirtableYResponder(citaCreada, cliente, telefono, serv
       }
     );
     
-    if (airtableRes.data.records && airtableRes.data.records.length > 0) {
-      console.log('✅ Sincronizado con Airtable:', airtableRes.data.records[0]?.id);
-      airtableOk = true;
-    }
+    console.log('✅ Airtable sincronizado');
   } catch (airtableError) {
-    console.error('⚠️ ERROR AIRTABLE (cita SÍ está en Supabase):', airtableError.message);
+    console.error('⚠️ Error Airtable (no crítico):', airtableError.message);
   }
 
   return {
     exito: true,
-    mensaje: `✅ *Cita Confirmada*\n\n📅 ${formatearFecha(datos.cita_fecha)} a las ${datos.cita_hora}\n💇‍♀️ ${servicio.nombre}\n👤 Con ${especialista.nombre}\n⏱️ ${servicio.duracion} minutos\n💰 $${servicio.precio}${!airtableOk ? '\n\n⚠️ (Sincronización pendiente)' : ''}\n\nTe espero con ganas de consentirte. ✨`,
-    citaId: citaCreada.id
+    mensaje: `✅ *Cita Confirmada*\n\n📅 ${formatearFecha(datos.cita_fecha)} a las ${datos.cita_hora}\n💇‍♀️ ${servicio.nombre}\n👤 Con ${especialista.nombre}\n⏱️ ${servicio.duracion} min\n💰 $${servicio.precio}\n\nTe espero. ✨`
   };
 }
 
@@ -728,38 +654,34 @@ function timeToMinutes(hora) {
   return h * 60 + m;
 }
 
-async function verificarDisponibilidadRobusta(fecha, hora, especialistaId, duracionMinutos) {
-  console.log(`   📅 Fecha: ${fecha}, ⏰ Hora: ${hora}, 👤 EspID: ${especialistaId}, ⏱️ Dur: ${duracionMinutos}`);
+async function verificarDisponibilidad(fecha, hora, especialistaId, duracionMinutos) {
+  console.log(`   📅 ${fecha} ⏰ ${hora} 👤 ${especialistaId} ⏱️ ${duracionMinutos}`);
   
   if (!fecha || !hora || !especialistaId) {
-    return { ok: false, mensaje: 'Necesito revisar algunos datos. ¿Me confirmas la fecha, hora y especialista? 🌸' };
-  }
-
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
-    console.error('   ❌ Formato fecha inválido:', fecha);
-    return { ok: false, mensaje: 'La fecha no tiene el formato correcto. ¿Me la das así: AAAA-MM-DD? 📅' };
+    return { ok: false, mensaje: 'Necesito confirmar fecha, hora y especialista. 🌸' };
   }
 
   const inicioNueva = timeToMinutes(hora);
   if (inicioNueva === null) {
-    return { ok: false, mensaje: 'La hora no tiene el formato correcto. ¿Me la das así: HH:MM? ⏰' };
+    return { ok: false, mensaje: 'Formato de hora incorrecto. ¿HH:MM? ⏰' };
   }
   
   const duracion = parseInt(duracionMinutos) || 60;
   const finNueva = inicioNueva + duracion;
-  const horaMaximaInicio = 1080 - duracion;
+  const horaMaximaInicio = 1080 - duracion; // 18:00 = 1080 min
   
-  if (inicioNueva < 540) {
-    return { ok: false, mensaje: 'Nuestro horario comienza a las 9:00. ¿Te funciona a esa hora? ☀️' };
+  if (inicioNueva < 540) { // 9:00 = 540
+    return { ok: false, mensaje: 'Horario desde las 9:00. ¿Te funciona? ☀️' };
   }
   
   if (inicioNueva > horaMaximaInicio) {
     const horaSugerida = Math.floor(horaMaximaInicio / 60);
     const minSugerida = horaMaximaInicio % 60;
-    const horaStr = `${horaSugerida.toString().padStart(2, '0')}:${minSugerida.toString().padStart(2, '0')}`;
-    return { ok: false, mensaje: `Para este servicio de ${duracion} minutos, el último horario disponible es ${horaStr}. ¿Te funciona? ✨` };
+    const horaStr = `${horaSugerida.toString().padStart(2,'0')}:${minSugerida.toString().padStart(2,'0')}`;
+    return { ok: false, mensaje: `Para este servicio de ${duracion} minutos, el último horario es ${horaStr}. ¿Te funciona? ✨` };
   }
 
+  // Verificar conflictos
   const { data: citasExistentes, error } = await supabase
     .from('citas')
     .select('fecha_hora, duracion_aux, servicio_aux')
@@ -769,8 +691,8 @@ async function verificarDisponibilidadRobusta(fecha, hora, especialistaId, durac
     .in('estado', ['Confirmada', 'En proceso']);
 
   if (error) {
-    console.error('   ❌ Error consultando citas:', error);
-    return { ok: false, mensaje: 'Estoy revisando la agenda. Un momento por favor. 🌸' };
+    console.error('❌ Error consultando citas:', error);
+    return { ok: false, mensaje: 'Revisando agenda... Un momento. 🌸' };
   }
 
   for (const cita of citasExistentes || []) {
@@ -779,12 +701,13 @@ async function verificarDisponibilidadRobusta(fecha, hora, especialistaId, durac
       : cita.fecha_hora.substring(11, 16);
     
     const inicioExistente = timeToMinutes(horaExistente);
-    const finExistente = inicioExistente + (cita.duracion_aux || 60);
+    const duracionExistente = cita.duracion_aux || 60;
+    const finExistente = inicioExistente + duracionExistente;
     
     if (inicioNueva < finExistente && finNueva > inicioExistente) {
       return { 
         ok: false, 
-        mensaje: `Ese horario se cruza con "${cita.servicio_aux}" a las ${horaExistente}. ¿Te funciona otra hora o prefieres otro especialista? 💫` 
+        mensaje: `Ese horario se cruza con "${cita.servicio_aux}" a las ${horaExistente}. ¿Otra hora u otro especialista? 💫` 
       };
     }
   }
@@ -809,7 +732,6 @@ app.post('/api/sync-airtable', syncAirtable);
 app.get('/api/daily-report', dailyReport);
 app.get('/api/reminders', reminders);
 
-// ============ EXPORTACIÓN PARA VERCEL ============
 export default async function handler(req, res) {
   return app(req, res);
 }
