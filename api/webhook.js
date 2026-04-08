@@ -173,6 +173,9 @@ DATA_JSON:{"accion":"agendar|reagendar|cancelar","nombre":"...","apellido":"..."
         accionData = JSON.parse(jsonMatch[1]);
         console.log('📦 JSON Acción:', JSON.stringify(accionData, null, 2));
 
+        // CORRECCIÓN: Declaración única de clienteActivo al inicio del bloque
+        let clienteActivo = cliente;
+
         // ----- REGISTRO DE NUEVO CLIENTE -----
         if (!cliente && accionData.nombre && accionData.nombre !== "..." && 
             accionData.apellido && accionData.apellido !== "..." &&
@@ -201,24 +204,43 @@ DATA_JSON:{"accion":"agendar|reagendar|cancelar","nombre":"...","apellido":"..."
           } else {
             console.log('✅ Cliente registrado:', nuevoCliente.id);
             finalMessage += `\n\n✨ ¡Bienvenido a AuraSync, ${accionData.nombre}! Tu perfil VIP está activo.`;
-            var clienteActivo = nuevoCliente;
+            clienteActivo = nuevoCliente; // Asignación directa sin var
           }
-        } else {
-          var clienteActivo = cliente;
         }
 
         // ----- ACCIONES DE CITA (SOLO CON CLIENTE) -----
-        if (clienteActivo && accionData) {
-          const resultado = await procesarAccionCita(accionData, clienteActivo, userPhone, esp, serv);
+        // CORRECCIÓN: Verificar que clienteActivo existe, tiene id, y hay datos de esp/serv
+        if (clienteActivo && clienteActivo.id && accionData && accionData.accion) {
           
-          // SOLO si se registró exitosamente, añadimos el mensaje de confirmación
-          if (resultado.exito && resultado.mensaje) {
-            finalMessage = resultado.mensaje; // Reemplazamos el mensaje de la IA con el de confirmación real
-            citaRegistrada = true;
-          } else if (!resultado.exito && resultado.mensaje) {
-            // Si falló, informamos el error (sin el check verde)
-            finalMessage = resultado.mensaje;
+          // CORRECCIÓN: Validar que tenemos arrays válidos de especialistas y servicios
+          if (!esp || !Array.isArray(esp) || esp.length === 0 || !serv || !Array.isArray(serv) || serv.length === 0) {
+            console.error('❌ ERROR: No se cargaron especialistas o servicios', { esp: !!esp, serv: !!serv });
+            finalMessage = "⚠️ Error al cargar datos del sistema. Intenta de nuevo en un momento.";
+          } else {
+            // DEBUG: Log de datos antes de procesar
+            console.log('🔍 DEBUG - Procesando cita:', {
+              accion: accionData.accion,
+              clienteId: clienteActivo.id,
+              tieneEsp: esp.length,
+              tieneServ: serv.length,
+              fecha: accionData.cita_fecha,
+              hora: accionData.cita_hora,
+              servicio: accionData.cita_servicio,
+              especialista: accionData.cita_especialista
+            });
+
+            const resultado = await procesarAccionCita(accionData, clienteActivo, userPhone, esp, serv);
+            
+            // SOLO si se registró exitosamente, añadimos el mensaje de confirmación
+            if (resultado.exito && resultado.mensaje) {
+              finalMessage = resultado.mensaje; // Reemplazamos el mensaje de la IA con el de confirmación real
+              citaRegistrada = true;
+            } else if (!resultado.exito && resultado.mensaje) {
+              // Si falló, informamos el error (sin el check verde)
+              finalMessage = resultado.mensaje;
+            }
           }
+          
         } else if (!clienteActivo && accionData?.accion === 'agendar') {
           console.log('⚠️ Intento de agendar sin registro');
           finalMessage += `\n\n💎 Para darte el servicio VIP que mereces, necesito registrarte primero. ¿Me compartes tu nombre completo, ciudad y fecha de nacimiento (YYYY-MM-DD)?`;
@@ -266,9 +288,24 @@ async function procesarAccionCita(datos, cliente, telefono, especialistasLista, 
   const resultado = { exito: false, mensaje: '', error: null };
 
   try {
-    // Validar campos mínimos
+    // CORRECCIÓN: Validar campos mínimos incluyendo arrays de especialistas y servicios
+    if (!datos || typeof datos !== 'object') {
+      return { ...resultado, mensaje: 'Datos de acción inválidos.' };
+    }
+
     if (!datos.accion) {
       return { ...resultado, mensaje: 'No detecté qué acción quieres realizar.' };
+    }
+
+    // CORRECCIÓN: Validar que tenemos arrays válidos
+    if (!especialistasLista || !Array.isArray(especialistasLista) || especialistasLista.length === 0) {
+      console.error('❌ ERROR: especialistasLista vacía o inválida');
+      return { ...resultado, mensaje: 'Error al cargar especialistas. Intenta de nuevo.' };
+    }
+
+    if (!serviciosLista || !Array.isArray(serviciosLista) || serviciosLista.length === 0) {
+      console.error('❌ ERROR: serviciosLista vacía o inválida');
+      return { ...resultado, mensaje: 'Error al cargar servicios. Intenta de nuevo.' };
     }
 
     // ----- AGENDAR -----
@@ -278,15 +315,19 @@ async function procesarAccionCita(datos, cliente, telefono, especialistasLista, 
         return { ...resultado, mensaje: 'Necesito la fecha y hora específica para agendar tu cita.' };
       }
 
-      // Buscar IDs reales
-      const servicio = serviciosLista?.find(s => 
-        s.nombre.toLowerCase().includes(datos.cita_servicio?.toLowerCase()) ||
-        datos.cita_servicio?.toLowerCase().includes(s.nombre.toLowerCase())
+      // Buscar IDs reales con validación de strings
+      const servicio = serviciosLista.find(s => 
+        s.nombre && datos.cita_servicio && (
+          s.nombre.toLowerCase().includes(datos.cita_servicio.toLowerCase()) ||
+          datos.cita_servicio.toLowerCase().includes(s.nombre.toLowerCase())
+        )
       );
       
-      const especialista = especialistasLista?.find(e => 
-        e.nombre.toLowerCase().includes(datos.cita_especialista?.toLowerCase()) ||
-        datos.cita_especialista?.toLowerCase().includes(e.nombre.toLowerCase())
+      const especialista = especialistasLista.find(e => 
+        e.nombre && datos.cita_especialista && (
+          e.nombre.toLowerCase().includes(datos.cita_especialista.toLowerCase()) ||
+          datos.cita_especialista.toLowerCase().includes(e.nombre.toLowerCase())
+        )
       );
 
       console.log('🔍 Búsqueda:', {
@@ -297,13 +338,13 @@ async function procesarAccionCita(datos, cliente, telefono, especialistasLista, 
       });
 
       if (!servicio) {
-        const disponibles = serviciosLista?.map(s => s.nombre).join(', ');
+        const disponibles = serviciosLista.map(s => s.nombre).join(', ');
         return { ...resultado, mensaje: `No encontré "${datos.cita_servicio}". Nuestros servicios: ${disponibles}` };
       }
 
       if (!especialista) {
         if (!datos.cita_especialista || datos.cita_especialista === '...' || datos.cita_especialista === 'Asignar') {
-          return { ...resultado, mensaje: `¿Con qué especialista prefieres atenderte? Tenemos: ${especialistasLista?.map(e => e.nombre).join(', ')}` };
+          return { ...resultado, mensaje: `¿Con qué especialista prefieres atenderte? Tenemos: ${especialistasLista.map(e => e.nombre).join(', ')}` };
         }
         return { ...resultado, mensaje: `No encontré al especialista "${datos.cita_especialista}". ¿Podrías verificar el nombre?` };
       }
@@ -568,12 +609,18 @@ async function verificarDisponibilidadRobusta(fecha, hora, especialistaId, durac
     return { ok: false, mensaje: 'Faltan datos para verificar disponibilidad.' };
   }
 
+  // CORRECCIÓN: Validar formato de fecha YYYY-MM-DD
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+    console.error('   ❌ Formato de fecha inválido:', fecha);
+    return { ok: false, mensaje: 'Formato de fecha inválido. Use YYYY-MM-DD.' };
+  }
+
   const inicioNueva = timeToMinutes(hora);
   if (inicioNueva === null) {
     return { ok: false, mensaje: 'Formato de hora inválido. Usa HH:MM (ej: 14:30).' };
   }
   
-  const finNueva = inicioNueva + (duracionMinutos || 60);
+  const finNueva = inicioNueva + (parseInt(duracionMinutos) || 60);
   
   if (inicioNueva < 540 || finNueva > 1080) {
     return { ok: false, mensaje: 'Nuestro horario es de 9:00 a 18:00. ¿Qué otro horario te funciona?' };
