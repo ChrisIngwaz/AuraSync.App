@@ -122,30 +122,68 @@ DATA_JSON:{"accion":"agendar|reagendar|cancelar","nombre":"...","apellido":"..."
         // Registro de Usuario
         if (!cliente && d.nombre !== "..." && d.apellido !== "..." && d.ciudad !== "..." && d.fecha_nacimiento && d.fecha_nacimiento.match(/^\d{4}-\d{2}-\d{2}$/)) {
           console.log('👤 Registrando nuevo cliente...');
-          const { data: n } = await supabase.from('clientes').upsert({ 
+          const { data: n, error: clienteError } = await supabase.from('clientes').upsert({ 
             telefono: userPhone, 
             nombre: d.nombre, 
             apellido: d.apellido, 
             ciudad: d.ciudad,
             fecha_nacimiento: d.fecha_nacimiento 
           }, { onConflict: 'telefono' }).select().single();
-          cliente = n;
-          finalMessage += `\n\n✅ ¡Bienvenido a AuraSync, ${d.nombre}! Ya estás registrado.`;
+          
+          if (clienteError) {
+            console.error('❌ Error registrando cliente:', clienteError.message);
+            finalMessage += `\n\n⚠️ Hubo un problema al registrar tus datos. Por favor, intenta de nuevo.`;
+          } else {
+            cliente = n;
+            finalMessage += `\n\n✅ ¡Bienvenido a AuraSync, ${d.nombre}! Ya estás registrado.`;
+          }
         }
 
         // Acciones de Cita
         if (cliente && d.accion) {
           if (d.accion === 'agendar' && d.cita_fecha !== "..." && d.cita_hora !== "...") {
             console.log('📅 Intentando agendar cita...');
+            
+            // Validar que tenemos IDs antes de continuar
             const ids = await obtenerIdsRelacionales(d.cita_servicio, d.cita_especialista);
-            const disp = await verificarDisponibilidad(d.cita_fecha, d.cita_hora, ids.especialistaId, ids.duracion);
-            if (disp.disponible) {
-              await registrarCita({ clienteId: cliente.id, telefono: userPhone, nombre: cliente.nombre, apellido: cliente.apellido, fecha: d.cita_fecha, hora: d.cita_hora, servicio: d.cita_servicio, especialista: d.cita_especialista, servicioId: ids.servicioId, especialistaId: ids.especialistaId, duracion: ids.duracion, precio: ids.precio });
-              finalMessage += `\n\n✅ *Cita confirmada con éxito*`;
-              console.log('✅ Cita agendada correctamente.');
+            
+            if (!ids.servicioId) {
+              finalMessage += `\n\n⚠️ No pude encontrar el servicio "${d.cita_servicio}" en nuestro sistema. ¿Podrías verificar el nombre?`;
+            } else if (!ids.especialistaId) {
+              finalMessage += `\n\n⚠️ No pude encontrar al especialista "${d.cita_especialista}". ¿Podrías verificar el nombre o dejarme asignar el mejor disponible?`;
             } else {
-              finalMessage += `\n\n⚠️ ${disp.mensaje}`;
-              console.log(`⚠️ No disponible: ${disp.mensaje}`);
+              const disp = await verificarDisponibilidad(d.cita_fecha, d.cita_hora, ids.especialistaId, ids.duracion);
+              if (disp.disponible) {
+                try {
+                  const resultado = await registrarCita({ 
+                    clienteId: cliente.id, 
+                    telefono: userPhone, 
+                    nombre: cliente.nombre, 
+                    apellido: cliente.apellido, 
+                    fecha: d.cita_fecha, 
+                    hora: d.cita_hora, 
+                    servicio: d.cita_servicio, 
+                    especialista: d.cita_especialista, 
+                    servicioId: ids.servicioId, 
+                    especialistaId: ids.especialistaId, 
+                    duracion: ids.duracion, 
+                    precio: ids.precio 
+                  });
+                  
+                  if (resultado.success) {
+                    finalMessage += `\n\n✅ *Cita confirmada con éxito*`;
+                    console.log('✅ Cita agendada correctamente. ID:', resultado.id);
+                  } else {
+                    finalMessage += `\n\n⚠️ No se pudo confirmar la cita. ${resultado.error || 'Por favor, intenta de nuevo.'}`;
+                  }
+                } catch (registroError) {
+                  console.error('❌ Error en registrarCita:', registroError.message);
+                  finalMessage += `\n\n⚠️ Hubo un problema al guardar tu cita. Por favor, intenta de nuevo en unos momentos.`;
+                }
+              } else {
+                finalMessage += `\n\n⚠️ ${disp.mensaje}`;
+                console.log(`⚠️ No disponible: ${disp.mensaje}`);
+              }
             }
           } else if (d.accion === 'reagendar' && d.cita_fecha !== "..." && d.cita_hora !== "...") {
             console.log('🔄 Intentando reagendar cita...');
@@ -154,9 +192,18 @@ DATA_JSON:{"accion":"agendar|reagendar|cancelar","nombre":"...","apellido":"..."
               const ids = await obtenerIdsRelacionales(d.cita_servicio, d.cita_especialista);
               const disp = await verificarDisponibilidad(d.cita_fecha, d.cita_hora, ids.especialistaId, ids.duracion);
               if (disp.disponible) {
-                await reagendarCita(citaProxima.id, d.cita_fecha, d.cita_hora);
-                finalMessage += `\n\n✅ *Cita reprogramada con éxito*`;
-                console.log('✅ Cita reagendada.');
+                try {
+                  const resultado = await reagendarCita(citaProxima.id, d.cita_fecha, d.cita_hora);
+                  if (resultado.success) {
+                    finalMessage += `\n\n✅ *Cita reprogramada con éxito*`;
+                    console.log('✅ Cita reagendada.');
+                  } else {
+                    finalMessage += `\n\n⚠️ No se pudo reprogramar: ${resultado.error}`;
+                  }
+                } catch (reagendarError) {
+                  console.error('❌ Error reagendando:', reagendarError.message);
+                  finalMessage += `\n\n⚠️ Hubo un problema al reprogramar. Por favor, intenta de nuevo.`;
+                }
               } else {
                 finalMessage += `\n\n⚠️ ${disp.mensaje}`;
               }
@@ -167,15 +214,25 @@ DATA_JSON:{"accion":"agendar|reagendar|cancelar","nombre":"...","apellido":"..."
             console.log('🚫 Intentando cancelar cita...');
             const { data: citaProxima } = await supabase.from('citas').select('id').eq('cliente_id', cliente.id).gte('fecha_hora', new Date().toISOString()).eq('estado', 'Confirmada').order('fecha_hora', { ascending: true }).limit(1).maybeSingle();
             if (citaProxima) {
-              await cancelarCita(citaProxima.id);
-              finalMessage += `\n\n✅ *Cita cancelada correctamente*`;
-              console.log('✅ Cita cancelada.');
+              try {
+                const resultado = await cancelarCita(citaProxima.id);
+                if (resultado.success) {
+                  finalMessage += `\n\n✅ *Cita cancelada correctamente*`;
+                  console.log('✅ Cita cancelada.');
+                } else {
+                  finalMessage += `\n\n⚠️ No se pudo cancelar: ${resultado.error}`;
+                }
+              } catch (cancelarError) {
+                console.error('❌ Error cancelando:', cancelarError.message);
+                finalMessage += `\n\n⚠️ Hubo un problema al cancelar. Por favor, intenta de nuevo.`;
+              }
             } else {
               finalMessage += `\n\n⚠️ No encontré ninguna cita próxima para cancelar.`;
             }
           }
         } else if (!cliente && d.accion === 'agendar') {
           console.log('⚠️ Intento de agendar sin cliente registrado.');
+          finalMessage += `\n\n⚠️ Necesito registrarte primero antes de agendar tu cita. ¿Me podrías proporcionar tu nombre completo, ciudad y fecha de nacimiento?`;
         }
       } catch (jsonErr) {
         console.error('❌ Error parseando JSON de la IA:', jsonErr.message);
@@ -208,7 +265,10 @@ function timeToMinutes(hora) {
 
 async function verificarDisponibilidad(fecha, hora, especialistaId, duracionMinutos) {
   try {
-    if (!especialistaId || especialistaId === '...' || especialistaId === 'Asignar') return { disponible: true };
+    // Validar que tenemos un especialistaId válido
+    if (!especialistaId || especialistaId === '...' || especialistaId === 'Asignar') {
+      return { disponible: false, mensaje: "Necesito que especifiques un especialista válido para verificar disponibilidad." };
+    }
     
     const inicioNueva = timeToMinutes(hora);
     const finNueva = inicioNueva + duracionMinutos;
@@ -256,84 +316,155 @@ async function obtenerIdsRelacionales(servicioNombre, especialistaNombre) {
 }
 
 async function registrarCita(datos) {
-  const fechaHora = `${datos.fecha}T${datos.hora}:00-05:00`;
-  const { data, error } = await supabase.from('citas').insert({
-    cliente_id: datos.clienteId,
-    servicio_id: datos.servicioId,
-    especialista_id: datos.especialistaId,
-    fecha_hora: fechaHora,
-    estado: 'Confirmada',
-    nombre_cliente_aux: `${datos.nombre} ${datos.apellido}`.trim(),
-    servicio_aux: datos.servicio,
-    duracion_aux: datos.duracion
-  }).select().single();
+  try {
+    // Validar datos requeridos
+    if (!datos.clienteId || !datos.servicioId || !datos.especialistaId) {
+      return { success: false, error: "Faltan datos requeridos (cliente, servicio o especialista)." };
+    }
+    
+    // Validar formato de fecha y hora
+    const fechaRegex = /^\d{4}-\d{2}-\d{2}$/;
+    const horaRegex = /^\d{2}:\d{2}$/;
+    
+    if (!fechaRegex.test(datos.fecha) || !horaRegex.test(datos.hora)) {
+      return { success: false, error: "Formato de fecha u hora incorrecto." };
+    }
+    
+    const fechaHora = `${datos.fecha}T${datos.hora}:00-05:00`;
+    
+    // Insertar en Supabase
+    const { data, error } = await supabase.from('citas').insert({
+      cliente_id: datos.clienteId,
+      servicio_id: datos.servicioId,
+      especialista_id: datos.especialistaId,
+      fecha_hora: fechaHora,
+      estado: 'Confirmada',
+      nombre_cliente_aux: `${datos.nombre} ${datos.apellido}`.trim(),
+      servicio_aux: datos.servicio,
+      duracion_aux: datos.duracion
+    }).select().single();
 
-  if (error) throw error;
+    if (error) {
+      console.error('❌ Error insertando en Supabase:', error.message);
+      return { success: false, error: "Error al guardar en la base de datos." };
+    }
 
-  // Sincronizar con Airtable
-  await axios.post(`https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`, {
-    records: [{ fields: {
-      "ID_Supabase": data.id,
-      "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
-      "Servicio": datos.servicio,
-      "Fecha": datos.fecha,
-      "Hora": datos.hora,
-      "Especialista": datos.especialista,
-      "Teléfono": datos.telefono,
-      "Estado": "Confirmada",
-      "Importe estimado": datos.precio,
-      "Duración estimada (minutos)": datos.duracion
-    } }]
-  }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
+    // Sincronizar con Airtable (con manejo de errores independiente)
+    try {
+      await axios.post(`https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`, {
+        records: [{ fields: {
+          "ID_Supabase": data.id,
+          "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
+          "Servicio": datos.servicio,
+          "Fecha": datos.fecha,
+          "Hora": datos.hora,
+          "Especialista": datos.especialista,
+          "Teléfono": datos.telefono,
+          "Estado": "Confirmada",
+          "Importe estimado": datos.precio,
+          "Duración estimada (minutos)": datos.duracion
+        } }]
+      }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
+      
+      console.log('✅ Sincronizado con Airtable correctamente.');
+    } catch (airtableError) {
+      console.error('⚠️ Error sincronizando con Airtable:', airtableError.message);
+      // No fallamos la operación completa si Airtable falla, pero logueamos el error
+    }
 
-  return { success: true, id: data.id };
+    return { success: true, id: data.id };
+  } catch (error) {
+    console.error('❌ Error general en registrarCita:', error.message);
+    return { success: false, error: error.message };
+  }
 }
 
 async function reagendarCita(citaId, nuevaFecha, nuevaHora) {
-  const fechaHora = `${nuevaFecha}T${nuevaHora}:00-05:00`;
-  const { error } = await supabase.from('citas').update({
-    fecha_hora: fechaHora,
-    estado: 'Confirmada'
-  }).eq('id', citaId);
+  try {
+    // Validar formato
+    const fechaRegex = /^\d{4}-\d{2}-\d{2}$/;
+    const horaRegex = /^\d{2}:\d{2}$/;
+    
+    if (!fechaRegex.test(nuevaFecha) || !horaRegex.test(nuevaHora)) {
+      return { success: false, error: "Formato de fecha u hora incorrecto." };
+    }
+    
+    const fechaHora = `${nuevaFecha}T${nuevaHora}:00-05:00`;
+    
+    const { error } = await supabase.from('citas').update({
+      fecha_hora: fechaHora,
+      estado: 'Confirmada'
+    }).eq('id', citaId);
 
-  if (error) throw error;
+    if (error) {
+      console.error('❌ Error actualizando en Supabase:', error.message);
+      return { success: false, error: "Error al actualizar la cita." };
+    }
 
-  // Actualizar en Airtable
-  const airtableUrl = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-  const formula = encodeURIComponent(`{ID_Supabase} = '${citaId}'`);
-  const searchRes = await axios.get(`${airtableUrl}?filterByFormula=${formula}`, {
-    headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
-  });
+    // Actualizar en Airtable
+    try {
+      const airtableUrl = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
+      const formula = encodeURIComponent(`{ID_Supabase} = '${citaId}'`);
+      const searchRes = await axios.get(`${airtableUrl}?filterByFormula=${formula}`, {
+        headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
+      });
 
-  if (searchRes.data.records.length > 0) {
-    const airtableId = searchRes.data.records[0].id;
-    await axios.patch(airtableUrl, {
-      records: [{
-        id: airtableId,
-        fields: { "Fecha": nuevaFecha, "Hora": nuevaHora, "Estado": "Confirmada" }
-      }]
-    }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
+      if (searchRes.data.records.length > 0) {
+        const airtableId = searchRes.data.records[0].id;
+        await axios.patch(airtableUrl, {
+          records: [{
+            id: airtableId,
+            fields: { "Fecha": nuevaFecha, "Hora": nuevaHora, "Estado": "Confirmada" }
+          }]
+        }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
+        
+        console.log('✅ Actualizado en Airtable correctamente.');
+      }
+    } catch (airtableError) {
+      console.error('⚠️ Error actualizando en Airtable:', airtableError.message);
+    }
+    
+    return { success: true };
+  } catch (error) {
+    console.error('❌ Error en reagendarCita:', error.message);
+    return { success: false, error: error.message };
   }
-  return { success: true };
 }
 
 async function cancelarCita(citaId) {
-  const { error } = await supabase.from('citas').update({ estado: 'Cancelada' }).eq('id', citaId);
-  if (error) throw error;
+  try {
+    const { error } = await supabase.from('citas').update({ estado: 'Cancelada' }).eq('id', citaId);
+    
+    if (error) {
+      console.error('❌ Error cancelando en Supabase:', error.message);
+      return { success: false, error: "Error al cancelar la cita." };
+    }
 
-  const airtableUrl = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-  const formula = encodeURIComponent(`{ID_Supabase} = '${citaId}'`);
-  const searchRes = await axios.get(`${airtableUrl}?filterByFormula=${formula}`, {
-    headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
-  });
+    // Actualizar en Airtable
+    try {
+      const airtableUrl = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
+      const formula = encodeURIComponent(`{ID_Supabase} = '${citaId}'`);
+      const searchRes = await axios.get(`${airtableUrl}?filterByFormula=${formula}`, {
+        headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
+      });
 
-  if (searchRes.data.records.length > 0) {
-    const airtableId = searchRes.data.records[0].id;
-    await axios.patch(airtableUrl, {
-      records: [{ id: airtableId, fields: { "Estado": "Cancelada" } }]
-    }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
+      if (searchRes.data.records.length > 0) {
+        const airtableId = searchRes.data.records[0].id;
+        await axios.patch(airtableUrl, {
+          records: [{ id: airtableId, fields: { "Estado": "Cancelada" } }]
+        }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
+        
+        console.log('✅ Cancelado en Airtable correctamente.');
+      }
+    } catch (airtableError) {
+      console.error('⚠️ Error cancelando en Airtable:', airtableError.message);
+    }
+    
+    return { success: true };
+  } catch (error) {
+    console.error('❌ Error en cancelarCita:', error.message);
+    return { success: false, error: error.message };
   }
-  return { success: true };
 }
 
 // ============ OTRAS RUTAS ============
