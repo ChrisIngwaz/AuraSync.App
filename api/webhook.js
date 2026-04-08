@@ -113,30 +113,33 @@ app.post(['/', '/webhook', '/api/webhook'], async (req, res) => {
       .limit(6);
     const historial = mensajes ? mensajes.reverse() : [];
 
-    // ========== SYSTEM PROMPT - CORREGIDO ==========
-    // CORRECCIÓN: Prompt más estricto que fuerza el JSON siempre
-    const systemPrompt = `Eres Aura, Coordinadora Ejecutiva de AuraSync. Eres profesional, cálida y eficiente.
+    // ========== SYSTEM PROMPT - RESTAURADO TONO HUMANO ==========
+    const systemPrompt = `Eres Aura, la Coordinadora Ejecutiva de AuraSync. No eres un bot, eres una profesional sofisticada, cálida y extremadamente eficiente. Tu misión es que el cliente sienta que está tratando con la mejor asistente personal del mundo.
 
-CONTEXTO DEL SISTEMA:
+[TU PERFIL]
+- **Lenguaje Impecable**: Usas un español elegante, profesional y cercano. Evitas frases robóticas.
+- **Asesora y Persuasiva**: No solo agendas, sino que "vendes" la experiencia. Conoces el expertise de cada especialista y lo usas para recomendar al mejor según el servicio solicitado.
+- **Memoria Ejecutiva**: Si el cliente ya mencionó un detalle (servicio, hora, fecha, especialista), NO lo preguntes de nuevo. Úsalo para avanzar.
+- **Eficiencia Total**: Tu objetivo es cerrar la cita en el menor número de pasos posible. Si tienes toda la información, confirma de inmediato.
+- **Calidez Humana**: Reconoces al cliente por su nombre si ya lo conoces. Si es una conversación fluida, no repitas saludos innecesarios.
+
+[REGLAS DE ORO]
+1. **REGISTRO VIP**: Si el cliente es nuevo o le faltan datos (Nombre, Apellido, Ciudad, Fecha de Nacimiento), obtén esta información con elegancia antes de proceder.
+2. **ASESORÍA INTELIGENTE**: Usa el campo "expertise" de los especialistas para promoverlos. Ejemplo: "Para ese servicio te recomiendo a Elena, nuestra experta en colorimetría avanzada".
+3. **ANTICIPACIÓN**: Si el cliente dice "Corte de pelo mañana a las 10", no preguntes "¿Qué servicio quieres?". Di: "Excelente elección. Mañana a las 10:00 tengo disponibilidad con Ricardo y Elena. ¿Con quién prefieres agendar?".
+4. **FLUJO NATURAL**: Si el cliente elige a Elena, no preguntes "¿Qué servicio?". Di: "Perfecto, Elena te atenderá para tu Corte de Cabello Premium mañana a las 10:00. ¿Confirmamos?".
+5. **CITAS PARA TERCEROS**: Solo si el cliente menciona explícitamente que la cita es para otra persona, pregunta el nombre. De lo contrario, asume siempre que es para el titular.
+
+[CONTEXTO]
 - Especialistas: ${esp?.map(e => `${e.nombre} (${e.rol}: ${e.expertise})`).join(', ')}
-- Servicios: ${serv?.map(s => `${s.nombre} ($${s.precio}, ${s.duracion}min)`).join(', ')}
-- Horario: 9:00-18:00
-- Hoy: ${hoy}
-- Cliente actual: ${cliente ? `${cliente.nombre} ${cliente.apellido} (REGISTRADO)` : 'NUEVO - necesita registro'}
+- Servicios: ${serv?.map(s => `${s.nombre} ($${s.precio}, ${s.duracion} min)`).join(', ')}
+- Horario: 9:00 a 18:00.
+- Hoy es ${hoy}.
+- Cliente actual: ${cliente ? `${cliente.nombre} ${cliente.apellido} (YA REGISTRADO - no pedir datos)` : 'NUEVO - necesita registro'}
 
-REGLAS:
-1. Si cliente está registrado, NO pidas datos personales
-2. Si es nuevo, pide: nombre, apellido, ciudad, fecha nacimiento (YYYY-MM-DD)
-3. Usa expertise de especialistas para recomendar
-4. Sé concisa y directa
-
-[CRÍTICO - OBLIGATORIO]
-DESPUÉS de tu respuesta conversacional, en LÍNEA SEPARADA agrega EXACTAMENTE:
-DATA_JSON:{"accion":"none"|"agendar"|"reagendar"|"cancelar","nombre":"${cliente?.nombre || '...'}","apellido":"${cliente?.apellido || '...'}","ciudad":"${cliente?.ciudad || '...'}","fecha_nacimiento":"${cliente?.fecha_nacimiento || '...'}","cita_fecha":"YYYY-MM-DD","cita_hora":"HH:MM","cita_servicio":"...","cita_especialista":"..."}
-
-- Si cliente registrado: usa sus datos reales en el JSON
-- "none" si no hay acción de cita
-- Fecha/hora/servicio/especialista solo si el cliente los mencionó`;
+[CRÍTICO - FORMATO TÉCNICO OBLIGATORIO]
+AL FINAL de tu respuesta, en una línea separada, incluye EXACTAMENTE:
+DATA_JSON:{"accion":"none"|"agendar"|"reagendar"|"cancelar","nombre":"${cliente?.nombre || '...'}","apellido":"${cliente?.apellido || '...'}","ciudad":"${cliente?.ciudad || '...'}","fecha_nacimiento":"${cliente?.fecha_nacimiento || '...'}","cita_fecha":"YYYY-MM-DD","cita_hora":"HH:MM","cita_servicio":"...","cita_especialista":"..."}`;
 
     // ========== LLAMADA A OPENAI ==========
     console.log('🤖 Consultando a OpenAI GPT-4o...');
@@ -147,8 +150,8 @@ DATA_JSON:{"accion":"none"|"agendar"|"reagendar"|"cancelar","nombre":"${cliente?
         ...historial.map(m => ({ role: m.rol, content: m.contenido })), 
         { role: "user", content: textoUsuario }
       ], 
-      temperature: 0.2,  // CORRECCIÓN: Más bajo para seguir instrucciones al pie de la letra
-      max_tokens: 400
+      temperature: 0.3,
+      max_tokens: 500
     }, { 
       headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` },
       timeout: 15000
@@ -156,67 +159,28 @@ DATA_JSON:{"accion":"none"|"agendar"|"reagendar"|"cancelar","nombre":"${cliente?
 
     let fullReply = aiRes.data.choices[0].message.content;
     
-    console.log('📝 RESPUESTA OPENAI:', fullReply.substring(0, 200) + (fullReply.length > 200 ? '...' : ''));
+    console.log('📝 RESPUESTA OPENAI:', fullReply.substring(0, 300) + (fullReply.length > 300 ? '...' : ''));
     
-    // ========== EXTRACCIÓN DE JSON - CORREGIDA ==========
+    // ========== EXTRACCIÓN DE JSON ==========
     let accionData = null;
     let finalMessage = fullReply;
 
     // Buscar DATA_JSON: más flexible
-    const jsonPatterns = [
-      /DATA_JSON\s*:\s*(\{[\s\S]*?\})\s*$/i,  // Al final del mensaje
-      /DATA_JSON\s*:\s*(\{[\s\S]*?\})\s*\n/i,  // Antes de nueva línea
-      /DATA_JSON\s*:\s*(\{[\s\S]*?\})/i,       // Cualquier lugar
-      /DATA_JSON\s+(\{[\s\S]*?\})/i            // Sin dos puntos
-    ];
+    const jsonMatch = fullReply.match(/DATA_JSON\s*:\s*(\{[\s\S]*?\})\s*$/i) || 
+                      fullReply.match(/DATA_JSON\s*:\s*(\{[\s\S]*?\})\s*\n/i) ||
+                      fullReply.match(/DATA_JSON\s*:\s*(\{[\s\S]*?\})/i) ||
+                      fullReply.match(/DATA_JSON\s+(\{[\s\S]*?\})/i);
 
-    for (const pattern of jsonPatterns) {
-      const match = fullReply.match(pattern);
-      if (match) {
-        try {
-          accionData = JSON.parse(match[1]);
-          console.log('📦 JSON detectado:', JSON.stringify(accionData));
-          // Limpiar mensaje final
-          finalMessage = fullReply.replace(/DATA_JSON[\s\S]*/i, '').trim();
-          break;
-        } catch (e) {
-          console.log('⚠️ Patrón encontrado pero JSON inválido, intentando siguiente...');
-          continue;
-        }
+    if (jsonMatch) {
+      try {
+        accionData = JSON.parse(jsonMatch[1]);
+        console.log('📦 JSON detectado:', JSON.stringify(accionData));
+        finalMessage = fullReply.replace(/DATA_JSON[\s\S]*/i, '').trim();
+      } catch (e) {
+        console.error('❌ JSON inválido:', jsonMatch[1]);
       }
-    }
-
-    if (!accionData) {
-      console.log('⚠️ No se detectó DATA_JSON válido');
-      
-      // CORRECCIÓN: Si no hay JSON pero el cliente ya existe, intentar extraer intención manualmente
-      if (cliente && (textoUsuario.toLowerCase().includes('cita') || 
-          textoUsuario.toLowerCase().includes('agendar') ||
-          textoUsuario.toLowerCase().includes('quiero'))) {
-        console.log('🔧 Cliente registrado detectado, intentando recuperar intención...');
-        
-        // Extraer hora del mensaje del usuario
-        const horaMatch = textoUsuario.match(/(\d{1,2})\s*(?::(\d{2}))?\s*(de la\s*)?(tarde|pm|am|mañana)?/i);
-        const servicioMatch = serv?.find(s => 
-          textoUsuario.toLowerCase().includes(s.nombre.toLowerCase()) ||
-          (s.nombre.toLowerCase().includes('corte') && textoUsuario.toLowerCase().includes('corte'))
-        );
-        
-        accionData = {
-          accion: "agendar",
-          nombre: cliente.nombre,
-          apellido: cliente.apellido,
-          ciudad: cliente.ciudad,
-          fecha_nacimiento: cliente.fecha_nacimiento,
-          cita_fecha: new Date().toISOString().split('T')[0], // Hoy
-          cita_hora: horaMatch ? `${horaMatch[1].padStart(2, '0')}:${horaMatch[2] || '00'}` : "17:00",
-          cita_servicio: servicioMatch?.nombre || "Corte de Cabello",
-          cita_especialista: "..."
-        };
-        
-        console.log('🔧 JSON reconstruido manualmente:', accionData);
-        finalMessage = "Perfecto, procesando tu solicitud...";
-      }
+    } else {
+      console.log('⚠️ No se detectó DATA_JSON');
     }
 
     // ========== PROCESAR ACCIONES ==========
@@ -677,10 +641,27 @@ async function verificarDisponibilidadRobusta(fecha, hora, especialistaId, durac
     return { ok: false, mensaje: 'Formato hora inválido (HH:MM).' };
   }
   
-  const finNueva = inicioNueva + (parseInt(duracionMinutos) || 60);
+  // CORRECCIÓN: El horario es 9:00 a 18:00, pero una cita puede empezar a las 17:00 si dura 60 min (termina 18:00)
+  // Si dura más de 60 min, debe empezar antes. Permitir inicio hasta las 17:00 (1080 - 60 = 1020 para servicio estándar)
+  const duracion = parseInt(duracionMinutos) || 60;
+  const finNueva = inicioNueva + duracion;
   
-  if (inicioNueva < 540 || finNueva > 1080) {
-    return { ok: false, mensaje: 'Horario 9:00-18:00. ¿Otro horario?' };
+  // Horario de atención: 9:00 (540) a 18:00 (1080)
+  // La cita debe empezar entre 9:00 y como máximo 17:00 (para servicio de 60 min)
+  // Para servicios más largos, el inicio debe ser más temprano
+  const horaMaximaInicio = 1080 - duracion;
+  
+  if (inicioNueva < 540) {
+    return { ok: false, mensaje: 'Nuestro horario comienza a las 9:00. ¿Te funciona a esa hora?' };
+  }
+  
+  if (inicioNueva > horaMaximaInicio) {
+    // Si pide 18:00 y el servicio dura 60 min, terminaría 19:00 (fuera de horario)
+    // Sugerir horarios válidos
+    const horaSugerida = Math.floor(horaMaximaInicio / 60);
+    const minSugerida = horaMaximaInicio % 60;
+    const horaStr = `${horaSugerida.toString().padStart(2, '0')}:${minSugerida.toString().padStart(2, '0')}`;
+    return { ok: false, mensaje: `Para este servicio de ${duracion} minutos, el último horario disponible es ${horaStr}. ¿Te funciona?` };
   }
 
   const { data: citasExistentes, error } = await supabase
