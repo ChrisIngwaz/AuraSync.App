@@ -378,7 +378,7 @@ async function crearCitaAirtable(datos) {
         fields: {
           "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
           "Servicio": datos.servicio,
-          "Fecha": String(datos.fecha),
+          "Fecha": `${datos.fecha}T12:00:00.000Z`,
           "Hora": datos.hora,
           "Especialista": datos.especialista,
           "Teléfono": datos.telefono,
@@ -449,7 +449,7 @@ async function reagendarCitaAirtable(telefono, datos) {
     const recordId = datos.cita_id || busqueda.data.records[0].id;
     
     const fields = { 
-      "Fecha": String(datos.cita_fecha),
+      "Fecha": `${datos.cita_fecha}T12:00:00.000Z`,
       "Hora": datos.cita_hora,
       "Especialista": datos.cita_especialista || busqueda.data.records[0].fields.Especialista,
       "Estado": "Confirmada"
