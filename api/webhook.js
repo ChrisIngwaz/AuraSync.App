@@ -35,7 +35,6 @@ function formatearFecha(fechaISO) {
   return fecha.toLocaleDateString('es-EC', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
 }
 
-// NUEVA FUNCIÓN: Obtiene TODA la ocupación para que Aura no invente disponibilidad
 async function obtenerOcupacionGlobal() {
   try {
     const hoy = getFechaEcuador();
@@ -88,13 +87,13 @@ export default async function handler(req, res) {
 [CITAS ACTUALES DEL CLIENTE]
 ${infoCitas}
 
-[OCUPACIÓN REAL DE LA AGENDA (NO INVENTAR)]
+[OCUPACIÓN REAL DE LA AGENDA]
 ${ocupacionGlobal}
 
 [IDENTIDAD Y REGLAS]
 - Si el cliente quiere REAGENDAR, usa el ID de su cita actual. MANTÉN el mismo servicio y especialista a menos que pida cambiarlos.
-- Antes de decir que alguien está ocupado, mira la [OCUPACIÓN REAL]. Si no aparece en la lista, está LIBRE.
-- FLUJO HUMANO: Divide respuestas con "###". Ejemplo: "Claro, verifico... ### Listo, te cambié la cita."
+- Antes de decir que alguien está ocupado, mira la [OCUPACIÓN REAL].
+- FLUJO HUMANO: Divide respuestas con "###". 
 - NUNCA escribas el checkmark (✅) tú misma.
 - DATA_JSON debe ser preciso. Si es reagendar, pon "accion": "reagendar" y el "cita_id" correcto.
 
@@ -122,7 +121,7 @@ DATA_JSON:{ "accion": "none"|"agendar"|"cancelar"|"reagendar", "cita_id": "...",
 
         if (accion === 'cancelar') {
           const res = await cancelarCitaAirtable(userPhone, datosExtraidos.cita_id);
-          mensajeAccion = res ? "✅ Cita cancelada." : "No encontré la cita.";
+          mensajeAccion = res ? "✅ Cita cancelada y eliminada de la agenda." : "No encontré la cita para cancelar.";
         }
         else if (accion === 'reagendar') {
           const res = await reagendarCitaAirtable(userPhone, datosExtraidos);
@@ -168,16 +167,26 @@ async function crearCitaAirtable(datos) {
   } catch (error) { return false; }
 }
 
+// CORREGIDO: Ahora ELIMINA el registro para que desaparezca del calendario
 async function cancelarCitaAirtable(telefono, citaId) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-    const filter = encodeURIComponent(`AND({Teléfono} = '${telefono}', {Estado} = 'Confirmada')`);
-    const busqueda = await axios.get(`${url}?filterByFormula=${filter}&maxRecords=1`, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` } });
-    if (busqueda.data.records.length === 0) return false;
-    const recordId = citaId || busqueda.data.records[0].id;
-    await axios.patch(url, { records: [{ id: recordId, fields: { "Estado": "Cancelada" } }] }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
+    let recordId = citaId;
+
+    if (!recordId) {
+      const filter = encodeURIComponent(`AND({Teléfono} = '${telefono}', {Estado} = 'Confirmada')`);
+      const busqueda = await axios.get(`${url}?filterByFormula=${filter}&maxRecords=1`, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` } });
+      if (busqueda.data.records.length === 0) return false;
+      recordId = busqueda.data.records[0].id;
+    }
+
+    // Usamos el método DELETE para borrarlo físicamente
+    await axios.delete(`${url}/${recordId}`, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` } });
     return true;
-  } catch (error) { return false; }
+  } catch (error) { 
+    console.error('Error al borrar cita:', error.message);
+    return false; 
+  }
 }
 
 async function reagendarCitaAirtable(telefono, datos) {
@@ -187,7 +196,6 @@ async function reagendarCitaAirtable(telefono, datos) {
     const busqueda = await axios.get(`${url}?filterByFormula=${filter}`, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` } });
     if (busqueda.data.records.length === 0) return false;
     
-    // Buscamos la cita específica por ID o la más reciente
     const recordId = datos.cita_id || busqueda.data.records[0].id;
     const [h, min] = datos.cita_hora.split(':').map(Number);
     const [anio, mes, dia] = datos.cita_fecha.split('-').map(Number);
