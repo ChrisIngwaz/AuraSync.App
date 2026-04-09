@@ -1,4 +1,3 @@
-[ignoring loop detection]
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
 
@@ -39,7 +38,6 @@ function formatearFecha(fechaISO) {
   }
   
   const [anio, mes, dia] = fechaISO.split('-').map(Number);
-  // Forzamos a UTC al mediodía para evitar que toLocaleDateString cambie el día por desfase de zona horaria
   const fecha = new Date(Date.UTC(anio, mes - 1, dia, 12, 0, 0));
   
   return fecha.toLocaleDateString('es-EC', { 
