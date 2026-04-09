@@ -1,3 +1,4 @@
+[ignoring loop detection]
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
 
@@ -55,18 +56,8 @@ export default async function handler(req, res) {
     return res.status(200).send('<Response></Response>');
   }
 
-  // ============ DEBUG TEMPORAL ============
-  const debugFechas = {
-    serverNow: new Date().toISOString(),
-    serverDate: new Date().toDateString(),
-    ecuadorDate: new Date().toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' }),
-    ecuadorString: new Date().toLocaleString('es-EC', { timeZone: 'America/Guayaquil' })
-  };
-  console.log('🔍 DEBUG FECHAS SERVIDOR:', JSON.stringify(debugFechas));
-  // ============ FIN DEBUG ============
-
   const { Body, From, MediaUrl0 } = req.body;
-  const userPhone = From.replace('whatsapp:', '').trim();
+  const userPhone = (From || '').replace('whatsapp:', '').trim();
   
   console.log(`\n📱 ${userPhone}`);
 
@@ -110,8 +101,6 @@ export default async function handler(req, res) {
       if (mensajes) {
         historialFiltrado = mensajes.reverse();
       }
-    } else {
-      console.log('⚡ Cliente nuevo detectado.');
     }
 
     const { data: especialistas } = await supabase.from('especialistas').select('nombre, expertise');
@@ -140,7 +129,8 @@ Puedes: AGENDAR nuevas citas, CANCELAR citas existentes, REAGENDAR cambiando fec
 [REGLAS DE ORO]
 - NUNCA respondas de forma robótica o solo con datos técnicos.
 - Usa frases de transición naturales.
-- Si ya tienes un dato, no lo vuelvas a pedir; avanza hacia la confirmación.
+- SI EL USUARIO MENCIONA UNA FECHA Y HORA ESPECÍFICA, ASUME QUE QUIERE AGENDAR. No preguntes "¿Te gustaría que agendara esta cita?"; simplemente confírmalo con calidez y elegancia, integrando la recomendación del especialista en la misma respuesta.
+- Si ya tienes un dato, no lo vuelvas a pedir; avanza hacia la confirmación definitiva y cálida.
 
 [FECHAS IMPORTANTE]
 - Hoy es: ${formatearFecha(getFechaEcuador())}
@@ -183,7 +173,6 @@ DATA_JSON:{
       try {
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
         
-        // ============ CORRECCIÓN FECHA v6 - Matemática pura ============
         const textoLower = (textoUsuario || '').toLowerCase();
         
         const ahoraUTC = new Date();
@@ -215,13 +204,10 @@ DATA_JSON:{
         
         if (textoLower.includes('mañana') || textoLower.includes('manana')) {
           fechaFinal = fechaMañanaStr;
-          console.log('✅ Detectado: MAÑANA');
         } else if (textoLower.includes('hoy')) {
           fechaFinal = fechaHoyStr;
-          console.log('✅ Detectado: HOY');
         } else if (datosExtraidos.cita_fecha && datosExtraidos.cita_fecha >= fechaHoyStr) {
           fechaFinal = datosExtraidos.cita_fecha;
-          console.log('✅ Usando fecha OpenAI:', fechaFinal);
         }
         
         if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
@@ -238,9 +224,7 @@ DATA_JSON:{
         
         if (accion === 'cancelar') {
           const resultado = await cancelarCitaAirtable(userPhone, datosExtraidos.cita_id);
-          mensajeAccion = resultado 
-            ? "✅ Cita cancelada exitosamente." 
-            : "No encontré citas activas para cancelar.";
+          mensajeAccion = resultado ? "✅ Cita cancelada exitosamente." : "No encontré citas activas para cancelar.";
           accionEjecutada = true;
         }
         
@@ -278,14 +262,11 @@ DATA_JSON:{
                 fechaFinal,
                 datosExtraidos.cita_hora,
                 datosExtraidos.cita_especialista,
-                servicioData.duracion,
-                especialistas?.map(e => e.nombre)
+                servicioData.duracion
               );
-              
               mensajeAccion = `Ese horario no está disponible. ${alternativa.mensaje}`;
               accionEjecutada = true;
             } else {
-              
               const nombreCliente = cliente?.nombre || datosExtraidos.nombre;
               const apellidoCliente = cliente?.apellido || datosExtraidos.apellido || "";
               const especialistaFinal = disponible.especialista || datosExtraidos.cita_especialista || "Asignar";
@@ -327,16 +308,13 @@ DATA_JSON:{
             }
           }
         }
-
       } catch (e) { 
         console.error('Error procesando JSON:', e.message); 
       }
     }
 
     let cleanReply = fullReply.replace(/DATA_JSON[\s\S]*/, '').trim();
-    
     if (accionEjecutada && mensajeAccion) {
-      // Unimos la respuesta humana de Aura con la confirmación técnica
       cleanReply = `${cleanReply}\n\n${mensajeAccion}`;
     }
 
@@ -381,9 +359,7 @@ async function crearCitaAirtable(datos) {
       headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
     });
     return true;
-  } catch (error) { 
-    return false; 
-  }
+  } catch (error) { return false; }
 }
 
 async function cancelarCitaAirtable(telefono, citaId) {
@@ -401,9 +377,7 @@ async function cancelarCitaAirtable(telefono, citaId) {
       headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
     });
     return true;
-  } catch (error) {
-    return false;
-  }
+  } catch (error) { return false; }
 }
 
 async function reagendarCitaAirtable(telefono, datos) {
@@ -424,9 +398,7 @@ async function reagendarCitaAirtable(telefono, datos) {
       headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
     });
     return true;
-  } catch (error) {
-    return false;
-  }
+  } catch (error) { return false; }
 }
 
 async function verificarDisponibilidadAirtable(fecha, hora, especialistaSolicitado, duracionMinutos) {
@@ -453,9 +425,7 @@ async function verificarDisponibilidadAirtable(fecha, hora, especialistaSolicita
       }
     }
     return { ok: true, especialista: especialistaSolicitado || 'Asignar' };
-  } catch (error) {
-    return { ok: true, especialista: especialistaSolicitado };
-  }
+  } catch (error) { return { ok: true, especialista: especialistaSolicitado }; }
 }
 
 async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSolicitado, duracion) {
@@ -489,7 +459,5 @@ async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSoli
       horaPropuesta += 15;
     }
     return { mensaje: "Ese día está completo." };
-  } catch (error) {
-    return { mensaje: "¿Te funciona otro horario?" };
-  }
+  } catch (error) { return { mensaje: "¿Te funciona otro horario?" }; }
 }
