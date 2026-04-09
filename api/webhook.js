@@ -168,26 +168,29 @@ DATA_JSON:{
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
         
         // ============ CORRECCIÓN FECHA: Detectar si dijo "mañana" ============
-        const textoLower = textoUsuario.toLowerCase();
-        const mencionaManana = textoLower.includes('mañana') || 
-                               textoLower.includes('mañna') || 
-                               textoLower.includes('manana');
+        // ============ CORRECCIÓN FECHA DEFINITIVA ============
+// Detectar "mañana" en el mensaje del usuario
+const textoLower = textoUsuario.toLowerCase();
+const mencionaManana = textoLower.includes('mañana') || 
+                       textoLower.includes('mañna') || 
+                       textoLower.includes('manana');
 
-        let fechaFinal = datosExtraidos.cita_fecha;
+// Calcular fecha de mañana en Ecuador (forzada, no negociable)
+const ahora = new Date();
+const opciones = { timeZone: 'America/Guayaquil', year: 'numeric', month: '2-digit', day: '2-digit' };
+const partes = new Intl.DateTimeFormat('en-CA', opciones).formatToParts(ahora);
+const year = parseInt(partes.find(p => p.type === 'year').value);
+const month = parseInt(partes.find(p => p.type === 'month').value) - 1;
+const day = parseInt(partes.find(p => p.type === 'day').value);
 
-        if (mencionaManana) {
-          // Calcular mañana en Ecuador
-          const hoy = new Date();
-          const opciones = { timeZone: 'America/Guayaquil', year: 'numeric', month: '2-digit', day: '2-digit' };
-          const partes = new Intl.DateTimeFormat('en-CA', opciones).formatToParts(hoy);
-          const year = parseInt(partes.find(p => p.type === 'year').value);
-          const month = parseInt(partes.find(p => p.type === 'month').value) - 1;
-          const day = parseInt(partes.find(p => p.type === 'day').value);
-          
-          const manana = new Date(year, month, day + 1);
-          fechaFinal = manana.toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' });
-          
-          console.log('🔄 Forzando mañana:', fechaFinal, '(OpenAI:', datosExtraidos.cita_fecha + ')');
+const manana = new Date(year, month, day + 1);
+const fechaManana = manana.toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' });
+
+// Si mencionó mañana, USAR SIEMPRE la fecha de mañana real
+// Si no mencionó mañana, usar lo que vino del JSON (o hoy si está vacío)
+let fechaFinal = mencionaManana ? fechaManana : (datosExtraidos.cita_fecha || getFechaEcuador(0));
+
+console.log('📅 Fecha final:', fechaFinal, mencionaManana ? '(forzada mañana)' : '(del JSON)');
         }
         // ============ FIN CORRECCIÓN ============
         
