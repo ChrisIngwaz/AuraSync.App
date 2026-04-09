@@ -180,55 +180,51 @@ DATA_JSON:{
         // ============ CORRECCIÓN FECHA DEFINITIVA v3 ============
         // Siempre calcular fecha basada en el texto del usuario, nunca confiar en OpenAI
         
+                // ============ CORRECCIÓN FECHA DEFINITIVA v4 ============
+        // El servidor está en UTC, pero necesitamos calcular en hora Ecuador
+        
         const textoLower = (textoUsuario || '').toLowerCase();
-        const ahora = new Date();
         
-        // Forzar cálculo en zona horaria Ecuador
-        const opciones = { timeZone: 'America/Guayaquil', year: 'numeric', month: '2-digit', day: '2-digit' };
-        const partes = new Intl.DateTimeFormat('en-CA', opciones).formatToParts(ahora);
-        const year = parseInt(partes.find(p => p.type === 'year').value);
-        const month = parseInt(partes.find(p => p.type === 'month').value) - 1;
-        const day = parseInt(partes.find(p => p.type === 'day').value);
+        // Obtener fecha ACTUAL en Ecuador (no importa en qué zona esté el servidor)
+        const ahoraUTC = new Date();
+        const offsetEcuador = -5 * 60; // Ecuador es UTC-5 en minutos
+        const ahoraEcuador = new Date(ahoraUTC.getTime() + (offsetEcuador * 60 * 1000));
         
-        // Calcular hoy y mañana en Ecuador
-        const hoyEcuador = new Date(year, month, day);
-        const mananaEcuador = new Date(year, month, day + 1);
-        const pasadoManana = new Date(year, month, day + 2);
+        const year = ahoraEcuador.getUTCFullYear();
+        const month = ahoraEcuador.getUTCMonth();
+        const day = ahoraEcuador.getUTCDate();
         
-        const fechaHoyStr = hoyEcuador.toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' });
-        const fechaMananaStr = mananaEcuador.toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' });
-        const fechaPasadoStr = pasadoManana.toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' });
+        // Calcular mañana en Ecuador
+        const mananaEcuador = new Date(Date.UTC(year, month, day + 1));
+        
+        const fechaHoyStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        const fechaMananaStr = `${mananaEcuador.getUTCFullYear()}-${String(mananaEcuador.getUTCMonth() + 1).padStart(2, '0')}-${String(mananaEcuador.getUTCDate()).padStart(2, '0')}`;
+        
+        console.log('🕐 Ahora UTC:', ahoraUTC.toISOString());
+        console.log('🕐 Ahora Ecuador (calculado):', fechaHoyStr);
+        console.log('📅 Mañana Ecuador:', fechaMananaStr);
         
         let fechaFinal;
         
-        // Detectar intención en el texto del usuario (no en el JSON de OpenAI)
         if (textoLower.includes('mañana') || textoLower.includes('manana')) {
           fechaFinal = fechaMananaStr;
-          console.log('✅ Detectado "mañana" en texto →', fechaFinal);
-        }
-        else if (textoLower.includes('pasado mañana')) {
-          fechaFinal = fechaPasadoStr;
-          console.log('✅ Detectado "pasado mañana" →', fechaFinal);
+          console.log('✅ Detectado "mañana" →', fechaFinal);
         }
         else if (textoLower.includes('hoy')) {
           fechaFinal = fechaHoyStr;
           console.log('✅ Detectado "hoy" →', fechaFinal);
         }
-        // Si OpenAI generó una fecha que parece válida futura, usarla
-        else if (datosExtraidos.cita_fecha && 
-                 datosExtraidos.cita_fecha >= fechaHoyStr && 
-                 datosExtraidos.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/)) {
+        else if (datosExtraidos.cita_fecha && datosExtraidos.cita_fecha >= fechaHoyStr) {
           fechaFinal = datosExtraidos.cita_fecha;
-          console.log('✅ Usando fecha de OpenAI:', fechaFinal);
+          console.log('✅ Usando fecha OpenAI:', fechaFinal);
         }
-        // Fallback: si OpenAI generó fecha pasada o inválida → mañana
         else {
           fechaFinal = fechaMananaStr;
-          console.log('⚠️ Fecha inválida de OpenAI, forzando mañana:', fechaFinal);
+          console.log('⚠️ Default a mañana:', fechaFinal);
         }
         
-        console.log('📅 FECHA FINAL USADA:', fechaFinal);
-        // ============ FIN CORRECCIÓN ============
+        console.log('📅 FECHA FINAL:', fechaFinal);
+        // ============ FIN DE CORRECCION 
         
         if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
           await supabase.from('clientes').upsert({
