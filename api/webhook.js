@@ -42,7 +42,8 @@ async function obtenerOcupacionGlobal() {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     const filter = encodeURIComponent(`OR(IS_SAME({Fecha}, '${hoy}', 'day'), IS_SAME({Fecha}, '${mañana}', 'day'))`);
     const res = await axios.get(`${url}?filterByFormula=${filter}`, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` } });
-    return res.data.records.filter(r => r.fields.Estado === 'Confirmada').map(r => `${r.fields.Especialista} ocupado el ${formatearFecha(r.fields.Fecha.split('T')[0])} a las ${r.fields.Hora}`).join('\n');
+    const ocupados = res.data.records.filter(r => r.fields.Estado === 'Confirmada').map(r => `${r.fields.Especialista} ocupado el ${formatearFecha(r.fields.Fecha.split('T')[0])} a las ${r.fields.Hora}`).join('\n');
+    return ocupados || "No hay citas ocupadas. Todo el equipo está totalmente libre.";
   } catch (e) { return "No hay ocupación registrada."; }
 }
 
@@ -84,18 +85,24 @@ export default async function handler(req, res) {
 
     const systemPrompt = `Tu nombre es Aura, asistente de élite de AuraSync. Concierge de lujo.
 
+[ESPECIALISTAS DISPONIBLES]
+${listaEsp}
+
+[CATÁLOGO DE SERVICIOS]
+${catalogo}
+
 [CITAS ACTUALES DEL CLIENTE]
 ${infoCitas}
 
-[OCUPACIÓN REAL DE LA AGENDA]
+[OCUPACIÓN REAL DE LA AGENDA (MIRA ESTO ANTES DE RESPONDER)]
 ${ocupacionGlobal}
 
 [IDENTIDAD Y REGLAS]
 - Si el cliente quiere REAGENDAR, usa el ID de su cita actual. MANTÉN el mismo servicio y especialista a menos que pida cambiarlos.
-- Antes de decir que alguien está ocupado, mira la [OCUPACIÓN REAL].
+- Antes de decir que alguien está ocupado, mira la [OCUPACIÓN REAL]. Si el especialista NO aparece ahí para esa hora, significa que está LIBRE. No inventes que está ocupado.
 - FLUJO HUMANO: Divide respuestas con "###". 
 - NUNCA escribas el checkmark (✅) tú misma.
-- DATA_JSON debe ser preciso. Si es reagendar, pon "accion": "reagendar" y el "cita_id" correcto.
+- Para confirmar una reserva, DEBES poner "accion": "agendar" en el JSON. Si no lo pones, la cita no se guardará.
 
 [DATA_JSON ESTRUCTURA]
 DATA_JSON:{ "accion": "none"|"agendar"|"cancelar"|"reagendar", "cita_id": "...", "cita_fecha": "YYYY-MM-DD", "cita_hora": "HH:MM", "cita_servicio": "...", "cita_especialista": "..." }`;
@@ -167,26 +174,19 @@ async function crearCitaAirtable(datos) {
   } catch (error) { return false; }
 }
 
-// CORREGIDO: Ahora ELIMINA el registro para que desaparezca del calendario
 async function cancelarCitaAirtable(telefono, citaId) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     let recordId = citaId;
-
     if (!recordId) {
       const filter = encodeURIComponent(`AND({Teléfono} = '${telefono}', {Estado} = 'Confirmada')`);
       const busqueda = await axios.get(`${url}?filterByFormula=${filter}&maxRecords=1`, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` } });
       if (busqueda.data.records.length === 0) return false;
       recordId = busqueda.data.records[0].id;
     }
-
-    // Usamos el método DELETE para borrarlo físicamente
     await axios.delete(`${url}/${recordId}`, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` } });
     return true;
-  } catch (error) { 
-    console.error('Error al borrar cita:', error.message);
-    return false; 
-  }
+  } catch (error) { return false; }
 }
 
 async function reagendarCitaAirtable(telefono, datos) {
@@ -195,12 +195,10 @@ async function reagendarCitaAirtable(telefono, datos) {
     const filter = encodeURIComponent(`AND({Teléfono} = '${telefono}', {Estado} = 'Confirmada')`);
     const busqueda = await axios.get(`${url}?filterByFormula=${filter}`, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` } });
     if (busqueda.data.records.length === 0) return false;
-    
     const recordId = datos.cita_id || busqueda.data.records[0].id;
     const [h, min] = datos.cita_hora.split(':').map(Number);
     const [anio, mes, dia] = datos.cita_fecha.split('-').map(Number);
     const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
-    
     await axios.patch(url, { records: [{ id: recordId, fields: { "Fecha": fechaUTC, "Hora": datos.cita_hora, "Especialista": datos.cita_especialista || busqueda.data.records[0].fields.Especialista } }] }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
     return true;
   } catch (error) { return false; }
