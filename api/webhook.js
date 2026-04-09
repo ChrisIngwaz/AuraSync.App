@@ -55,7 +55,7 @@ export default async function handler(req, res) {
   }
 
   const { Body, From, MediaUrl0 } = req.body;
-  const userPhone = (From || '').replace('whatsapp:', '').trim();
+  const userPhone = From.replace('whatsapp:', '').trim();
   
   console.log(`\n📱 ${userPhone}`);
 
@@ -107,28 +107,28 @@ export default async function handler(req, res) {
     const listaEsp = especialistas?.map(e => `${e.nombre} (Experto en: ${e.expertise})`).join(', ') || "nuestro equipo";
     const catalogo = servicios?.map(s => `${s.nombre} ($${s.precio})`).join(', ') || "servicios";
 
+    // MEJORA DE COMUNICACIÓN EN EL SYSTEM PROMPT
     const systemPrompt = `Tu nombre es Aura, asistente de élite de AuraSync. Tu comunicación debe ser indistinguible de la de un humano: cálida, sofisticada y altamente persuasiva.
 
 [IDENTIDAD]
 - Tono: Profesional, elegante, seguro y comercialmente astuto.
-- Personalidad: Eres una concierge de lujo. Saluda siempre con elegancia y mantén una conversación fluida.
-- Proactividad: TOMA LA INICIATIVA. No esperes a que el cliente pregunte; sugiere el mejor especialista para su necesidad.
+- Personalidad: Eres una concierge de lujo. Saluda con elegancia y mantén una conversación fluida.
+- Proactividad: TOMA LA INICIATIVA. Si el cliente pide un servicio, sugiere al mejor especialista de inmediato.
 - Cliente: ${cliente?.nombre || 'Nuevo Usuario'}
 
 [CAPACIDADES]
 Puedes: AGENDAR nuevas citas, CANCELAR citas existentes, REAGENDAR cambiando fecha/hora.
 
-[RECOMENDACIONES Y PERSUASIÓN]
+[RECOMENDACIONES]
 - Especialistas: ${listaEsp}
 - Servicios: ${catalogo}
-- Misión: Debes PERSUADIR al cliente resaltando por qué un especialista es perfecto para el servicio solicitado. Usa su expertise para generar confianza.
-- Ejemplo: "Para ese cambio de look, te recomiendo sin duda a Ricardo, es nuestro maestro en colorimetría y dejará tu cabello espectacular".
+- Misión: Debes PERSUADIR al cliente resaltando por qué un especialista es perfecto para el servicio solicitado.
 
 [REGLAS DE ORO]
-- NUNCA respondas de forma robótica o solo con datos técnicos.
-- Usa frases de transición naturales.
-- SI EL USUARIO MENCIONA UNA FECHA Y HORA ESPECÍFICA, ASUME QUE QUIERE AGENDAR. No preguntes "¿Te gustaría que agendara esta cita?"; simplemente confírmalo con calidez y elegancia, integrando la recomendación del especialista en la misma respuesta.
-- Si ya tienes un dato, no lo vuelvas a pedir; avanza hacia la confirmación definitiva y cálida.
+- NUNCA respondas de forma robótica.
+- SI EL USUARIO MENCIONA FECHA Y HORA, ASUME QUE QUIERE AGENDAR. No preguntes "¿Te gustaría que agendara?"; simplemente confírmalo como un hecho ("Ya mismo te reservo...", "Listo, he agendado...") e integra la recomendación del especialista en el mismo mensaje.
+- Evita frases de duda. Sé ejecutiva y proactiva.
+- Si ya tienes un dato, no lo vuelvas a pedir; avanza hacia la confirmación.
 
 [FECHAS IMPORTANTE]
 - Hoy es: ${formatearFecha(getFechaEcuador())}
@@ -170,43 +170,26 @@ DATA_JSON:{
     if (jsonMatch) {
       try {
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
-        
         const textoLower = (textoUsuario || '').toLowerCase();
-        
         const ahoraUTC = new Date();
         const minutosDesdeMedianocheUTC = (ahoraUTC.getUTCHours() * 60) + ahoraUTC.getUTCMinutes();
         const minutosEcuador = minutosDesdeMedianocheUTC - (5 * 60); 
-        
         const esAyerEnEcuador = minutosEcuador < 0;
-        
         const diaHoyUTC = ahoraUTC.getUTCDate();
         const mesHoyUTC = ahoraUTC.getUTCMonth(); 
         const añoHoyUTC = ahoraUTC.getUTCFullYear();
-        
         const fechaBase = new Date(Date.UTC(añoHoyUTC, mesHoyUTC, diaHoyUTC));
-        if (esAyerEnEcuador) {
-          fechaBase.setUTCDate(fechaBase.getUTCDate() - 1);
-        }
-        
+        if (esAyerEnEcuador) fechaBase.setUTCDate(fechaBase.getUTCDate() - 1);
         const fechaMañana = new Date(fechaBase);
         fechaMañana.setUTCDate(fechaBase.getUTCDate() + 1);
-        
-        const formatear = (fecha) => {
-          return `${fecha.getUTCFullYear()}-${String(fecha.getUTCMonth() + 1).padStart(2, '0')}-${String(fecha.getUTCDate()).padStart(2, '0')}`;
-        };
-        
+        const formatear = (fecha) => `${fecha.getUTCFullYear()}-${String(fecha.getUTCMonth() + 1).padStart(2, '0')}-${String(fecha.getUTCDate()).padStart(2, '0')}`;
         const fechaHoyStr = formatear(fechaBase);
         const fechaMañanaStr = formatear(fechaMañana);
         
         let fechaFinal = fechaMañanaStr; 
-        
-        if (textoLower.includes('mañana') || textoLower.includes('manana')) {
-          fechaFinal = fechaMañanaStr;
-        } else if (textoLower.includes('hoy')) {
-          fechaFinal = fechaHoyStr;
-        } else if (datosExtraidos.cita_fecha && datosExtraidos.cita_fecha >= fechaHoyStr) {
-          fechaFinal = datosExtraidos.cita_fecha;
-        }
+        if (textoLower.includes('mañana') || textoLower.includes('manana')) fechaFinal = fechaMañanaStr;
+        else if (textoLower.includes('hoy')) fechaFinal = fechaHoyStr;
+        else if (datosExtraidos.cita_fecha && datosExtraidos.cita_fecha >= fechaHoyStr) fechaFinal = datosExtraidos.cita_fecha;
         
         if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
           await supabase.from('clientes').upsert({
@@ -225,43 +208,23 @@ DATA_JSON:{
           mensajeAccion = resultado ? "✅ Cita cancelada exitosamente." : "No encontré citas activas para cancelar.";
           accionEjecutada = true;
         }
-        
         else if (accion === 'reagendar') {
           if (fechaFinal && datosExtraidos.cita_hora) {
             const resultado = await reagendarCitaAirtable(userPhone, { ...datosExtraidos, cita_fecha: fechaFinal });
-            mensajeAccion = resultado 
-              ? `✅ Cita reprogramada para ${formatearFecha(fechaFinal)} a las ${datosExtraidos.cita_hora}.`
-              : "No pude reprogramar. ¿Tienes una cita activa?";
+            mensajeAccion = resultado ? `✅ Cita reprogramada para ${formatearFecha(fechaFinal)} a las ${datosExtraidos.cita_hora}.` : "No pude reprogramar.";
             accionEjecutada = true;
           }
         }
-        
         else if (accion === 'agendar' || (fechaFinal && datosExtraidos.cita_hora)) {
           const tieneFecha = fechaFinal.match(/^\d{4}-\d{2}-\d{2}$/);
           const tieneHora = datosExtraidos.cita_hora && datosExtraidos.cita_hora.match(/^\d{2}:\d{2}$/);
           
           if (tieneFecha && tieneHora && (cliente?.nombre || datosExtraidos.nombre)) {
-            
-            let servicioData = servicios?.find(s => 
-              s.nombre.toLowerCase() === (datosExtraidos.cita_servicio || '').toLowerCase()
-            ) || servicios?.find(s => 
-              (datosExtraidos.cita_servicio || '').toLowerCase().includes(s.nombre.toLowerCase())
-            ) || { nombre: datosExtraidos.cita_servicio || "Servicio", precio: 0, duracion: 60 };
-
-            const disponible = await verificarDisponibilidadAirtable(
-              fechaFinal,
-              datosExtraidos.cita_hora,
-              datosExtraidos.cita_especialista,
-              servicioData.duracion
-            );
+            let servicioData = servicios?.find(s => s.nombre.toLowerCase() === (datosExtraidos.cita_servicio || '').toLowerCase()) || servicios?.find(s => (datosExtraidos.cita_servicio || '').toLowerCase().includes(s.nombre.toLowerCase())) || { nombre: datosExtraidos.cita_servicio || "Servicio", precio: 0, duracion: 60 };
+            const disponible = await verificarDisponibilidadAirtable(fechaFinal, datosExtraidos.cita_hora, datosExtraidos.cita_especialista, servicioData.duracion);
 
             if (!disponible.ok) {
-              const alternativa = await buscarAlternativaAirtable(
-                fechaFinal,
-                datosExtraidos.cita_hora,
-                datosExtraidos.cita_especialista,
-                servicioData.duracion
-              );
+              const alternativa = await buscarAlternativaAirtable(fechaFinal, datosExtraidos.cita_hora, datosExtraidos.cita_especialista, servicioData.duracion);
               mensajeAccion = `Ese horario no está disponible. ${alternativa.mensaje}`;
               accionEjecutada = true;
             } else {
@@ -269,50 +232,38 @@ DATA_JSON:{
               const apellidoCliente = cliente?.apellido || datosExtraidos.apellido || "";
               const especialistaFinal = disponible.especialista || datosExtraidos.cita_especialista || "Asignar";
               
-              const { data: citaSupabase } = await supabase
-                .from('citas')
-                .insert({
-                  cliente_id: cliente?.id || null,
-                  servicio_id: servicioData.id || null,
-                  fecha_hora: `${fechaFinal}T${datosExtraidos.cita_hora}:00-05:00`,
-                  estado: 'Confirmada',
-                  nombre_cliente_aux: `${nombreCliente} ${apellidoCliente}`.trim(),
-                  servicio_aux: servicioData.nombre,
-                  duracion_aux: servicioData.duracion,
-                  created_at: new Date().toISOString()
-                })
-                .select()
-                .single();
+              const { data: citaSupabase } = await supabase.from('citas').insert({
+                cliente_id: cliente?.id || null,
+                servicio_id: servicioData.id || null,
+                fecha_hora: `${fechaFinal}T${datosExtraidos.cita_hora}:00-05:00`,
+                estado: 'Confirmada',
+                nombre_cliente_aux: `${nombreCliente} ${apellidoCliente}`.trim(),
+                servicio_aux: servicioData.nombre,
+                duracion_aux: servicioData.duracion,
+                created_at: new Date().toISOString()
+              }).select().single();
 
               const citaAirtable = await crearCitaAirtable({
-                telefono: userPhone,
-                nombre: nombreCliente,
-                apellido: apellidoCliente,
-                fecha: fechaFinal,
-                hora: datosExtraidos.cita_hora,
-                servicio: servicioData.nombre,
-                especialista: especialistaFinal,
-                precio: servicioData.precio,
-                duracion: servicioData.duracion,
-                supabase_id: citaSupabase?.id || null
+                telefono: userPhone, nombre: nombreCliente, apellido: apellidoCliente, fecha: fechaFinal, hora: datosExtraidos.cita_hora, servicio: servicioData.nombre, especialista: especialistaFinal, precio: servicioData.precio, duracion: servicioData.duracion, supabase_id: citaSupabase?.id || null
               });
 
               if (citaAirtable) {
                 mensajeAccion = `✅ Cita confirmada: ${formatearFecha(fechaFinal)} a las ${datosExtraidos.cita_hora} con ${especialistaFinal}.`;
               } else {
-                mensajeAccion = "Tuve un problema registrando la cita. ¿Lo intentamos de nuevo?";
+                mensajeAccion = "Tuve un problema registrando la cita.";
               }
               accionEjecutada = true;
             }
           }
         }
-      } catch (e) { 
-        console.error('Error procesando JSON:', e.message); 
-      }
+      } catch (e) { console.error('Error JSON:', e.message); }
     }
 
     let cleanReply = fullReply.replace(/DATA_JSON[\s\S]*/, '').trim();
+    
+    // CORRECCIÓN DE LA UNIÓN DE RESPUESTAS
     if (accionEjecutada && mensajeAccion) {
+      // Unimos la respuesta humana de Aura con la confirmación técnica
       cleanReply = `${cleanReply}\n\n${mensajeAccion}`;
     }
 
@@ -326,7 +277,7 @@ DATA_JSON:{
 
   } catch (err) {
     console.error('❌ Error:', err.message);
-    return res.status(200).send('<Response><Message>Disculpa, tuve un momento de distracción. ¿Me repites por favor? 🌸</Message></Response>');
+    return res.status(200).send('<Response><Message>Disculpa, tuve un momento de distracción. 🌸</Message></Response>');
   }
 }
 
@@ -336,26 +287,8 @@ async function crearCitaAirtable(datos) {
     const [h, min] = datos.hora.split(':').map(Number);
     const [anio, mes, dia] = datos.fecha.split('-').map(Number);
     const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
-
-    const payload = {
-      records: [{
-        fields: {
-          "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
-          "Servicio": datos.servicio,
-          "Fecha": fechaUTC,
-          "Hora": datos.hora,
-          "Especialista": datos.especialista,
-          "Teléfono": datos.telefono,
-          "Estado": "Confirmada",
-          "Importe estimado": datos.precio,
-          "Duración estimada (minutos)": datos.duracion,
-          "ID_Supabase": datos.supabase_id || null
-        }
-      }]
-    };
-    await axios.post(url, payload, { 
-      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
-    });
+    const payload = { records: [{ fields: { "Cliente": `${datos.nombre} ${datos.apellido}`.trim(), "Servicio": datos.servicio, "Fecha": fechaUTC, "Hora": datos.hora, "Especialista": datos.especialista, "Teléfono": datos.telefono, "Estado": "Confirmada", "Importe estimado": datos.precio, "Duración estimada (minutos)": datos.duracion, "ID_Supabase": datos.supabase_id || null } }] };
+    await axios.post(url, payload, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
     return true;
   } catch (error) { return false; }
 }
@@ -364,16 +297,10 @@ async function cancelarCitaAirtable(telefono, citaId) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     const filter = encodeURIComponent(`AND({Teléfono} = '${telefono}', {Estado} = 'Confirmada')`);
-    const busqueda = await axios.get(`${url}?filterByFormula=${filter}&maxRecords=1`, {
-      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
-    });
+    const busqueda = await axios.get(`${url}?filterByFormula=${filter}&maxRecords=1`, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` } });
     if (busqueda.data.records.length === 0) return false;
     const recordId = citaId || busqueda.data.records[0].id;
-    await axios.patch(`${url}`, {
-      records: [{ id: recordId, fields: { "Estado": "Cancelada" } }]
-    }, {
-      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
-    });
+    await axios.patch(`${url}`, { records: [{ id: recordId, fields: { "Estado": "Cancelada" } }] }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
     return true;
   } catch (error) { return false; }
 }
@@ -382,19 +309,13 @@ async function reagendarCitaAirtable(telefono, datos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     const filter = encodeURIComponent(`AND({Teléfono} = '${telefono}', {Estado} = 'Confirmada')`);
-    const busqueda = await axios.get(`${url}?filterByFormula=${filter}&maxRecords=1`, {
-      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
-    });
+    const busqueda = await axios.get(`${url}?filterByFormula=${filter}&maxRecords=1`, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` } });
     if (busqueda.data.records.length === 0) return false;
     const recordId = datos.cita_id || busqueda.data.records[0].id;
     const [h, min] = datos.cita_hora.split(':').map(Number);
     const [anio, mes, dia] = datos.cita_fecha.split('-').map(Number);
     const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
-    await axios.patch(`${url}`, {
-      records: [{ id: recordId, fields: { "Fecha": fechaUTC, "Hora": datos.cita_hora, "Estado": "Confirmada" } }]
-    }, {
-      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
-    });
+    await axios.patch(`${url}`, { records: [{ id: recordId, fields: { "Fecha": fechaUTC, "Hora": datos.cita_hora, "Estado": "Confirmada" } }] }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
     return true;
   } catch (error) { return false; }
 }
@@ -403,9 +324,7 @@ async function verificarDisponibilidadAirtable(fecha, hora, especialistaSolicita
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     const filter = encodeURIComponent(`AND({Fecha} = '${fecha}', {Estado} = 'Confirmada')`);
-    const response = await axios.get(`${url}?filterByFormula=${filter}`, {
-      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
-    });
+    const response = await axios.get(`${url}?filterByFormula=${filter}`, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` } });
     const citas = response.data.records;
     const [h, m] = hora.split(':').map(Number);
     const inicioNuevo = h * 60 + m;
@@ -417,9 +336,7 @@ async function verificarDisponibilidadAirtable(fecha, hora, especialistaSolicita
       const inicioExistente = he * 60 + me;
       const finExistente = inicioExistente + (cita.fields['Duración estimada (minutos)'] || 60);
       if (inicioNuevo < finExistente && finNuevo > inicioExistente) {
-        if (!especialistaSolicitado || cita.fields.Especialista === especialistaSolicitado) {
-          return { ok: false, mensaje: `${cita.fields.Especialista} no está disponible.` };
-        }
+        if (!especialistaSolicitado || cita.fields.Especialista === especialistaSolicitado) return { ok: false, mensaje: `${cita.fields.Especialista} no está disponible.` };
       }
     }
     return { ok: true, especialista: especialistaSolicitado || 'Asignar' };
@@ -430,14 +347,8 @@ async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSoli
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     const filter = encodeURIComponent(`AND({Fecha} = '${fecha}', {Estado} = 'Confirmada')`);
-    const response = await axios.get(`${url}?filterByFormula=${filter}`, {
-      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
-    });
-    const ocupados = response.data.records.map(c => ({
-      hora: c.fields.Hora,
-      duracion: c.fields['Duración estimada (minutos)'] || 60,
-      especialista: c.fields.Especialista
-    }));
+    const response = await axios.get(`${url}?filterByFormula=${filter}`, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` } });
+    const ocupados = response.data.records.map(c => ({ hora: c.fields.Hora, duracion: c.fields['Duración estimada (minutos)'] || 60, especialista: c.fields.Especialista }));
     const [h, m] = horaSolicitada.split(':').map(Number);
     let horaPropuesta = h * 60 + m;
     while (horaPropuesta <= 1080 - duracion) {
@@ -445,9 +356,7 @@ async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSoli
       for (const ocup of ocupados) {
         const [ho, mo] = ocup.hora.split(':').map(Number);
         if (horaPropuesta < (ho * 60 + mo + ocup.duracion) && (horaPropuesta + duracion) > (ho * 60 + mo)) {
-          if (!especialistaSolicitado || ocup.especialista === especialistaSolicitado) {
-            conflicto = true; break;
-          }
+          if (!especialistaSolicitado || ocup.especialista === especialistaSolicitado) { conflicto = true; break; }
         }
       }
       if (!conflicto) {
