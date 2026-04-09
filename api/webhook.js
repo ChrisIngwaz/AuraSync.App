@@ -173,7 +173,7 @@ DATA_JSON:{
     let mensajeAccion = '';
     const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/);
     
-            if (jsonMatch) {
+                if (jsonMatch) {
       try {
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
         
