@@ -1,4 +1,3 @@
-[ignoring loop detection]
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
 
