@@ -209,17 +209,26 @@ DATA_JSON:{
         const fechaHoyStr = formatear(fechaBase);
         const fechaMañanaStr = formatear(fechaMañana);
         
-        let fechaFinal = fechaMañanaStr; 
+        console.log('🕐 UTC ahora:', ahoraUTC.toISOString());
+        console.log('🕐 Es ayer en Ecuador:', esAyerEnEcuador);
+        console.log('📅 HOY Ecuador:', fechaHoyStr);
+        console.log('📅 MAÑANA Ecuador:', fechaMañanaStr);
         
-        if (textoLower.includes('hoy')) {
-          fechaFinal = fechaHoyStr;
-        } else if (textoLower.includes('mañana') || textoLower.includes('manana')) {
+        // Paso 5: Decidir qué usar (Prioridad: Mañana > Hoy > OpenAI)
+        let fechaFinal = fechaMañanaStr; // Default: mañana
+        
+        if (textoLower.includes('mañana') || textoLower.includes('manana')) {
           fechaFinal = fechaMañanaStr;
+          console.log('✅ Detectado: MAÑANA');
+        } else if (textoLower.includes('hoy')) {
+          fechaFinal = fechaHoyStr;
+          console.log('✅ Detectado: HOY');
         } else if (datosExtraidos.cita_fecha && datosExtraidos.cita_fecha >= fechaHoyStr) {
           fechaFinal = datosExtraidos.cita_fecha;
+          console.log('✅ Usando fecha OpenAI:', fechaFinal);
         }
         
-        console.log('📅 FECHA FINAL CALCULADA:', fechaFinal);
+        console.log('📅 FECHA FINAL PARA REGISTRO:', fechaFinal);
         // ============ FIN CORRECCIÓN ============
         
         if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
@@ -307,6 +316,8 @@ DATA_JSON:{
 
               if (errorSupabase) {
                 console.error('❌ Error Supabase:', errorSupabase);
+              } else {
+                console.log('✅ Supabase OK:', citaSupabase?.id);
               }
 
               const citaAirtable = await crearCitaAirtable({
@@ -367,7 +378,7 @@ async function crearCitaAirtable(datos) {
         fields: {
           "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
           "Servicio": datos.servicio,
-          "Fecha": datos.fecha,
+          "Fecha": String(datos.fecha),
           "Hora": datos.hora,
           "Especialista": datos.especialista,
           "Teléfono": datos.telefono,
@@ -378,6 +389,7 @@ async function crearCitaAirtable(datos) {
         }
       }]
     };
+    console.log('📤 Enviando a Airtable:', JSON.stringify(payload.records[0].fields));
     await axios.post(url, payload, { 
       headers: { 
         'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 
@@ -386,7 +398,7 @@ async function crearCitaAirtable(datos) {
     });
     return true;
   } catch (error) { 
-    console.error('Error Airtable:', error.message);
+    console.error('❌ Error Airtable:', error.response?.data || error.message);
     return false; 
   }
 }
@@ -436,15 +448,19 @@ async function reagendarCitaAirtable(telefono, datos) {
 
     const recordId = datos.cita_id || busqueda.data.records[0].id;
     
+    const fields = { 
+      "Fecha": String(datos.cita_fecha),
+      "Hora": datos.cita_hora,
+      "Especialista": datos.cita_especialista || busqueda.data.records[0].fields.Especialista,
+      "Estado": "Confirmada"
+    };
+
+    console.log('📤 Reagendando en Airtable:', JSON.stringify(fields));
+
     await axios.patch(`${url}`, {
       records: [{
         id: recordId,
-        fields: { 
-          "Fecha": datos.cita_fecha,
-          "Hora": datos.cita_hora,
-          "Especialista": datos.cita_especialista || busqueda.data.records[0].fields.Especialista,
-          "Estado": "Confirmada"
-        }
+        fields
       }]
     }, {
       headers: { 
@@ -455,7 +471,7 @@ async function reagendarCitaAirtable(telefono, datos) {
     
     return true;
   } catch (error) {
-    console.error('Error reagendando:', error.message);
+    console.error('❌ Error reagendando:', error.response?.data || error.message);
     return false;
   }
 }
