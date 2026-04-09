@@ -214,8 +214,7 @@ DATA_JSON:{
         console.log('📅 HOY Ecuador:', fechaHoyStr);
         console.log('📅 MAÑANA Ecuador:', fechaMañanaStr);
         
-        // Paso 5: Decidir qué usar (Prioridad: Mañana > Hoy > OpenAI)
-        let fechaFinal = fechaMañanaStr; // Default: mañana
+        let fechaFinal = fechaMañanaStr; 
         
         if (textoLower.includes('mañana') || textoLower.includes('manana')) {
           fechaFinal = fechaMañanaStr;
@@ -373,12 +372,17 @@ DATA_JSON:{
 async function crearCitaAirtable(datos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
+    // Convertimos la hora local de Ecuador a UTC para que Airtable no la desplace
+    const [h, min] = datos.hora.split(':').map(Number);
+    const [anio, mes, dia] = datos.fecha.split('-').map(Number);
+    const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
+
     const payload = {
       records: [{
         fields: {
           "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
           "Servicio": datos.servicio,
-          "Fecha": `${datos.fecha}T12:00:00.000Z`,
+          "Fecha": fechaUTC,
           "Hora": datos.hora,
           "Especialista": datos.especialista,
           "Teléfono": datos.telefono,
@@ -448,8 +452,13 @@ async function reagendarCitaAirtable(telefono, datos) {
 
     const recordId = datos.cita_id || busqueda.data.records[0].id;
     
+    // Convertimos la hora local de Ecuador a UTC para que Airtable no la desplace
+    const [h, min] = datos.cita_hora.split(':').map(Number);
+    const [anio, mes, dia] = datos.cita_fecha.split('-').map(Number);
+    const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
+
     const fields = { 
-      "Fecha": `${datos.cita_fecha}T12:00:00.000Z`,
+      "Fecha": fechaUTC,
       "Hora": datos.cita_hora,
       "Especialista": datos.cita_especialista || busqueda.data.records[0].fields.Especialista,
       "Estado": "Confirmada"
