@@ -173,64 +173,61 @@ DATA_JSON:{
     let mensajeAccion = '';
     const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/);
     
-        if (jsonMatch) {
+            if (jsonMatch) {
       try {
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
         
-        // ============ CORRECCIÓN FECHA DEFINITIVA v2 ============
-        // Detectar intención de "mañana" en múltiples fuentes
+        // ============ CORRECCIÓN FECHA DEFINITIVA v3 ============
+        // Siempre calcular fecha basada en el texto del usuario, nunca confiar en OpenAI
         
-        // 1. Revisar el texto original del usuario
         const textoLower = (textoUsuario || '').toLowerCase();
-        const mencionaMananaTexto = textoLower.includes('mañana') || 
-                                    textoLower.includes('mañna') || 
-                                    textoLower.includes('manana') ||
-                                    textoLower.includes('para manana') ||
-                                    textoLower.includes('por la mañana'); // cuidado con esta
-        
-        // 2. Revisar la respuesta de OpenAI (a veces OpenAI interpreta bien)
-        const respuestaLower = (fullReply || '').toLowerCase();
-        const mencionaMananaRespuesta = respuestaLower.includes('mañana') && 
-                                        !respuestaLower.includes('hoy'); // evitar falsos positivos
-        
-        // 3. Calcular fechas de referencia
         const ahora = new Date();
+        
+        // Forzar cálculo en zona horaria Ecuador
         const opciones = { timeZone: 'America/Guayaquil', year: 'numeric', month: '2-digit', day: '2-digit' };
         const partes = new Intl.DateTimeFormat('en-CA', opciones).formatToParts(ahora);
         const year = parseInt(partes.find(p => p.type === 'year').value);
         const month = parseInt(partes.find(p => p.type === 'month').value) - 1;
         const day = parseInt(partes.find(p => p.type === 'day').value);
         
-        const hoyFecha = new Date(year, month, day);
-        const mananaFecha = new Date(year, month, day + 1);
-        const fechaHoyStr = hoyFecha.toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' });
-        const fechaMananaStr = mananaFecha.toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' });
+        // Calcular hoy y mañana en Ecuador
+        const hoyEcuador = new Date(year, month, day);
+        const mananaEcuador = new Date(year, month, day + 1);
+        const pasadoManana = new Date(year, month, day + 2);
         
-        // 4. Decidir qué fecha usar
+        const fechaHoyStr = hoyEcuador.toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' });
+        const fechaMananaStr = mananaEcuador.toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' });
+        const fechaPasadoStr = pasadoManana.toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' });
+        
         let fechaFinal;
         
-        // Si el usuario dijo "mañana" explícitamente → FORZAR mañana
-        if (mencionaMananaTexto) {
+        // Detectar intención en el texto del usuario (no en el JSON de OpenAI)
+        if (textoLower.includes('mañana') || textoLower.includes('manana')) {
           fechaFinal = fechaMananaStr;
-          console.log('🔄 FORZADO MAÑANA (usuario dijo mañana):', fechaFinal);
+          console.log('✅ Detectado "mañana" en texto →', fechaFinal);
         }
-        // Si OpenAI generó una fecha que parece ser ayer o fecha pasada respecto a hoy → corregir a mañana
-        else if (datosExtraidos.cita_fecha && datosExtraidos.cita_fecha < fechaHoyStr) {
-          fechaFinal = fechaMananaStr;
-          console.log('🔄 CORREGIDA fecha pasada a mañana:', fechaFinal, '(era:', datosExtraidos.cita_fecha + ')');
+        else if (textoLower.includes('pasado mañana')) {
+          fechaFinal = fechaPasadoStr;
+          console.log('✅ Detectado "pasado mañana" →', fechaFinal);
         }
-        // Si OpenAI generó fecha válida futura → usarla
-        else if (datosExtraidos.cita_fecha && datosExtraidos.cita_fecha >= fechaHoyStr) {
+        else if (textoLower.includes('hoy')) {
+          fechaFinal = fechaHoyStr;
+          console.log('✅ Detectado "hoy" →', fechaFinal);
+        }
+        // Si OpenAI generó una fecha que parece válida futura, usarla
+        else if (datosExtraidos.cita_fecha && 
+                 datosExtraidos.cita_fecha >= fechaHoyStr && 
+                 datosExtraidos.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/)) {
           fechaFinal = datosExtraidos.cita_fecha;
           console.log('✅ Usando fecha de OpenAI:', fechaFinal);
         }
-        // Fallback → mañana por defecto (comportamiento conservador)
+        // Fallback: si OpenAI generó fecha pasada o inválida → mañana
         else {
           fechaFinal = fechaMananaStr;
-          console.log('⚠️ Fallback a mañana:', fechaFinal);
+          console.log('⚠️ Fecha inválida de OpenAI, forzando mañana:', fechaFinal);
         }
         
-        console.log('📅 Fecha final seleccionada:', fechaFinal);
+        console.log('📅 FECHA FINAL USADA:', fechaFinal);
         // ============ FIN CORRECCIÓN ============
         
         if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
