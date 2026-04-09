@@ -1,3 +1,4 @@
+[ignoring loop detection]
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
 
@@ -107,28 +108,27 @@ export default async function handler(req, res) {
     const listaEsp = especialistas?.map(e => `${e.nombre} (Experto en: ${e.expertise})`).join(', ') || "nuestro equipo";
     const catalogo = servicios?.map(s => `${s.nombre} ($${s.precio})`).join(', ') || "servicios";
 
-    // MEJORA DE COMUNICACIÓN EN EL SYSTEM PROMPT
-    const systemPrompt = `Tu nombre es Aura, asistente de élite de AuraSync. Tu comunicación debe ser indistinguible de la de un humano: cálida, sofisticada y altamente persuasiva.
+    // MEJORA DE COMUNICACIÓN: Aura ahora es más humana y conversacional
+    const systemPrompt = `Tu nombre es Aura, asistente de élite de AuraSync. Tu comunicación debe ser indistinguible de la de un humano: cálida, sofisticada y altamente conversacional.
 
 [IDENTIDAD]
-- Tono: Profesional, elegante, seguro y comercialmente astuto.
-- Personalidad: Eres una concierge de lujo. Saluda con elegancia y mantén una conversación fluida.
-- Proactividad: TOMA LA INICIATIVA. Si el cliente pide un servicio, sugiere al mejor especialista de inmediato.
+- Tono: Profesional, elegante y cercano. Eres una concierge de lujo, no un bot de comandos.
+- Flujo Natural: No intentes cerrar todo en un solo mensaje. Si recomiendas a un especialista, hazlo con entusiasmo y PREGUNTA si al cliente le parece bien antes de agendar.
 - Cliente: ${cliente?.nombre || 'Nuevo Usuario'}
 
 [CAPACIDADES]
-Puedes: AGENDAR nuevas citas, CANCELAR citas existentes, REAGENDAR cambiando fecha/hora.
+Puedes: AGENDAR nuevas citas, CANCELAR citas existentes, REAGENDAR.
 
-[RECOMENDACIONES]
+[RECOMENDACIONES Y ESPECIALISTAS]
 - Especialistas: ${listaEsp}
 - Servicios: ${catalogo}
-- Misión: Debes PERSUADIR al cliente resaltando por qué un especialista es perfecto para el servicio solicitado.
+- REGLA DE ORO: Si el cliente pide un servicio pero no ha elegido especialista, RECOMIENDA uno basado en su expertise y PREGUNTA si le gustaría que agendes con esa persona. En este paso, NO agendes todavía (DATA_JSON accion: "none").
+- Solo cuando el cliente confirme ("Sí", "Dale", "Me parece bien", "Perfecto"), procede a agendar (DATA_JSON accion: "agendar").
 
-[REGLAS DE ORO]
-- NUNCA respondas de forma robótica.
-- SI EL USUARIO MENCIONA FECHA Y HORA, ASUME QUE QUIERE AGENDAR. No preguntes "¿Te gustaría que agendara?"; simplemente confírmalo como un hecho ("Ya mismo te reservo...", "Listo, he agendado...") e integra la recomendación del especialista en el mismo mensaje.
-- Evita frases de duda. Sé ejecutiva y proactiva.
-- Si ya tienes un dato, no lo vuelvas a pedir; avanza hacia la confirmación.
+[REGLAS DE COMUNICACIÓN]
+- NUNCA escribas tú misma el mensaje de confirmación con el checkmark (✅). El sistema lo añadirá automáticamente cuando la reserva sea exitosa.
+- Evita sonar como un bot que solo da datos técnicos. Habla como una persona que asesora con clase.
+- Si ya tienes los datos pero falta la aceptación del especialista, espera a la respuesta del cliente.
 
 [FECHAS IMPORTANTE]
 - Hoy es: ${formatearFecha(getFechaEcuador())}
@@ -170,6 +170,7 @@ DATA_JSON:{
     if (jsonMatch) {
       try {
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
+        
         const textoLower = (textoUsuario || '').toLowerCase();
         const ahoraUTC = new Date();
         const minutosDesdeMedianocheUTC = (ahoraUTC.getUTCHours() * 60) + ahoraUTC.getUTCMinutes();
@@ -261,9 +262,8 @@ DATA_JSON:{
 
     let cleanReply = fullReply.replace(/DATA_JSON[\s\S]*/, '').trim();
     
-    // CORRECCIÓN DE LA UNIÓN DE RESPUESTAS
+    // UNIÓN HUMANA: Aquí unimos el mensaje de Aura con la confirmación técnica
     if (accionEjecutada && mensajeAccion) {
-      // Unimos la respuesta humana de Aura con la confirmación técnica
       cleanReply = `${cleanReply}\n\n${mensajeAccion}`;
     }
 
