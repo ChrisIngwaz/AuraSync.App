@@ -177,54 +177,53 @@ DATA_JSON:{
       try {
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
         
-        // ============ CORRECCIÓN FECHA DEFINITIVA v3 ============
-        // Siempre calcular fecha basada en el texto del usuario, nunca confiar en OpenAI
-        
-                // ============ CORRECCIÓN FECHA DEFINITIVA v4 ============
-        // El servidor está en UTC, pero necesitamos calcular en hora Ecuador
+                // ============ CORRECCIÓN FECHA DEFINITIVA v5 ============
+        // Calcular fecha de mañana en Ecuador de forma robusta
         
         const textoLower = (textoUsuario || '').toLowerCase();
         
-        // Obtener fecha ACTUAL en Ecuador (no importa en qué zona esté el servidor)
+        // Crear fecha base en UTC que represente la medianoche de hoy en Ecuador
+        // Ecuador es UTC-5, entonces medianoche en Ecuador = 05:00 UTC del mismo día
         const ahoraUTC = new Date();
-        const offsetEcuador = -5 * 60; // Ecuador es UTC-5 en minutos
-        const ahoraEcuador = new Date(ahoraUTC.getTime() + (offsetEcuador * 60 * 1000));
+        const horasUTC = ahoraUTC.getUTCHours();
         
-        const year = ahoraEcuador.getUTCFullYear();
-        const month = ahoraEcuador.getUTCMonth();
-        const day = ahoraEcuador.getUTCDate();
+        // Si son antes de las 5 AM UTC, aún es "ayer" en Ecuador
+        // Si son 5 AM UTC o más, es "hoy" en Ecuador
+        const diaEnEcuador = horasUTC < 5 ? ahoraUTC.getUTCDate() - 1 : ahoraUTC.getUTCDate();
+        const mesEnEcuador = ahoraUTC.getUTCMonth(); // 0-11
+        const añoEnEcuador = ahoraUTC.getUTCFullYear();
         
-        // Calcular mañana en Ecuador
-        const mananaEcuador = new Date(Date.UTC(year, month, day + 1));
+        // Construir string de hoy en Ecuador: YYYY-MM-DD
+        const fechaHoyStr = `${añoEnEcuador}-${String(mesEnEcuador + 1).padStart(2, '0')}-${String(diaEnEcuador).padStart(2, '0')}`;
         
-        const fechaHoyStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-        const fechaMananaStr = `${mananaEcuador.getUTCFullYear()}-${String(mananaEcuador.getUTCMonth() + 1).padStart(2, '0')}-${String(mananaEcuador.getUTCDate()).padStart(2, '0')}`;
+        // Calcular mañana: sumar 1 día
+        const mañanaDate = new Date(Date.UTC(añoEnEcuador, mesEnEcuador, diaEnEcuador + 1));
+        const fechaMañanaStr = `${mañanaDate.getUTCFullYear()}-${String(mañanaDate.getUTCMonth() + 1).padStart(2, '0')}-${String(mañanaDate.getUTCDate()).padStart(2, '0')}`;
         
-        console.log('🕐 Ahora UTC:', ahoraUTC.toISOString());
-        console.log('🕐 Ahora Ecuador (calculado):', fechaHoyStr);
-        console.log('📅 Mañana Ecuador:', fechaMananaStr);
+        console.log('🔍 HOY Ecuador:', fechaHoyStr);
+        console.log('🔍 MAÑANA Ecuador:', fechaMañanaStr);
         
         let fechaFinal;
         
         if (textoLower.includes('mañana') || textoLower.includes('manana')) {
-          fechaFinal = fechaMananaStr;
-          console.log('✅ Detectado "mañana" →', fechaFinal);
+          fechaFinal = fechaMañanaStr;
+          console.log('✅ Usando MAÑANA:', fechaFinal);
         }
         else if (textoLower.includes('hoy')) {
           fechaFinal = fechaHoyStr;
-          console.log('✅ Detectado "hoy" →', fechaFinal);
+          console.log('✅ Usando HOY:', fechaFinal);
         }
         else if (datosExtraidos.cita_fecha && datosExtraidos.cita_fecha >= fechaHoyStr) {
           fechaFinal = datosExtraidos.cita_fecha;
           console.log('✅ Usando fecha OpenAI:', fechaFinal);
         }
         else {
-          fechaFinal = fechaMananaStr;
-          console.log('⚠️ Default a mañana:', fechaFinal);
+          fechaFinal = fechaMañanaStr;
+          console.log('⚠️ Default MAÑANA:', fechaFinal);
         }
         
-        console.log('📅 FECHA FINAL:', fechaFinal);
-        // ============ FIN DE CORRECCION 
+        console.log('📅 FECHA FINAL REGISTRADA:', fechaFinal);
+        // ============ FIN CORRECCIÓN ============
         
         if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
           await supabase.from('clientes').upsert({
