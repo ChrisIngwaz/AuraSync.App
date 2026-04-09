@@ -51,6 +51,16 @@ export default async function handler(req, res) {
     return res.status(200).send('<Response></Response>');
   }
 
+  // ============ DEBUG TEMPORAL ============
+  const debugFechas = {
+    serverNow: new Date().toISOString(),
+    serverDate: new Date().toDateString(),
+    ecuadorDate: new Date().toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' }),
+    ecuadorString: new Date().toLocaleString('es-EC', { timeZone: 'America/Guayaquil' })
+  };
+  console.log('🔍 DEBUG FECHAS SERVIDOR:', JSON.stringify(debugFechas));
+  // ============ FIN DEBUG ============
+
   const { Body, From, MediaUrl0 } = req.body;
   const userPhone = From.replace('whatsapp:', '').trim();
   
