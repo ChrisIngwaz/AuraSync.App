@@ -11,12 +11,9 @@ const CONFIG = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY
 };
 
-// ============ CORRECCIÓN: Zona horaria Ecuador forzada ============
 const TIMEZONE = 'America/Guayaquil';
 
-// ============ CORRECCIÓN: Funciones de fecha robustas ============
 function getFechaEcuador(offsetDias = 0) {
-  // Crear fecha en zona horaria Ecuador
   const ahora = new Date();
   const opciones = { timeZone: TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit' };
   const partes = new Intl.DateTimeFormat('en-CA', opciones).formatToParts(ahora);
@@ -79,7 +76,6 @@ export default async function handler(req, res) {
       }
     }
 
-    // ============ CARGAR CLIENTE (SIN CAMBIOS) ============
     let { data: cliente } = await supabase
       .from('clientes')
       .select('*')
@@ -88,7 +84,6 @@ export default async function handler(req, res) {
 
     const esNuevo = !cliente?.nombre;
 
-    // ============ CARGAR HISTORIAL (SIN CAMBIOS) ============
     let historialFiltrado = [];
     if (!esNuevo) {
       const { data: mensajes } = await supabase
@@ -105,14 +100,12 @@ export default async function handler(req, res) {
       console.log('⚡ Cliente nuevo detectado.');
     }
 
-    // ============ DATOS DE NEGOCIO (SIN CAMBIOS) ============
     const { data: especialistas } = await supabase.from('especialistas').select('nombre, expertise');
     const { data: servicios } = await supabase.from('servicios').select('nombre, precio, duracion');
     
     const listaEsp = especialistas?.map(e => e.nombre).join(', ') || "nuestro equipo";
     const catalogo = servicios?.map(s => `${s.nombre} ($${s.precio})`).join(', ') || "servicios";
 
-    // ============ SYSTEM PROMPT (SIN CAMBIOS) ============
     const systemPrompt = `Tu nombre es Aura, asistente de élite de AuraSync. Comunicación sofisticada, ejecutiva y proactiva.
 
 [IDENTIDAD]
@@ -151,7 +144,6 @@ DATA_JSON:{
   "cita_id": "..."
 }`;
 
-    // ============ CONSTRUIR MENSAJES PARA AI (SIN CAMBIOS) ============
     const messages = [{ role: "system", content: systemPrompt }];
     historialFiltrado.forEach(msg => {
       messages.push({ role: msg.rol === 'assistant' ? 'assistant' : 'user', content: msg.contenido });
@@ -166,7 +158,6 @@ DATA_JSON:{
 
     let fullReply = aiRes.data.choices[0].message.content;
 
-    // ============ PROCESAR JSON Y EJECUTAR ACCIÓN ============
     let datosExtraidos = {};
     let accionEjecutada = false;
     let mensajeAccion = '';
@@ -176,7 +167,30 @@ DATA_JSON:{
       try {
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
         
-        // ============ REGISTRO CLIENTE NUEVO (SIN CAMBIOS) ============
+        // ============ CORRECCIÓN FECHA: Detectar si dijo "mañana" ============
+        const textoLower = textoUsuario.toLowerCase();
+        const mencionaManana = textoLower.includes('mañana') || 
+                               textoLower.includes('mañna') || 
+                               textoLower.includes('manana');
+
+        let fechaFinal = datosExtraidos.cita_fecha;
+
+        if (mencionaManana) {
+          // Calcular mañana en Ecuador
+          const hoy = new Date();
+          const opciones = { timeZone: 'America/Guayaquil', year: 'numeric', month: '2-digit', day: '2-digit' };
+          const partes = new Intl.DateTimeFormat('en-CA', opciones).formatToParts(hoy);
+          const year = parseInt(partes.find(p => p.type === 'year').value);
+          const month = parseInt(partes.find(p => p.type === 'month').value) - 1;
+          const day = parseInt(partes.find(p => p.type === 'day').value);
+          
+          const manana = new Date(year, month, day + 1);
+          fechaFinal = manana.toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' });
+          
+          console.log('🔄 Forzando mañana:', fechaFinal, '(OpenAI:', datosExtraidos.cita_fecha + ')');
+        }
+        // ============ FIN CORRECCIÓN ============
+        
         if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
           await supabase.from('clientes').upsert({
             telefono: userPhone,
@@ -187,25 +201,8 @@ DATA_JSON:{
           cliente = { nombre: datosExtraidos.nombre, apellido: datosExtraidos.apellido || "" };
         }
 
-        // ============ CORRECCIÓN: Normalizar fecha si dice "mañana" ============
-        let fechaFinal = datosExtraidos.cita_fecha;
-        if (fechaFinal && fechaFinal.toLowerCase().includes('mañana')) {
-          fechaFinal = getFechaEcuador(1);
-          console.log('🔄 Convertida "mañana" a:', fechaFinal);
-        } else if (!fechaFinal || fechaFinal === "..." || !fechaFinal.match(/^\d{4}-\d{2}-\d{2}$/)) {
-          // Si OpenAI no dio fecha válida, inferir del contexto
-          if (textoUsuario.toLowerCase().includes('mañana')) {
-            fechaFinal = getFechaEcuador(1);
-            console.log('🔄 Inferida "mañana" del texto:', fechaFinal);
-          } else {
-            fechaFinal = getFechaEcuador(0); // Hoy como fallback
-            console.log('⚠️ Fecha no válida, usando hoy:', fechaFinal);
-          }
-        }
-
         const accion = datosExtraidos.accion || 'none';
         
-        // ============ CANCELAR CITA ============
         if (accion === 'cancelar') {
           const resultado = await cancelarCitaAirtable(userPhone, datosExtraidos.cita_id);
           mensajeAccion = resultado 
@@ -214,7 +211,6 @@ DATA_JSON:{
           accionEjecutada = true;
         }
         
-        // ============ REAGENDAR CITA ============
         else if (accion === 'reagendar') {
           if (fechaFinal && datosExtraidos.cita_hora) {
             const resultado = await reagendarCitaAirtable(userPhone, { ...datosExtraidos, cita_fecha: fechaFinal });
@@ -225,21 +221,18 @@ DATA_JSON:{
           }
         }
         
-        // ============ AGENDAR CITA (CON CORRECCIÓN DE REGISTRO DUAL) ============
         else if (accion === 'agendar' || (fechaFinal && datosExtraidos.cita_hora)) {
           const tieneFecha = fechaFinal.match(/^\d{4}-\d{2}-\d{2}$/);
           const tieneHora = datosExtraidos.cita_hora && datosExtraidos.cita_hora.match(/^\d{2}:\d{2}$/);
           
           if (tieneFecha && tieneHora && (cliente?.nombre || datosExtraidos.nombre)) {
             
-            // Buscar datos del servicio
             let servicioData = servicios?.find(s => 
               s.nombre.toLowerCase() === (datosExtraidos.cita_servicio || '').toLowerCase()
             ) || servicios?.find(s => 
               (datosExtraidos.cita_servicio || '').toLowerCase().includes(s.nombre.toLowerCase())
             ) || { nombre: datosExtraidos.cita_servicio || "Servicio", precio: 0, duracion: 60 };
 
-            // Verificar disponibilidad
             const disponible = await verificarDisponibilidadAirtable(
               fechaFinal,
               datosExtraidos.cita_hora,
@@ -260,19 +253,18 @@ DATA_JSON:{
               accionEjecutada = true;
             } else {
               
-              // ============ CORRECCIÓN CRÍTICA: REGISTRO DUAL ============
               const nombreCliente = cliente?.nombre || datosExtraidos.nombre;
               const apellidoCliente = cliente?.apellido || datosExtraidos.apellido || "";
               const especialistaFinal = disponible.especialista || datosExtraidos.cita_especialista || "Asignar";
               
-              // 1. Crear en Supabase PRIMERO
+              // ============ CAMBIO 2: Usar fechaFinal en lugar de datosExtraidos.cita_fecha ============
               console.log('💾 Registrando en Supabase...');
               const { data: citaSupabase, error: errorSupabase } = await supabase
                 .from('citas')
                 .insert({
-                  cliente_id: cliente?.id || null, // Si es nuevo, será null hasta que se registre
+                  cliente_id: cliente?.id || null,
                   servicio_id: servicioData.id || null,
-                  especialista_id: null, // Se puede buscar por nombre si es necesario
+                  especialista_id: null,
                   fecha_hora: `${fechaFinal}T${datosExtraidos.cita_hora}:00-05:00`,
                   estado: 'Confirmada',
                   nombre_cliente_aux: `${nombreCliente} ${apellidoCliente}`.trim(),
@@ -285,12 +277,11 @@ DATA_JSON:{
 
               if (errorSupabase) {
                 console.error('❌ Error Supabase:', errorSupabase);
-                // Continuar con Airtable igual, pero loguear el error
               } else {
                 console.log('✅ Supabase OK:', citaSupabase?.id);
               }
 
-              // 2. Crear en Airtable
+              // ============ CAMBIO 3: Usar fechaFinal en Airtable ============
               const citaAirtable = await crearCitaAirtable({
                 telefono: userPhone,
                 nombre: nombreCliente,
@@ -304,6 +295,7 @@ DATA_JSON:{
                 supabase_id: citaSupabase?.id || null
               });
 
+              // ============ CAMBIO 3: Usar fechaFinal en mensaje ============
               if (citaAirtable) {
                 mensajeAccion = `✅ Cita confirmada: ${formatearFecha(fechaFinal)} a las ${datosExtraidos.cita_hora} con ${especialistaFinal}.`;
               } else {
@@ -319,7 +311,6 @@ DATA_JSON:{
       }
     }
 
-    // ============ FINALIZAR RESPUESTA (SIN CAMBIOS) ============
     let cleanReply = fullReply.replace(/DATA_JSON[\s\S]*/, '').trim();
     
     if (accionEjecutada && mensajeAccion) {
@@ -342,7 +333,6 @@ DATA_JSON:{
   }
 }
 
-// ============ FUNCIÓN: Crear cita Airtable (MEJORADA) ============
 async function crearCitaAirtable(datos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
@@ -375,7 +365,6 @@ async function crearCitaAirtable(datos) {
   }
 }
 
-// ============ RESTO DE FUNCIONES (SIN CAMBIOS) ============
 async function cancelarCitaAirtable(telefono, citaId) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
