@@ -107,7 +107,7 @@ export default async function handler(req, res) {
     const listaEsp = especialistas?.map(e => `${e.nombre} (Experto en: ${e.expertise})`).join(', ') || "nuestro equipo";
     const catalogo = servicios?.map(s => `${s.nombre} ($${s.precio})`).join(', ') || "servicios";
 
-    // MEJORA DE COMUNICACIÓN: Aura ahora es más humana y conversacional
+    // MEJORA DE COMUNICACIÓN: Aura ahora es una concierge humana
     const systemPrompt = `Tu nombre es Aura, asistente de élite de AuraSync. Tu comunicación debe ser indistinguible de la de un humano: cálida, sofisticada y altamente conversacional.
 
 [IDENTIDAD]
@@ -115,19 +115,17 @@ export default async function handler(req, res) {
 - Flujo Natural: No intentes cerrar todo en un solo mensaje. Si recomiendas a un especialista, hazlo con entusiasmo y PREGUNTA si al cliente le parece bien antes de agendar.
 - Cliente: ${cliente?.nombre || 'Nuevo Usuario'}
 
-[CAPACIDADES]
-Puedes: AGENDAR nuevas citas, CANCELAR citas existentes, REAGENDAR.
-
-[RECOMENDACIONES Y ESPECIALISTAS]
+[RECOMENDACIONES]
 - Especialistas: ${listaEsp}
 - Servicios: ${catalogo}
-- REGLA DE ORO: Si el cliente pide un servicio pero no ha elegido especialista, RECOMIENDA uno basado en su expertise y PREGUNTA si le gustaría que agendes con esa persona. En este paso, NO agendes todavía (DATA_JSON accion: "none").
-- Solo cuando el cliente confirme ("Sí", "Dale", "Me parece bien", "Perfecto"), procede a agendar (DATA_JSON accion: "agendar").
+- REGLA DE ORO: Si el cliente pide un servicio pero no ha elegido especialista, RECOMIENDA uno basado en su expertise y PREGUNTA si le gustaría que agendes con esa persona. 
+- IMPORTANTE: En el mensaje donde recomiendas, NUNCA agendes. Debes poner "accion": "none" en el JSON.
+- Solo cuando el cliente confirme ("Sí", "Dale", "Me parece bien", "Perfecto"), procede a agendar poniendo "accion": "agendar".
 
 [REGLAS DE COMUNICACIÓN]
-- NUNCA escribas tú misma el mensaje de confirmación con el checkmark (✅). El sistema lo añadirá automáticamente cuando la reserva sea exitosa.
-- Evita sonar como un bot que solo da datos técnicos. Habla como una persona que asesora con clase.
-- Si ya tienes los datos pero falta la aceptación del especialista, espera a la respuesta del cliente.
+- NUNCA escribas tú misma el mensaje del checkmark (✅). El sistema lo añadirá automáticamente solo cuando la reserva sea real.
+- Evita sonar como un bot. Habla como una persona que asesora con clase.
+- Si el usuario ya dio fecha y hora, pero tú estás sugiriendo un especialista, espera a su aprobación antes de procesar la cita.
 
 [FECHAS IMPORTANTE]
 - Hoy es: ${formatearFecha(getFechaEcuador())}
@@ -169,7 +167,6 @@ DATA_JSON:{
     if (jsonMatch) {
       try {
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
-        
         const textoLower = (textoUsuario || '').toLowerCase();
         const ahoraUTC = new Date();
         const minutosDesdeMedianocheUTC = (ahoraUTC.getUTCHours() * 60) + ahoraUTC.getUTCMinutes();
@@ -215,7 +212,8 @@ DATA_JSON:{
             accionEjecutada = true;
           }
         }
-        else if (accion === 'agendar' || (fechaFinal && datosExtraidos.cita_hora)) {
+        // CORRECCIÓN CRÍTICA: Solo agendar si la acción es explícitamente "agendar"
+        else if (accion === 'agendar') {
           const tieneFecha = fechaFinal.match(/^\d{4}-\d{2}-\d{2}$/);
           const tieneHora = datosExtraidos.cita_hora && datosExtraidos.cita_hora.match(/^\d{2}:\d{2}$/);
           
@@ -261,7 +259,7 @@ DATA_JSON:{
 
     let cleanReply = fullReply.replace(/DATA_JSON[\s\S]*/, '').trim();
     
-    // UNIÓN HUMANA: Aquí unimos el mensaje de Aura con la confirmación técnica
+    // UNIÓN HUMANA: Unimos el mensaje de Aura con la confirmación técnica
     if (accionEjecutada && mensajeAccion) {
       cleanReply = `${cleanReply}\n\n${mensajeAccion}`;
     }
