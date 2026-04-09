@@ -188,7 +188,6 @@ DATA_JSON:{
           fechaFinal = manana.toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' });
           
           console.log('🔄 Forzando mañana:', fechaFinal, '(OpenAI:', datosExtraidos.cita_fecha + ')');
-        }
         // ============ FIN CORRECCIÓN ============
         
         if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
