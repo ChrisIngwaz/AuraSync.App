@@ -13,36 +13,40 @@ const CONFIG = {
 
 const TIMEZONE = 'America/Guayaquil';
 
+// CORREGIDO: getFechaEcuador para evitar desfases de zona horaria del servidor
 function getFechaEcuador(offsetDias = 0) {
   const ahora = new Date();
-  const opciones = { timeZone: TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit' };
-  const partes = new Intl.DateTimeFormat('en-CA', opciones).formatToParts(ahora);
+  const opciones = { timeZone: TIMEZONE, year: 'numeric', month: 'numeric', day: 'numeric' };
+  const formatter = new Intl.DateTimeFormat('en-US', opciones);
+  const parts = formatter.formatToParts(ahora);
   
-  const year = partes.find(p => p.type === 'year').value;
-  const month = partes.find(p => p.type === 'month').value;
-  const day = partes.find(p => p.type === 'day').value;
+  const year = parts.find(p => p.type === 'year').value;
+  const month = parts.find(p => p.type === 'month').value;
+  const day = parts.find(p => p.type === 'day').value;
   
-  const fecha = new Date(year, month - 1, day);
-  fecha.setDate(fecha.getDate() + offsetDias);
+  const fecha = new Date(Date.UTC(year, month - 1, day));
+  fecha.setUTCDate(fecha.getUTCDate() + offsetDias);
   
-  return fecha.toLocaleDateString('en-CA', { timeZone: TIMEZONE });
+  return fecha.toISOString().split('T')[0];
 }
 
+// CORREGIDO: formatearFecha para que no reste un día al mostrar el mensaje
 function formatearFecha(fechaISO) {
   if (!fechaISO || !fechaISO.match(/^\d{4}-\d{2}-\d{2}$/)) {
     console.error('Fecha inválida:', fechaISO);
     return fechaISO || 'fecha por confirmar';
   }
   
-  const [anio, mes, dia] = fechaISO.split('-');
-  const fecha = new Date(parseInt(anio), parseInt(mes) - 1, parseInt(dia));
+  const [anio, mes, dia] = fechaISO.split('-').map(Number);
+  // Forzamos a UTC al mediodía para evitar que toLocaleDateString cambie el día por desfase de zona horaria
+  const fecha = new Date(Date.UTC(anio, mes - 1, dia, 12, 0, 0));
   
   return fecha.toLocaleDateString('es-EC', { 
     weekday: 'long', 
     year: 'numeric', 
     month: 'long', 
     day: 'numeric',
-    timeZone: TIMEZONE
+    timeZone: 'UTC'
   });
 }
 
@@ -177,34 +181,27 @@ DATA_JSON:{
       try {
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
         
-                // ============ CORRECCIÓN FECHA v6 - Matemática pura ============
-        
+        // ============ CORRECCIÓN FECHA v6 - Matemática pura ============
         const textoLower = (textoUsuario || '').toLowerCase();
         
-        // Paso 1: Qué hora es en Ecuador ahora (en minutos desde medianoche)
         const ahoraUTC = new Date();
         const minutosDesdeMedianocheUTC = (ahoraUTC.getUTCHours() * 60) + ahoraUTC.getUTCMinutes();
-        const minutosEcuador = minutosDesdeMedianocheUTC - (5 * 60); // Restar 5 horas (UTC-5)
+        const minutosEcuador = minutosDesdeMedianocheUTC - (5 * 60); 
         
-        // Si el resultado es negativo, aún es "ayer" en Ecuador
         const esAyerEnEcuador = minutosEcuador < 0;
         
-        // Paso 2: Calcular día de hoy en Ecuador (0-31)
         const diaHoyUTC = ahoraUTC.getUTCDate();
-        const mesHoyUTC = ahoraUTC.getUTCMonth(); // 0-11
+        const mesHoyUTC = ahoraUTC.getUTCMonth(); 
         const añoHoyUTC = ahoraUTC.getUTCFullYear();
         
-        // Crear fecha base: hoy en Ecuador
         const fechaBase = new Date(Date.UTC(añoHoyUTC, mesHoyUTC, diaHoyUTC));
         if (esAyerEnEcuador) {
-          fechaBase.setUTCDate(fechaBase.getUTCDate() - 1); // Retroceder 1 día
+          fechaBase.setUTCDate(fechaBase.getUTCDate() - 1);
         }
         
-        // Paso 3: Calcular mañana = hoy + 1 día
         const fechaMañana = new Date(fechaBase);
         fechaMañana.setUTCDate(fechaBase.getUTCDate() + 1);
         
-        // Paso 4: Formatear ambas fechas
         const formatear = (fecha) => {
           return `${fecha.getUTCFullYear()}-${String(fecha.getUTCMonth() + 1).padStart(2, '0')}-${String(fecha.getUTCDate()).padStart(2, '0')}`;
         };
@@ -212,26 +209,17 @@ DATA_JSON:{
         const fechaHoyStr = formatear(fechaBase);
         const fechaMañanaStr = formatear(fechaMañana);
         
-        console.log('🕐 UTC ahora:', ahoraUTC.toISOString());
-        console.log('🕐 Es ayer en Ecuador:', esAyerEnEcuador);
-        console.log('📅 HOY Ecuador:', fechaHoyStr);
-        console.log('📅 MAÑANA Ecuador:', fechaMañanaStr);
-        
-        // Paso 5: Decidir qué usar
-        let fechaFinal = fechaMañanaStr; // Default: mañana
+        let fechaFinal = fechaMañanaStr; 
         
         if (textoLower.includes('hoy')) {
           fechaFinal = fechaHoyStr;
-          console.log('✅ Usando HOY');
         } else if (textoLower.includes('mañana') || textoLower.includes('manana')) {
           fechaFinal = fechaMañanaStr;
-          console.log('✅ Usando MAÑANA');
         } else if (datosExtraidos.cita_fecha && datosExtraidos.cita_fecha >= fechaHoyStr) {
           fechaFinal = datosExtraidos.cita_fecha;
-          console.log('✅ Usando fecha OpenAI');
         }
         
-        console.log('📅 FECHA FINAL:', fechaFinal);
+        console.log('📅 FECHA FINAL CALCULADA:', fechaFinal);
         // ============ FIN CORRECCIÓN ============
         
         if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
@@ -300,7 +288,6 @@ DATA_JSON:{
               const apellidoCliente = cliente?.apellido || datosExtraidos.apellido || "";
               const especialistaFinal = disponible.especialista || datosExtraidos.cita_especialista || "Asignar";
               
-              // ============ CAMBIO 2: Usar fechaFinal en lugar de datosExtraidos.cita_fecha ============
               console.log('💾 Registrando en Supabase...');
               const { data: citaSupabase, error: errorSupabase } = await supabase
                 .from('citas')
@@ -320,11 +307,8 @@ DATA_JSON:{
 
               if (errorSupabase) {
                 console.error('❌ Error Supabase:', errorSupabase);
-              } else {
-                console.log('✅ Supabase OK:', citaSupabase?.id);
               }
 
-              // ============ CAMBIO 3: Usar fechaFinal en Airtable ============
               const citaAirtable = await crearCitaAirtable({
                 telefono: userPhone,
                 nombre: nombreCliente,
@@ -338,7 +322,6 @@ DATA_JSON:{
                 supabase_id: citaSupabase?.id || null
               });
 
-              // ============ CAMBIO 3: Usar fechaFinal en mensaje ============
               if (citaAirtable) {
                 mensajeAccion = `✅ Cita confirmada: ${formatearFecha(fechaFinal)} a las ${datosExtraidos.cita_hora} con ${especialistaFinal}.`;
               } else {
