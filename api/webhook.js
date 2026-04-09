@@ -191,7 +191,6 @@ const fechaManana = manana.toLocaleDateString('en-CA', { timeZone: 'America/Guay
 let fechaFinal = mencionaManana ? fechaManana : (datosExtraidos.cita_fecha || getFechaEcuador(0));
 
 console.log('📅 Fecha final:', fechaFinal, mencionaManana ? '(forzada mañana)' : '(del JSON)');
-        }
         // ============ FIN CORRECCIÓN ============
         
         if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
