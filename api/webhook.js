@@ -177,27 +177,61 @@ DATA_JSON:{
       try {
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
         
-        // ============ CORRECCIÓN FECHA: Detectar si dijo "mañana" ============
-        const textoLower = textoUsuario.toLowerCase();
-        const mencionaManana = textoLower.includes('mañana') || 
-                               textoLower.includes('mañna') || 
-                               textoLower.includes('manana');
-
-        let fechaFinal = datosExtraidos.cita_fecha;
-
-        if (mencionaManana) {
-          // Calcular mañana en Ecuador
-          const hoy = new Date();
-          const opciones = { timeZone: 'America/Guayaquil', year: 'numeric', month: '2-digit', day: '2-digit' };
-          const partes = new Intl.DateTimeFormat('en-CA', opciones).formatToParts(hoy);
-          const year = parseInt(partes.find(p => p.type === 'year').value);
-          const month = parseInt(partes.find(p => p.type === 'month').value) - 1;
-          const day = parseInt(partes.find(p => p.type === 'day').value);
-          
-          const manana = new Date(year, month, day + 1);
-          fechaFinal = manana.toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' });
-          
-          console.log('🔄 Forzando mañana:', fechaFinal, '(OpenAI:', datosExtraidos.cita_fecha + ')');
+                // ============ CORRECCIÓN FECHA v6 - Matemática pura ============
+        
+        const textoLower = (textoUsuario || '').toLowerCase();
+        
+        // Paso 1: Qué hora es en Ecuador ahora (en minutos desde medianoche)
+        const ahoraUTC = new Date();
+        const minutosDesdeMedianocheUTC = (ahoraUTC.getUTCHours() * 60) + ahoraUTC.getUTCMinutes();
+        const minutosEcuador = minutosDesdeMedianocheUTC - (5 * 60); // Restar 5 horas (UTC-5)
+        
+        // Si el resultado es negativo, aún es "ayer" en Ecuador
+        const esAyerEnEcuador = minutosEcuador < 0;
+        
+        // Paso 2: Calcular día de hoy en Ecuador (0-31)
+        const diaHoyUTC = ahoraUTC.getUTCDate();
+        const mesHoyUTC = ahoraUTC.getUTCMonth(); // 0-11
+        const añoHoyUTC = ahoraUTC.getUTCFullYear();
+        
+        // Crear fecha base: hoy en Ecuador
+        const fechaBase = new Date(Date.UTC(añoHoyUTC, mesHoyUTC, diaHoyUTC));
+        if (esAyerEnEcuador) {
+          fechaBase.setUTCDate(fechaBase.getUTCDate() - 1); // Retroceder 1 día
+        }
+        
+        // Paso 3: Calcular mañana = hoy + 1 día
+        const fechaMañana = new Date(fechaBase);
+        fechaMañana.setUTCDate(fechaBase.getUTCDate() + 1);
+        
+        // Paso 4: Formatear ambas fechas
+        const formatear = (fecha) => {
+          return `${fecha.getUTCFullYear()}-${String(fecha.getUTCMonth() + 1).padStart(2, '0')}-${String(fecha.getUTCDate()).padStart(2, '0')}`;
+        };
+        
+        const fechaHoyStr = formatear(fechaBase);
+        const fechaMañanaStr = formatear(fechaMañana);
+        
+        console.log('🕐 UTC ahora:', ahoraUTC.toISOString());
+        console.log('🕐 Es ayer en Ecuador:', esAyerEnEcuador);
+        console.log('📅 HOY Ecuador:', fechaHoyStr);
+        console.log('📅 MAÑANA Ecuador:', fechaMañanaStr);
+        
+        // Paso 5: Decidir qué usar
+        let fechaFinal = fechaMañanaStr; // Default: mañana
+        
+        if (textoLower.includes('hoy')) {
+          fechaFinal = fechaHoyStr;
+          console.log('✅ Usando HOY');
+        } else if (textoLower.includes('mañana') || textoLower.includes('manana')) {
+          fechaFinal = fechaMañanaStr;
+          console.log('✅ Usando MAÑANA');
+        } else if (datosExtraidos.cita_fecha && datosExtraidos.cita_fecha >= fechaHoyStr) {
+          fechaFinal = datosExtraidos.cita_fecha;
+          console.log('✅ Usando fecha OpenAI');
+        }
+        
+        console.log('📅 FECHA FINAL:', fechaFinal);
         // ============ FIN CORRECCIÓN ============
         
         if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
