@@ -71,6 +71,8 @@ export default async function handler(req, res) {
       textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
     }
 
+    // CORRECCIÓN: Definimos 'cliente' para que no falle el registro
+    const { data: cliente } = await supabase.from('clientes').select('*').eq('telefono', userPhone).maybeSingle();
     const citasUsuario = await buscarCitasUsuario(userPhone);
     const ocupacionGlobal = await obtenerOcupacionGlobal();
     
