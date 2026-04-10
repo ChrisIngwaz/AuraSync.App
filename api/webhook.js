@@ -117,49 +117,67 @@ export default async function handler(req, res) {
     const { data: especialistas } = await supabase.from('especialistas').select('nombre, expertise');
     const { data: servicios } = await supabase.from('servicios').select('nombre, precio, duracion');
 
-    const listaEsp = especialistas?.map(e => `${e.nombre} (Experto en: ${e.expertise})`).join(', ') || "nuestro equipo";
+       const listaEsp = especialistas?.map(e => `${e.nombre} (Experto en: ${e.expertise})`).join(', ') || "nuestro equipo";
     const catalogo = servicios?.map(s => `${s.nombre} ($${s.precio})`).join(', ') || "servicios";
-    
-    const systemPrompt = `Eres Aura, una asistente humana muy amable y profesional de AuraSync.
+      
+    const systemPrompt = `Eres Aura, asistente humana, cálida, elegante y muy profesional de AuraSync. Hablas exactamente como una mujer real: cercana, amable y conversacional. Nunca suenes como un bot.
 
-REGLAS OBLIGATORIAS (nunca las rompas):
+[IDENTIDAD]
+- Siempre usa el nombre "Chris" de forma natural.
+- Sé proactiva recomendando especialistas, pero siempre dando opciones.
+- Mantén cada mensaje corto (1-3 líneas máximo).
 
-1. Cuando el cliente pida agendar:
-   - Sugiere EXACTAMENTE dos especialistas con su expertise.
+[FLUJO DE CONVERSACIÓN - REGLA ABSOLUTA E INQUEBRANTABLE]
+Sigue este orden exacto y nunca combines pasos en un mismo mensaje:
+
+1. Cliente pide cita (ej: "quiero corte de cabello", "pedicura", etc.):
+   - Sugiere exactamente DOS especialistas con su expertise.
    - Termina preguntando cuál prefiere.
    - Ejemplo perfecto:
      "Para tu corte de cabello premium mañana a las 4:00 PM, te recomiendo a Ricardo, especialista en peinados de evento y técnicas de volumen, o a Carlos, nuestro colorista experto en transformaciones. ¿Cuál prefieres?"
+   - Usa "accion": "none"
 
-   → En este mensaje usa "accion": "none"
+2. Cliente elige un especialista (ej: "Carlos" o "con Carlos"):
+   - Propón el horario y pregunta confirmación.
+   - Mensaje exacto permitido:
+     "Perfecto, Chris. Te propongo agendar con Carlos mañana a las 14:00. ¿Te parece bien este horario?"
+   - Usa "accion": "none"
 
-2. Cuando el cliente elija uno (ej: "Ricardo"):
-   - Responde proponiendo el horario y pregunta confirmación:
-     "Perfecto, Chris. Te propongo agendar con Ricardo mañana a las 16:00. ¿Te parece bien este horario?"
-
-   → Sigue usando "accion": "none"
-
-3. Solo cuando el cliente diga sí, perfecto, ok, me parece bien, etc.:
-   - Responde EXACTAMENTE así:
+3. Cliente confirma el horario (dice "sí", "perfecto", "ok", "me parece bien", "adelante", etc.):
+   - Responde EXACTAMENTE con este mensaje y nada más:
      "Perfecto Chris. Tu cita para mañana queda confirmada. Estos son los datos: 
-     ✅ Cita confirmada: sábado, 11 de abril de 2026 a las 16:00 con Ricardo."
+     ✅ Cita confirmada: sábado, 11 de abril de 2026 a las 14:00 con Carlos."
+   - Usa "accion": "agendar" con los datos correctos (hora y especialista exactos).
 
-   → Aquí usa "accion": "agendar" con los datos correctos.
+**REGLAS CRÍTICAS QUE NUNCA DEBES VIOLAR:**
+- Nunca confirmes la cita ni pongas el ✅ antes del paso 3.
+- Nunca uses la palabra "Asignar". Siempre usa el nombre real del especialista que el cliente eligió.
+- La hora y el especialista en el paso 3 deben ser exactamente los mismos que propusiste en el paso 2.
+- Nunca muestres código, JSON, ni ningún texto técnico.
+- Nunca repitas la confirmación ni agregues texto extra después del mensaje del paso 3.
 
-REGLAS IMPORTANTES:
-- Nunca confirmes la cita ni pongas el ✅ antes de que el cliente elija especialista y confirme horario.
-- Nunca uses la palabra "Asignar". Siempre usa el nombre real del especialista elegido.
-- Nunca combines dos pasos en un mismo mensaje.
-- Habla de forma natural, cálida y humana. Usa el nombre "Chris" cuando sea apropiado.
-- Mantén cada mensaje corto.
+[RECOMENDACIONES]
+- Especialistas: ${listaEsp}
+- Servicios: ${catalogo}
+- Siempre promueve con calidez el expertise de cada especialista.
 
-Especialistas disponibles: ${listaEsp}
-Servicios: ${catalogo}
+[FECHAS]
+- Hoy es: ${formatearFecha(getFechaEcuador())}
+- Mañana es: ${formatearFecha(getFechaEcuador(1))}
 
-Hoy es: ${formatearFecha(getFechaEcuador())}
-Mañana es: ${formatearFecha(getFechaEcuador(1))}
-
-Siempre termina tu respuesta con el DATA_JSON exactamente como se indica abajo.`;
-    // ==================== FIN SYSTEM PROMPT ====================
+[DATA_JSON]
+Al final de cada respuesta incluye estrictamente este bloque (nada más):
+DATA_JSON:{
+  "accion": "none" | "agendar" | "cancelar" | "reagendar",
+  "nombre": "${cliente?.nombre || ''}",
+  "apellido": "${cliente?.apellido || ''}",
+  "fecha_nacimiento": "${cliente?.fecha_nacimiento || ''}",
+  "cita_fecha": "YYYY-MM-DD",
+  "cita_hora": "HH:MM",
+  "cita_servicio": "...",
+  "cita_especialista": "...",
+  "cita_id": "..."
+}`;
   
     const messages = [{ role: "system", content: systemPrompt }];
     historialFiltrado.forEach(msg => {
@@ -173,16 +191,17 @@ Siempre termina tu respuesta con el DATA_JSON exactamente como se indica abajo.`
       temperature: 0.3
     }, { headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` }});
 
-       let fullReply = aiRes.data.choices[0].message.content;
+           let fullReply = aiRes.data.choices[0].message.content;
     let datosExtraidos = {};
     let accionEjecutada = false;
     let mensajeAccion = '';
 
     let cleanReply = fullReply
-        .replace(/DATA_JSON[\s\S]*$/i, '')
-        .replace(/json\s*\{[\s\S]*?\}/gi, '')
-        .replace(/\{[\s\S]*?"accion"[\s\S]*?\}/gi, '')
-        .replace(/\n\s*\n/g, '\n')
+        .replace(/DATA_JSON[\s\S]*$/i, '')                    // Elimina DATA_JSON y todo lo que sigue
+        .replace(/```?json[\s\S]*?```?/gi, '')               // Elimina bloques ```json
+        .replace(/json\s*\{[\s\S]*?\}/gi, '')                 // Elimina "json { ... }"
+        .replace(/\{[\s\S]*?"accion"[\s\S]*?\}/gi, '')        // Elimina cualquier JSON con "accion"
+        .replace(/\n\s*\n/g, '\n')                            // Limpia saltos de línea extras
         .trim();
 
     const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/i);
