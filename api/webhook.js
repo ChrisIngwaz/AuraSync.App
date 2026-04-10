@@ -191,21 +191,24 @@ DATA_JSON:{
       temperature: 0.3
     }, { headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` }});
 
-           let fullReply = aiRes.data.choices[0].message.content;
+              let fullReply = aiRes.data.choices[0].message.content;
     let datosExtraidos = {};
     let accionEjecutada = false;
     let mensajeAccion = '';
 
-    let cleanReply = fullReply
-        .replace(/DATA_JSON[\s\S]*$/i, '')                    // Elimina DATA_JSON y todo lo que sigue
-        .replace(/```?json[\s\S]*?```?/gi, '')               // Elimina bloques ```json
-        .replace(/json\s*\{[\s\S]*?\}/gi, '')                 // Elimina "json { ... }"
-        .replace(/\{[\s\S]*?"accion"[\s\S]*?\}/gi, '')        // Elimina cualquier JSON con "accion"
-        .replace(/\n\s*\n/g, '\n')                            // Limpia saltos de línea extras
+    // ==================== LIMPIEZA MEJORADA - ELIMINA JSON VISIBLE ====================
+    // Reutilizamos la variable cleanReply que ya existe en tu código
+    cleanReply = fullReply
+        .replace(/DATA_JSON[\s\S]*$/i, '')
+        .replace(/```?json[\s\S]*?```?/gi, '')
+        .replace(/json\s*\{[\s\S]*?\}/gi, '')
+        .replace(/\{[\s\S]*?"accion"[\s\S]*?\}/gi, '')
+        .replace(/\n\s*\n/g, '\n')
         .trim();
+    // ==================== FIN LIMPIEZA ====================
 
     const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/i);
-    
+   
     if (jsonMatch) {
       try {
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
