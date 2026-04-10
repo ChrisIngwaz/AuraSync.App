@@ -1,6 +1,8 @@
-Tengo este código, y la solución que brinda es que sea la Asistente Coordinadora más eficiente del mundo. Actualmente ya registra citas, usa especialistas, tiempo de servicios, precio y para que el manejo de la agenda sea infalible. Su nombre es Aura, y debe expresarse como un humano, el usuario o cliente debe sentir que habla con un humano. Se expresa muy bien, pero en un mismo mensaje saluda, verifica, y confirma la cita, lo que la hace ver como el típico bot. Corrige solamente este tema para que su fluidez de conversación se note pero en varios mensajes como si fuese una conversación natural entre 2 personas. No hagas ningún otro cambio en el código porque debemos mantener lo que ya está funcionando bien. Este es el código: import axios from 'axios';
+import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
+
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
 const CONFIG = {
   AIRTABLE_BASE_ID: process.env.AIRTABLE_BASE_ID,
   AIRTABLE_TOKEN: process.env.AIRTABLE_TOKEN,
@@ -8,7 +10,9 @@ const CONFIG = {
   DEEPGRAM_API_KEY: process.env.DEEPGRAM_API_KEY,
   OPENAI_API_KEY: process.env.OPENAI_API_KEY
 };
+
 const TIMEZONE = 'America/Guayaquil';
+
 // CORREGIDO: getFechaEcuador para evitar desfases de zona horaria del servidor
 function getFechaEcuador(offsetDias = 0) {
   const ahora = new Date();
@@ -25,6 +29,7 @@ function getFechaEcuador(offsetDias = 0) {
  
   return fecha.toISOString().split('T')[0];
 }
+
 // CORREGIDO: formatearFecha para que no reste un día al mostrar el mensaje
 function formatearFecha(fechaISO) {
   if (!fechaISO || !fechaISO.match(/^\d{4}-\d{2}-\d{2}$/)) {
@@ -33,7 +38,6 @@ function formatearFecha(fechaISO) {
   }
  
   const [anio, mes, dia] = fechaISO.split('-').map(Number);
-  // Forzamos a UTC al mediodía para evitar que toLocaleDateString cambie el día por desfase de zona horaria
   const fecha = new Date(Date.UTC(anio, mes - 1, dia, 12, 0, 0));
  
   return fecha.toLocaleDateString('es-EC', {
@@ -44,23 +48,15 @@ function formatearFecha(fechaISO) {
     timeZone: 'UTC'
   });
 }
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(200).send('<Response></Response>');
   }
-  // ============ DEBUG TEMPORAL ============
-  const debugFechas = {
-    serverNow: new Date().toISOString(),
-    serverDate: new Date().toDateString(),
-    ecuadorDate: new Date().toLocaleDateString('en-CA', { timeZone: 'America/Guayaquil' }),
-    ecuadorString: new Date().toLocaleString('es-EC', { timeZone: 'America/Guayaquil' })
-  };
-  console.log('🔍 DEBUG FECHAS SERVIDOR:', JSON.stringify(debugFechas));
-  // ============ FIN DEBUG ============
+
   const { Body, From, MediaUrl0 } = req.body;
-  const userPhone = From.replace('whatsapp:', '').trim();
+  const userPhone = From ? From.replace('whatsapp:', '').trim() : '';
  
-  console.log(`\n📱 ${userPhone}`);
   try {
     let textoUsuario = Body || "";
    
@@ -75,16 +71,17 @@ export default async function handler(req, res) {
           }
         );
         textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
-        console.log('🎤:', textoUsuario);
       } catch (error) {
         return res.status(200).send('<Response><Message>Error con audio. Escribime por favor.</Message></Response>');
       }
     }
+
     let { data: cliente } = await supabase
       .from('clientes')
       .select('*')
       .eq('telefono', userPhone)
       .maybeSingle();
+
     const esNuevo = !cliente?.nombre;
     let historialFiltrado = [];
     if (!esNuevo) {
@@ -98,52 +95,44 @@ export default async function handler(req, res) {
       if (mensajes) {
         historialFiltrado = mensajes.reverse();
       }
-    } else {
-      console.log('⚡ Cliente nuevo detectado.');
     }
+
     const { data: especialistas } = await supabase.from('especialistas').select('nombre, expertise');
-    const { data: servicios } = await supabase.from('servicios').select('nombre, precio, duracion');
+    const { data: servicios } = await supabase.from('servicios').select('id, nombre, precio, duracion');
    
-       const listaEsp = especialistas?.map(e => `${e.nombre} (Experto en: ${e.expertise})`).join(', ') || "nuestro equipo";
+    const listaEsp = especialistas?.map(e => `${e.nombre} (Experto en: ${e.expertise})`).join(', ') || "nuestro equipo";
     const catalogo = servicios?.map(s => `${s.nombre} ($${s.precio})`).join(', ') || "servicios";
 
-    // ==================== SYSTEM PROMPT ACTUALIZADO (VERSIÓN ESTRICTA) ====================
+    // ==================== SYSTEM PROMPT MEJORADO PARA FLUIDEZ NATURAL ====================
     const systemPrompt = `Tu nombre es Aura, asistente de élite de AuraSync. Tu comunicación debe ser indistinguible de la de un humano: cálida, elegante, natural y persuasiva.
 
 [IDENTIDAD]
 - Tono: Profesional pero cercano, sofisticado y conversacional.
 - Personalidad: Eres una concierge de lujo muy humana.
 
-[FLUJO DE CONVERSACIÓN - REGLA MUY ESTRICTA]
-Debes seguir este orden SIN EXCEPCIÓN y NUNCA combinar pasos:
+[FLUJO DE CONVERSACIÓN - REGLA DE ORO]
+Para que la conversación sea natural, NUNCA hagas más de una cosa a la vez. Sigue este flujo estrictamente:
 
-1. Cliente pide cita → Sugieres mínimo 2 especialistas con su expertise y preguntas cuál prefiere.
+1. FASE DE DESCUBRIMIENTO: Si el cliente pide cita, saluda cálidamente y pregunta qué servicio busca (si no lo dijo) o sugiere especialistas. NUNCA propongas horarios en este paso.
+   - Ejemplo: "¡Hola! Qué gusto saludarte. Claro que sí, para ese servicio te recomiendo a Elena o a Juan, ambos son excelentes. ¿Con quién preferirías agendar?"
 
-2. Cliente elige especialista → Propones un horario concreto y preguntas si le parece bien. 
-   Ejemplo correcto:
-   "Perfecto, Chris. Te propongo agendar con Elena hoy a la 1:00 PM. ¿Te parece bien este horario?"
+2. FASE DE PROPUESTA: Una vez elegido el especialista, propón UN SOLO horario concreto y pregunta si le queda bien.
+   - Ejemplo: "Excelente elección. Elena tiene un espacio disponible hoy a las 3:00 PM. ¿Te vendría bien ese horario?"
 
-3. Cliente confirma el horario (dice sí, me parece bien, ok, perfecto, etc.) → 
-   **Solo en ese momento** envías el mensaje de confirmación final:
-   "✅ Cita confirmada: viernes, 10 de abril de 2026 a las 13:00 con Elena."
+3. FASE DE CONFIRMACIÓN: SOLO cuando el cliente acepte el horario (diga "sí", "dale", "perfecto", etc.), procedes a confirmar.
+   - Ejemplo: "¡Perfecto! Ya quedó todo listo. Te espero entonces hoy a las 3:00 PM."
 
-**IMPORTANTE:**
-- Nunca envíes la confirmación con ✅ en el mismo mensaje donde propones el horario.
-- Nunca actives la acción de agendar antes de que el cliente confirme explícitamente el horario propuesto.
-- En el paso 2 solo propones y preguntas. NO confirmes todavía.
+[RESTRICCIONES CRÍTICAS]
+- NUNCA saludes, sugieras especialista y propongas horario en el mismo mensaje.
+- NUNCA confirmes la cita (accion: agendar) hasta que el cliente haya dicho que SÍ al horario propuesto.
+- Si el cliente aún no confirma el horario, usa "accion": "none".
+- Mantén tus respuestas breves, como si estuvieras chateando por WhatsApp.
 
-[RECOMENDACIONES Y PERSUASIÓN]
+[RECOMENDACIONES]
 - Especialistas: ${listaEsp}
 - Servicios: ${catalogo}
-- Siempre recomienda mínimo dos especialistas cuando sea posible.
 
-[REGLAS DE ORO]
-- Mantén mensajes cortos y naturales.
-- Nunca combines propuesta de horario + confirmación final.
-- Espera siempre la respuesta afirmativa del cliente antes de confirmar la cita.
-- Habla como una mujer amable y profesional.
-
-[FECHAS IMPORTANTE]
+[FECHAS]
 - Hoy es: ${formatearFecha(getFechaEcuador())}
 - Mañana es: ${formatearFecha(getFechaEcuador(1))}
 
@@ -161,18 +150,20 @@ DATA_JSON:{
   "cita_id": "..."
 }
 
-Regla crítica: Solo pon "accion": "agendar" cuando el cliente ya haya confirmado el horario. Mientras solo estés proponiendo, usa "accion": "none".`;
-    // ==================== FIN SYSTEM PROMPT ====================
+Regla crítica: Solo pon "accion": "agendar" cuando el cliente ya haya confirmado el horario propuesto en el mensaje anterior.`;
+
     const messages = [{ role: "system", content: systemPrompt }];
     historialFiltrado.forEach(msg => {
       messages.push({ role: msg.rol === 'assistant' ? 'assistant' : 'user', content: msg.contenido });
     });
     messages.push({ role: "user", content: textoUsuario });
+
     const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: "gpt-4o",
       messages: messages,
       temperature: 0.3
     }, { headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` }});
+
     let fullReply = aiRes.data.choices[0].message.content;
     let datosExtraidos = {};
     let accionEjecutada = false;
@@ -183,15 +174,11 @@ Regla crítica: Solo pon "accion": "agendar" cuando el cliente ya haya confirmad
       try {
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
        
-        // ============ CORRECCIÓN FECHA v6 - Matemática pura ============
         const textoLower = (textoUsuario || '').toLowerCase();
-       
         const ahoraUTC = new Date();
         const minutosDesdeMedianocheUTC = (ahoraUTC.getUTCHours() * 60) + ahoraUTC.getUTCMinutes();
         const minutosEcuador = minutosDesdeMedianocheUTC - (5 * 60);
-       
         const esAyerEnEcuador = minutosEcuador < 0;
-       
         const diaHoyUTC = ahoraUTC.getUTCDate();
         const mesHoyUTC = ahoraUTC.getUTCMonth();
         const añoHoyUTC = ahoraUTC.getUTCFullYear();
@@ -215,13 +202,10 @@ Regla crítica: Solo pon "accion": "agendar" cuando el cliente ya haya confirmad
        
         if (textoLower.includes('mañana') || textoLower.includes('manana')) {
           fechaFinal = fechaMañanaStr;
-          console.log('✅ Detectado: MAÑANA');
         } else if (textoLower.includes('hoy')) {
           fechaFinal = fechaHoyStr;
-          console.log('✅ Detectado: HOY');
         } else if (datosExtraidos.cita_fecha && datosExtraidos.cita_fecha >= fechaHoyStr) {
           fechaFinal = datosExtraidos.cita_fecha;
-          console.log('✅ Usando fecha OpenAI:', fechaFinal);
         }
        
         if (datosExtraidos.nombre && datosExtraidos.nombre !== "..." && esNuevo) {
@@ -233,43 +217,39 @@ Regla crítica: Solo pon "accion": "agendar" cuando el cliente ya haya confirmad
           }, { onConflict: 'telefono' });
           cliente = { nombre: datosExtraidos.nombre, apellido: datosExtraidos.apellido || "" };
         }
+
         const accion = datosExtraidos.accion || 'none';
        
         if (accion === 'cancelar') {
           const resultado = await cancelarCitaAirtable(userPhone, datosExtraidos.cita_id);
-          mensajeAccion = resultado
-            ? "✅ Cita cancelada exitosamente."
-            : "No encontré citas activas para cancelar.";
+          mensajeAccion = resultado ? "✅ Cita cancelada." : "No encontré citas activas.";
           accionEjecutada = true;
         }
-       
         else if (accion === 'reagendar') {
           if (fechaFinal && datosExtraidos.cita_hora) {
             const resultado = await reagendarCitaAirtable(userPhone, { ...datosExtraidos, cita_fecha: fechaFinal });
-            mensajeAccion = resultado
-              ? `✅ Cita reprogramada para ${formatearFecha(fechaFinal)} a las ${datosExtraidos.cita_hora}.`
-              : "No pude reprogramar. ¿Tienes una cita activa?";
+            mensajeAccion = resultado ? `✅ Cita reprogramada.` : "No pude reprogramar.";
             accionEjecutada = true;
           }
         }
-       
-        else if (accion === 'agendar' || (fechaFinal && datosExtraidos.cita_hora)) {
+        else if (accion === 'agendar') {
           const tieneFecha = fechaFinal.match(/^\d{4}-\d{2}-\d{2}$/);
           const tieneHora = datosExtraidos.cita_hora && datosExtraidos.cita_hora.match(/^\d{2}:\d{2}$/);
          
           if (tieneFecha && tieneHora && (cliente?.nombre || datosExtraidos.nombre)) {
-           
             let servicioData = servicios?.find(s =>
               s.nombre.toLowerCase() === (datosExtraidos.cita_servicio || '').toLowerCase()
             ) || servicios?.find(s =>
               (datosExtraidos.cita_servicio || '').toLowerCase().includes(s.nombre.toLowerCase())
-            ) || { nombre: datosExtraidos.cita_servicio || "Servicio", precio: 0, duracion: 60 };
+            ) || { id: null, nombre: datosExtraidos.cita_servicio || "Servicio", precio: 0, duracion: 60 };
+
             const disponible = await verificarDisponibilidadAirtable(
               fechaFinal,
               datosExtraidos.cita_hora,
               datosExtraidos.cita_especialista,
               servicioData.duracion
             );
+
             if (!disponible.ok) {
               const alternativa = await buscarAlternativaAirtable(
                 fechaFinal,
@@ -278,11 +258,9 @@ Regla crítica: Solo pon "accion": "agendar" cuando el cliente ya haya confirmad
                 servicioData.duracion,
                 especialistas?.map(e => e.nombre)
               );
-             
               mensajeAccion = `Ese horario no está disponible. ${alternativa.mensaje}`;
               accionEjecutada = true;
             } else {
-             
               const nombreCliente = cliente?.nombre || datosExtraidos.nombre;
               const apellidoCliente = cliente?.apellido || datosExtraidos.apellido || "";
               const especialistaFinal = disponible.especialista || datosExtraidos.cita_especialista || "Asignar";
@@ -301,6 +279,7 @@ Regla crítica: Solo pon "accion": "agendar" cuando el cliente ya haya confirmad
                 })
                 .select()
                 .single();
+
               const citaAirtable = await crearCitaAirtable({
                 telefono: userPhone,
                 nombre: nombreCliente,
@@ -313,29 +292,32 @@ Regla crítica: Solo pon "accion": "agendar" cuando el cliente ya haya confirmad
                 duracion: servicioData.duracion,
                 supabase_id: citaSupabase?.id || null
               });
+
               if (citaAirtable) {
                 mensajeAccion = `✅ Cita confirmada: ${formatearFecha(fechaFinal)} a las ${datosExtraidos.cita_hora} con ${especialistaFinal}.`;
               } else {
-                mensajeAccion = "Tuve un problema registrando la cita. ¿Lo intentamos de nuevo?";
+                mensajeAccion = "Error registrando la cita.";
               }
               accionEjecutada = true;
             }
           }
         }
       } catch (e) {
-        console.error('Error procesando JSON:', e.message);
+        console.error('Error JSON:', e.message);
       }
     }
+
     let cleanReply = fullReply.replace(/DATA_JSON[\s\S]*/, '').trim();
    
     if (accionEjecutada && mensajeAccion) {
-      // Unimos la respuesta humana de Aura con la confirmación técnica
       cleanReply = `${cleanReply}\n\n${mensajeAccion}`;
     }
+
     await supabase.from('conversaciones').insert([
       { telefono: userPhone, rol: 'user', contenido: textoUsuario },
       { telefono: userPhone, rol: 'assistant', contenido: cleanReply }
     ]);
+
     res.setHeader('Content-Type', 'text/xml');
     return res.status(200).send(`<Response><Message>${cleanReply}</Message></Response>`);
   } catch (err) {
@@ -343,6 +325,9 @@ Regla crítica: Solo pon "accion": "agendar" cuando el cliente ya haya confirmad
     return res.status(200).send('<Response><Message>Disculpa, tuve un momento de distracción. ¿Me repites por favor? 🌸</Message></Response>');
   }
 }
+
+// --- Funciones Auxiliares Airtable ---
+
 async function crearCitaAirtable(datos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
@@ -369,10 +354,9 @@ async function crearCitaAirtable(datos) {
       headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
     });
     return true;
-  } catch (error) {
-    return false;
-  }
+  } catch (error) { return false; }
 }
+
 async function cancelarCitaAirtable(telefono, citaId) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
@@ -388,10 +372,9 @@ async function cancelarCitaAirtable(telefono, citaId) {
       headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
     });
     return true;
-  } catch (error) {
-    return false;
-  }
+  } catch (error) { return false; }
 }
+
 async function reagendarCitaAirtable(telefono, datos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
@@ -410,10 +393,9 @@ async function reagendarCitaAirtable(telefono, datos) {
       headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
     });
     return true;
-  } catch (error) {
-    return false;
-  }
+  } catch (error) { return false; }
 }
+
 async function verificarDisponibilidadAirtable(fecha, hora, especialistaSolicitado, duracionMinutos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
@@ -438,11 +420,10 @@ async function verificarDisponibilidadAirtable(fecha, hora, especialistaSolicita
       }
     }
     return { ok: true, especialista: especialistaSolicitado || 'Asignar' };
-  } catch (error) {
-    return { ok: true, especialista: especialistaSolicitado };
-  }
+  } catch (error) { return { ok: true, especialista: especialistaSolicitado }; }
 }
-async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSolicitado, duracion) {
+
+async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSolicitado, duracion, especialistas) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     const filter = encodeURIComponent(`AND({Fecha} = '${fecha}', {Estado} = 'Confirmada')`);
@@ -473,7 +454,5 @@ async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSoli
       horaPropuesta += 15;
     }
     return { mensaje: "Ese día está completo." };
-  } catch (error) {
-    return { mensaje: "¿Te funciona otro horario?" };
-  }
+  } catch (error) { return { mensaje: "¿Te funciona otro horario?" }; }
 }
