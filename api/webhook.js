@@ -61,7 +61,6 @@ export default async function handler(req, res) {
   try {
     let textoUsuario = Body || "";
    
-    // Procesar audio si existe
     if (MediaUrl0) {
       try {
         const deepgramRes = await axios.post(
@@ -78,7 +77,6 @@ export default async function handler(req, res) {
       }
     }
 
-    // Obtener datos del cliente y especialistas/servicios
     let { data: cliente } = await supabase.from('clientes').select('*').eq('telefono', userPhone).maybeSingle();
     const { data: especialistas } = await supabase.from('especialistas').select('nombre, expertise');
     const { data: servicios } = await supabase.from('servicios').select('id, nombre, precio, duracion');
@@ -93,7 +91,6 @@ export default async function handler(req, res) {
     const listaEsp = especialistas?.map(e => `${e.nombre} (Experto en: ${e.expertise})`).join(', ') || "nuestro equipo";
     const catalogo = servicios?.map(s => `${s.nombre} ($${s.precio})`).join(', ') || "servicios";
 
-    // SYSTEM PROMPT - REGLA DE ORO PARA FLUIDEZ NATURAL
     const systemPrompt = `Tu nombre es Aura, asistente de élite de AuraSync. Tu comunicación debe ser indistinguible de la de un humano: cálida, elegante, natural y persuasiva.
 
 [IDENTIDAD]
@@ -144,7 +141,6 @@ DATA_JSON:{
     let accionEjecutada = false;
     let mensajeAccion = '';
 
-    // Extracción robusta de JSON (soporta bloques de código markdown)
     const jsonMatch = fullReply.match(/(?:DATA_JSON\s*:?\s*)?(?:```json\s*)?(\{[\s\S]*?"accion"[\s\S]*?\})(?:\s*```)?/i);
    
     if (jsonMatch) {
@@ -152,12 +148,10 @@ DATA_JSON:{
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
         const textoLower = (textoUsuario || '').toLowerCase();
         
-        // Lógica de fechas (hoy/mañana)
-        let fechaFinal = getFechaEcuador(1); // Default mañana
+        let fechaFinal = getFechaEcuador(1); 
         if (textoLower.includes('hoy')) fechaFinal = getFechaEcuador(0);
         else if (datosExtraidos.cita_fecha?.match(/^\d{4}-\d{2}-\d{2}$/)) fechaFinal = datosExtraidos.cita_fecha;
 
-        // Registro de cliente nuevo
         if (datosExtraidos.nombre && esNuevo) {
           await supabase.from('clientes').upsert({ telefono: userPhone, nombre: datosExtraidos.nombre.trim(), apellido: datosExtraidos.apellido || "" }, { onConflict: 'telefono' });
         }
@@ -177,7 +171,6 @@ DATA_JSON:{
             } else {
               const especialistaFinal = disponible.especialista || datosExtraidos.cita_especialista || "Asignar";
               
-              // Guardar en Supabase
               const { data: citaSupabase } = await supabase.from('citas').insert({
                 cliente_id: cliente?.id || null,
                 servicio_id: servicioData.id || null,
@@ -188,7 +181,6 @@ DATA_JSON:{
                 duracion_aux: servicioData.duracion
               }).select().single();
 
-              // Guardar en Airtable
               const citaAirtable = await crearCitaAirtable({
                 telefono: userPhone,
                 nombre: datosExtraidos.nombre || cliente?.nombre,
@@ -214,11 +206,9 @@ DATA_JSON:{
       } catch (e) { console.error('Error JSON:', e.message); }
     }
 
-    // Limpieza de respuesta para WhatsApp (elimina JSON y bloques de código)
     let cleanReply = fullReply.split(/DATA_JSON|```json/i)[0].trim();
     if (accionEjecutada && mensajeAccion) cleanReply = `${cleanReply}\n\n${mensajeAccion}`;
 
-    // Guardar conversación y responder
     await supabase.from('conversaciones').insert([{ telefono: userPhone, rol: 'user', contenido: textoUsuario }, { telefono: userPhone, rol: 'assistant', contenido: cleanReply }]);
     res.setHeader('Content-Type', 'text/xml');
     return res.status(200).send(`<Response><Message>${cleanReply}</Message></Response>`);
@@ -229,4 +219,96 @@ DATA_JSON:{
   }
 }
 
-// --- Funciones de Airtable (crearCitaAirtable, verificarDisponibilidadAirtable, etc.) se mantienen igual ---
+// --- FUNCIONES DE APOYO AIRTABLE ---
+
+async function crearCitaAirtable(datos) {
+  try {
+    const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
+    const [h, min] = datos.hora.split(':').map(Number);
+    const [anio, mes, dia] = datos.fecha.split('-').map(Number);
+    const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
+    const payload = {
+      records: [{
+        fields: {
+          "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
+          "Servicio": datos.servicio,
+          "Fecha": fechaUTC,
+          "Hora": datos.hora,
+          "Especialista": datos.especialista,
+          "Teléfono": datos.telefono,
+          "Estado": "Confirmada",
+          "Importe estimado": datos.precio,
+          "Duración estimada (minutos)": datos.duracion,
+          "ID_Supabase": datos.supabase_id || null
+        }
+      }]
+    };
+    await axios.post(url, payload, {
+      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
+    });
+    return true;
+  } catch (error) { return false; }
+}
+
+async function verificarDisponibilidadAirtable(fecha, hora, especialistaSolicitado, duracionMinutos) {
+  try {
+    const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
+    const filter = encodeURIComponent(`AND({Fecha} = '${fecha}', {Estado} = 'Confirmada')`);
+    const response = await axios.get(`${url}?filterByFormula=${filter}`, {
+      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
+    });
+    const citas = response.data.records;
+    const [h, m] = hora.split(':').map(Number);
+    const inicioNuevo = h * 60 + m;
+    const finNuevo = inicioNuevo + (duracionMinutos || 60);
+    
+    if (inicioNuevo < 540) return { ok: false, mensaje: "Nuestro horario comienza a las 9:00." };
+    if (finNuevo > 1080) return { ok: false, mensaje: "Ese horario excede nuestra jornada." };
+    
+    for (const cita of citas) {
+      const [he, me] = cita.fields.Hora.split(':').map(Number);
+      const inicioExistente = he * 60 + me;
+      const finExistente = inicioExistente + (cita.fields['Duración estimada (minutos)'] || 60);
+      if (inicioNuevo < finExistente && finNuevo > inicioExistente) {
+        if (!especialistaSolicitado || cita.fields.Especialista === especialistaSolicitado) {
+          return { ok: false, mensaje: `${cita.fields.Especialista} no está disponible.` };
+        }
+      }
+    }
+    return { ok: true, especialista: especialistaSolicitado || 'Asignar' };
+  } catch (error) { return { ok: true, especialista: especialistaSolicitado }; }
+}
+
+async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSolicitado, duracion) {
+  try {
+    const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
+    const filter = encodeURIComponent(`AND({Fecha} = '${fecha}', {Estado} = 'Confirmada')`);
+    const response = await axios.get(`${url}?filterByFormula=${filter}`, {
+      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
+    });
+    const ocupados = response.data.records.map(c => ({
+      hora: c.fields.Hora,
+      duracion: c.fields['Duración estimada (minutos)'] || 60,
+      especialista: c.fields.Especialista
+    }));
+    const [h, m] = horaSolicitada.split(':').map(Number);
+    let horaPropuesta = h * 60 + m;
+    while (horaPropuesta <= 1080 - duracion) {
+      let conflicto = false;
+      for (const ocup of ocupados) {
+        const [ho, mo] = ocup.hora.split(':').map(Number);
+        if (horaPropuesta < (ho * 60 + mo + ocup.duracion) && (horaPropuesta + duracion) > (ho * 60 + mo)) {
+          if (!especialistaSolicitado || ocup.especialista === especialistaSolicitado) {
+            conflicto = true; break;
+          }
+        }
+      }
+      if (!conflicto) {
+        const horaStr = `${Math.floor(horaPropuesta/60).toString().padStart(2,'0')}:${(horaPropuesta%60).toString().padStart(2,'0')}`;
+        return { mensaje: `¿Te funciona a las ${horaStr}?`, hora: horaStr };
+      }
+      horaPropuesta += 15;
+    }
+    return { mensaje: "Ese día está completo." };
+  } catch (error) { return { mensaje: "¿Te funciona otro horario?" }; }
+}
