@@ -77,7 +77,13 @@ app.post('/api/whatsapp', async (req, res) => {
       textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
     }
 
-    const { data: cliente } = await supabase.from('clientes').select('*').eq('telefono', userPhone).maybeSingle();
+    // CORRECCIÓN CRÍTICA: Definición explícita de cliente
+    let cliente = null;
+    const supabaseRes = await supabase.from('clientes').select('*').eq('telefono', userPhone).maybeSingle();
+    if (supabaseRes.data) {
+      cliente = supabaseRes.data;
+    }
+
     const citasUsuario = await buscarCitasUsuario(userPhone);
     const ocupacionGlobal = await obtenerOcupacionGlobal();
     
@@ -166,6 +172,7 @@ DATA_JSON:{ "accion": "none"|"agendar"|"cancelar"|"reagendar", "cita_id": "...",
     return res.status(200).send(`<Response>${xmlMessages}</Response>`);
 
   } catch (err) {
+    console.error('Error General:', err.message);
     return res.status(200).send('<Response><Message>Disculpa, tuve un momento de distracción. 🌸</Message></Response>');
   }
 });
@@ -209,8 +216,10 @@ async function reagendarCitaAirtable(telefono, datos) {
     const oldRecord = busqueda.data.records.find((r) => r.id === datos.cita_id) || busqueda.data.records[0];
     const recordId = oldRecord.id;
     
+    // 1. Borramos la vieja físicamente
     await axios.delete(`${url}/${recordId}`, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` } });
     
+    // 2. Creamos la nueva con los datos actualizados
     const [h, min] = datos.cita_hora.split(':').map(Number);
     const [anio, mes, dia] = datos.cita_fecha.split('-').map(Number);
     const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
