@@ -173,12 +173,19 @@ Siempre termina tu respuesta con el DATA_JSON exactamente como se indica abajo.`
       temperature: 0.3
     }, { headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` }});
 
-    let fullReply = aiRes.data.choices[0].message.content;
-
+       let fullReply = aiRes.data.choices[0].message.content;
     let datosExtraidos = {};
     let accionEjecutada = false;
     let mensajeAccion = '';
-    const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/);
+
+    let cleanReply = fullReply
+        .replace(/DATA_JSON[\s\S]*$/i, '')
+        .replace(/json\s*\{[\s\S]*?\}/gi, '')
+        .replace(/\{[\s\S]*?"accion"[\s\S]*?\}/gi, '')
+        .replace(/\n\s*\n/g, '\n')
+        .trim();
+
+    const jsonMatch = fullReply.match(/DATA_JSON\s*:?\s*(\{[\s\S]*?\})/i);
     
     if (jsonMatch) {
       try {
