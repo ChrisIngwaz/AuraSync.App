@@ -13,7 +13,7 @@ const CONFIG = {
 
 const TIMEZONE = 'America/Guayaquil';
 
-// --- FUNCIONES DE APOYO (DEFINIDAS ARRIBA PARA EVITAR ERRORES DE CARGA) ---
+// --- FUNCIONES DE APOYO ---
 
 function getFechaEcuador(offsetDias = 0) {
   const ahora = new Date();
@@ -75,7 +75,73 @@ async function crearCitaAirtable(datos) {
     });
     return true;
   } catch (error) {
-    console.error('Error Airtable Create:', error.response?.data || error.message);
+    return false;
+  }
+}
+
+async function cancelarCitaAirtable(telefono, citaId) {
+  try {
+    const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
+    const filter = encodeURIComponent(`AND({Teléfono} = '${telefono}', {Estado} = 'Confirmada')`);
+    const busqueda = await axios.get(`${url}?filterByFormula=${filter}&maxRecords=1`, {
+      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
+    });
+    if (busqueda.data.records.length === 0) return false;
+    
+    const record = busqueda.data.records[0];
+    const recordId = citaId || record.id;
+    const supabaseId = record.fields.ID_Supabase;
+
+    await axios.patch(`${url}`, {
+      records: [{ id: recordId, fields: { "Estado": "Cancelada" } }]
+    }, {
+      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
+    });
+
+    if (supabaseId) {
+      await supabase.from('citas').update({ estado: 'Cancelada' }).eq('id', supabaseId);
+    }
+
+    return true;
+  } catch (error) {
+    console.error('Error al cancelar cita:', error.message);
+    return false;
+  }
+}
+
+async function reagendarCitaAirtable(telefono, datos) {
+  try {
+    const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
+    const filter = encodeURIComponent(`AND({Teléfono} = '${telefono}', {Estado} = 'Confirmada')`);
+    const busqueda = await axios.get(`${url}?filterByFormula=${filter}&maxRecords=1`, {
+      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
+    });
+    if (busqueda.data.records.length === 0) return false;
+    
+    const record = busqueda.data.records[0];
+    const recordId = datos.cita_id || record.id;
+    const supabaseId = record.fields.ID_Supabase;
+
+    const [h, min] = datos.cita_hora.split(':').map(Number);
+    const [anio, mes, dia] = datos.cita_fecha.split('-').map(Number);
+    const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
+
+    await axios.patch(`${url}`, {
+      records: [{ id: recordId, fields: { "Fecha": fechaUTC, "Hora": datos.cita_hora, "Estado": "Confirmada" } }]
+    }, {
+      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
+    });
+
+    if (supabaseId) {
+      await supabase.from('citas').update({ 
+        fecha_hora: `${datos.cita_fecha}T${datos.cita_hora}:00-05:00`,
+        estado: 'Confirmada' 
+      }).eq('id', supabaseId);
+    }
+
+    return true;
+  } catch (error) {
+    console.error('Error al reagendar cita:', error.message);
     return false;
   }
 }
@@ -91,12 +157,9 @@ async function verificarDisponibilidadAirtable(fecha, hora, especialistaSolicita
     const [h, m] = hora.split(':').map(Number);
     const inicioNuevo = h * 60 + m;
     const finNuevo = inicioNuevo + (duracionMinutos || 60);
-    
     if (inicioNuevo < 540) return { ok: false, mensaje: "Nuestro horario comienza a las 9:00." };
     if (finNuevo > 1080) return { ok: false, mensaje: "Ese horario excede nuestra jornada." };
-    
     for (const cita of citas) {
-      if (!cita.fields.Hora) continue;
       const [he, me] = cita.fields.Hora.split(':').map(Number);
       const inicioExistente = he * 60 + me;
       const finExistente = inicioExistente + (cita.fields['Duración estimada (minutos)'] || 60);
@@ -108,19 +171,18 @@ async function verificarDisponibilidadAirtable(fecha, hora, especialistaSolicita
     }
     return { ok: true, especialista: especialistaSolicitado || 'Asignar' };
   } catch (error) {
-    console.error('Error Airtable Check:', error.response?.data || error.message);
     return { ok: true, especialista: especialistaSolicitado };
   }
 }
 
-async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSolicitado, duracion) {
+async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSolicitado, duracion, especialistas) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     const filter = encodeURIComponent(`AND({Fecha} = '${fecha}', {Estado} = 'Confirmada')`);
     const response = await axios.get(`${url}?filterByFormula=${filter}`, {
       headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
     });
-    const ocupados = response.data.records.map(c => ({
+    const ocupados = response.data.records.map((c) => ({
       hora: c.fields.Hora,
       duracion: c.fields['Duración estimada (minutos)'] || 60,
       especialista: c.fields.Especialista
@@ -130,7 +192,6 @@ async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSoli
     while (horaPropuesta <= 1080 - duracion) {
       let conflicto = false;
       for (const ocup of ocupados) {
-        if (!ocup.hora) continue;
         const [ho, mo] = ocup.hora.split(':').map(Number);
         if (horaPropuesta < (ho * 60 + mo + ocup.duracion) && (horaPropuesta + duracion) > (ho * 60 + mo)) {
           if (!especialistaSolicitado || ocup.especialista === especialistaSolicitado) {
@@ -150,7 +211,7 @@ async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSoli
   }
 }
 
-// --- HANDLER PRINCIPAL (EXPORTADO PARA VERCEL) ---
+// --- HANDLER PRINCIPAL ---
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -212,6 +273,14 @@ Para que la conversación sea natural, NUNCA hagas más de una cosa a la vez. Si
 - Si el cliente aún no confirma el horario, usa "accion": "none".
 - Mantén tus respuestas breves, como si estuvieras chateando por WhatsApp.
 
+[CANCELACIONES Y REAGENDAMIENTOS]
+- Si el cliente quiere cancelar: Confirma primero si está seguro. Una vez confirmado, usa "accion": "cancelar".
+- Si el cliente quiere cambiar su cita: Pregunta por el nuevo horario/día. Sigue el flujo de propuesta y confirmación. Una vez que acepte el nuevo horario, usa "accion": "reagendar".
+
+[RECOMENDACIONES]
+- Especialistas: ${listaEsp}
+- Servicios: ${catalogo}
+
 [FECHAS]
 - Hoy es: ${formatearFecha(getFechaEcuador())}
 - Mañana es: ${formatearFecha(getFechaEcuador(1))}
@@ -225,11 +294,14 @@ DATA_JSON:{
   "cita_fecha": "YYYY-MM-DD",
   "cita_hora": "HH:MM",
   "cita_servicio": "...",
-  "cita_especialista": "..."
+  "cita_especialista": "...",
+  "cita_id": "..."
 }`;
 
     const messages = [{ role: "system", content: systemPrompt }];
-    historialFiltrado.forEach(msg => messages.push({ role: msg.rol === 'assistant' ? 'assistant' : 'user', content: msg.contenido }));
+    historialFiltrado.forEach(msg => {
+      messages.push({ role: msg.rol === 'assistant' ? 'assistant' : 'user', content: msg.contenido });
+    });
     messages.push({ role: "user", content: textoUsuario });
 
     const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', {
@@ -242,7 +314,6 @@ DATA_JSON:{
     let datosExtraidos = {};
     let accionEjecutada = false;
     let mensajeAccion = '';
-
     const jsonMatch = fullReply.match(/(?:DATA_JSON\s*:?\s*)?(?:```json\s*)?(\{[\s\S]*?"accion"[\s\S]*?\})(?:\s*```)?/i);
    
     if (jsonMatch) {
@@ -252,19 +323,41 @@ DATA_JSON:{
         
         let fechaFinal = getFechaEcuador(1); 
         if (textoLower.includes('hoy')) fechaFinal = getFechaEcuador(0);
-        else if (datosExtraidos.cita_fecha?.match(/^\d{4}-\d{2}-\d{2}$/)) fechaFinal = datosExtraidos.cita_fecha;
+        else if (datosExtraidos.cita_fecha && datosExtraidos.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/)) fechaFinal = datosExtraidos.cita_fecha;
 
         if (datosExtraidos.nombre && esNuevo) {
-          await supabase.from('clientes').upsert({ telefono: userPhone, nombre: datosExtraidos.nombre.trim(), apellido: datosExtraidos.apellido || "" }, { onConflict: 'telefono' });
+          await supabase.from('clientes').upsert({
+            telefono: userPhone,
+            nombre: datosExtraidos.nombre.trim(),
+            apellido: datosExtraidos.apellido || ""
+          }, { onConflict: 'telefono' });
         }
 
         const accion = datosExtraidos.accion || 'none';
        
-        if (accion === 'agendar') {
-          const tieneHora = datosExtraidos.cita_hora?.match(/^\d{2}:\d{2}$/);
-          if (fechaFinal && tieneHora) {
-            let servicioData = servicios?.find(s => s.nombre.toLowerCase().includes((datosExtraidos.cita_servicio || '').toLowerCase())) || { id: null, nombre: "Servicio", precio: 0, duracion: 60 };
-            
+        if (accion === 'cancelar') {
+          const resultado = await cancelarCitaAirtable(userPhone, datosExtraidos.cita_id);
+          mensajeAccion = resultado ? "✅ Cita cancelada exitosamente." : "No encontré citas activas para cancelar.";
+          accionEjecutada = true;
+        }
+        else if (accion === 'reagendar') {
+          if (fechaFinal && datosExtraidos.cita_hora) {
+            let servicioData = (servicios?.find(s => (datosExtraidos.cita_servicio || '').toLowerCase().includes(s.nombre.toLowerCase())) || { id: null, nombre: "Servicio", precio: 0, duracion: 60 });
+            const disponible = await verificarDisponibilidadAirtable(fechaFinal, datosExtraidos.cita_hora, datosExtraidos.cita_especialista, servicioData.duracion);
+
+            if (!disponible.ok) {
+              const alternativa = await buscarAlternativaAirtable(fechaFinal, datosExtraidos.cita_hora, datosExtraidos.cita_especialista, servicioData.duracion);
+              mensajeAccion = `Ese horario no está disponible para reagendar. ${alternativa.mensaje}`;
+            } else {
+              const resultado = await reagendarCitaAirtable(userPhone, { ...datosExtraidos, cita_fecha: fechaFinal });
+              mensajeAccion = resultado ? `✅ Cita reprogramada para ${formatearFecha(fechaFinal)} a las ${datosExtraidos.cita_hora}.` : "No encontré una cita activa para reprogramar.";
+            }
+            accionEjecutada = true;
+          }
+        }
+        else if (accion === 'agendar') {
+          if (fechaFinal && datosExtraidos.cita_hora) {
+            let servicioData = (servicios?.find(s => (datosExtraidos.cita_servicio || '').toLowerCase().includes(s.nombre.toLowerCase())) || { id: null, nombre: "Servicio", precio: 0, duracion: 60 });
             const disponible = await verificarDisponibilidadAirtable(fechaFinal, datosExtraidos.cita_hora, datosExtraidos.cita_especialista, servicioData.duracion);
 
             if (!disponible.ok) {
@@ -272,7 +365,6 @@ DATA_JSON:{
               mensajeAccion = `Ese horario no está disponible. ${alternativa.mensaje}`;
             } else {
               const especialistaFinal = disponible.especialista || datosExtraidos.cita_especialista || "Asignar";
-              
               const { data: citaSupabase } = await supabase.from('citas').insert({
                 cliente_id: cliente?.id || null,
                 servicio_id: servicioData.id || null,
@@ -305,9 +397,7 @@ DATA_JSON:{
             accionEjecutada = true;
           }
         }
-      } catch (e) { 
-        console.error('Error JSON:', e.message); 
-      }
+      } catch (e) { console.error('Error JSON:', e.message); }
     }
 
     let cleanReply = fullReply.split(/DATA_JSON|```json/i)[0].trim();
@@ -318,7 +408,7 @@ DATA_JSON:{
     return res.status(200).send(`<Response><Message>${cleanReply}</Message></Response>`);
 
   } catch (err) {
-    console.error('❌ Error General:', err.message);
+    console.error('❌ Error:', err.message);
     return res.status(200).send('<Response><Message>Lo siento, tuve un problema. ¿Me repites por favor? 🌸</Message></Response>');
   }
 }
