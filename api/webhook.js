@@ -13,7 +13,7 @@ const CONFIG = {
 
 const TIMEZONE = 'America/Guayaquil';
 
-// ============ FUNCIONES DE FECHA (CORREGIDAS SEGÚN TU CÓDIGO FUNCIONAL) ============
+// ============ FUNCIONES DE FECHA ============
 
 function getFechaEcuador(offsetDias = 0) {
   const ahora = new Date();
@@ -87,7 +87,7 @@ function generarSugerenciaEspecialistas(especialistas, servicioSolicitado) {
   return sugerencias.join('\n\n');
 }
 
-// ============ FUNCIONES AIRTABLE (CORREGIDAS) ============
+// ============ FUNCIONES AIRTABLE ============
 
 async function obtenerCitasOcupadas(fecha) {
   try {
@@ -107,12 +107,10 @@ async function obtenerCitasOcupadas(fecha) {
   }
 }
 
-// CORREGIDO: Ahora convierte correctamente Ecuador (UTC-5) a UTC para Airtable
 async function crearCitaAirtable(datos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     
-    // CORRECCIÓN CRÍTICA: Convertir fecha Ecuador a UTC sumando 5 horas
     const [h, min] = datos.hora.split(':').map(Number);
     const [anio, mes, dia] = datos.fecha.split('-').map(Number);
     const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
@@ -122,8 +120,8 @@ async function crearCitaAirtable(datos) {
         fields: {
           "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
           "Servicio": datos.servicio,
-          "Fecha": fechaUTC,  // Airtable recibe UTC, muestra en hora local
-          "Hora": datos.hora, // Hora original Ecuador (HH:MM)
+          "Fecha": fechaUTC,
+          "Hora": datos.hora,
           "Especialista": datos.especialista,
           "Teléfono": datos.telefono,
           "Estado": "Confirmada",
@@ -193,7 +191,6 @@ async function reagendarCitaAirtable(telefono, datos) {
 
     const record = busqueda.data.records[0];
     
-    // CORREGIDO: También convertir a UTC en reagendamiento
     const [h, min] = datos.cita_hora.split(':').map(Number);
     const [anio, mes, dia] = datos.cita_fecha.split('-').map(Number);
     const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
@@ -307,7 +304,7 @@ export default async function handler(req, res) {
     const { data: especialistas } = await supabase.from('especialistas').select('id, nombre, expertise');
     const { data: servicios } = await supabase.from('servicios').select('id, nombre, precio, duracion');
 
-    // 3. CALCULAR FECHAS (USANDO FUNCIÓN CORREGIDA)
+    // 3. CALCULAR FECHAS
     const fechaHoy = getFechaEcuador(0);
     const fechaManana = getFechaEcuador(1);
     
@@ -315,7 +312,13 @@ export default async function handler(req, res) {
     const mencionaManana = textoLower.includes('mañana') || textoLower.includes('manana');
     const mencionaHoy = textoLower.includes('hoy');
     
-    const fechaReferencia = mencionaManana ? fechaManana : fechaHoy;
+    // CORRECCIÓN: Determinar fecha de referencia basada en el mensaje del usuario
+    let fechaReferencia = fechaHoy;
+    if (mencionaManana) {
+      fechaReferencia = fechaManana;
+    } else if (mencionaHoy) {
+      fechaReferencia = fechaHoy;
+    }
 
     // 4. CONSULTAR AGENDA
     const citasOcupadas = await obtenerCitasOcupadas(fechaReferencia);
@@ -414,6 +417,7 @@ DATA_JSON:{
           cliente = nuevoCliente;
         }
 
+        // USAR SIEMPRE fechaReferencia (la que determinamos del mensaje del usuario)
         let fechaFinal = fechaReferencia;
 
         // Buscar servicio y especialista
@@ -450,9 +454,11 @@ DATA_JSON:{
             const fechaHoraISO = `${fechaFinal}T${data.cita_hora}:00-05:00`;
             
             console.log('🕐 Registrando cita:', {
-              fecha: fechaFinal,
+              fechaFinal: fechaFinal,
               hora: data.cita_hora,
-              timestamp: fechaHoraISO
+              timestamp: fechaHoraISO,
+              mencionaManana: mencionaManana,
+              mencionaHoy: mencionaHoy
             });
 
             const { data: citaSupabase, error: errorSupabase } = await supabase
@@ -473,7 +479,7 @@ DATA_JSON:{
               throw errorSupabase;
             }
 
-            // Crear en Airtable (ahora con conversión UTC correcta)
+            // Crear en Airtable
             await crearCitaAirtable({
               telefono: userPhone,
               nombre: cliente?.nombre || data.nombre,
@@ -487,6 +493,7 @@ DATA_JSON:{
               supabase_id: citaSupabase?.id
             });
 
+            // CORRECCIÓN: Usar fechaFinal (que es fechaReferencia) en el mensaje de confirmación
             mensajeFinal = `✅ ¡Excelente elección, ${cliente?.nombre || data.nombre || ''}! Tu cita está confirmada:\n\n📅 ${formatearFecha(fechaFinal)} a las ${data.cita_hora}\n💇‍♀️ ${servicio.nombre}\n👤 Con ${especialista.nombre}\n\nTe esperamos con los brazos abiertos para consentirte. ✨`;
             accionEjecutada = true;
           }
