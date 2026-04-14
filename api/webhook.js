@@ -13,36 +13,34 @@ const CONFIG = {
 
 const TIMEZONE = 'America/Guayaquil';
 
-// ============ FUNCIONES DE FECHA CORREGIDAS ============
+// ============ FUNCIONES DE FECHA (CORREGIDAS SEGÚN TU CÓDIGO FUNCIONAL) ============
 
 function getFechaEcuador(offsetDias = 0) {
-  // Crear fecha en zona horaria Ecuador directamente
   const ahora = new Date();
-  const opciones = { 
-    timeZone: TIMEZONE, 
-    year: 'numeric', 
-    month: '2-digit', 
-    day: '2-digit' 
-  };
-  const fechaEcuador = new Intl.DateTimeFormat('en-CA', opciones).format(ahora);
-  
-  if (offsetDias === 0) return fechaEcuador;
-  
-  // Sumar días si es necesario
-  const fecha = new Date(fechaEcuador + 'T12:00:00');
-  fecha.setDate(fecha.getDate() + offsetDias);
+  const opciones = { timeZone: TIMEZONE, year: 'numeric', month: 'numeric', day: 'numeric' };
+  const formatter = new Intl.DateTimeFormat('en-US', opciones);
+  const parts = formatter.formatToParts(ahora);
+ 
+  const year = parts.find(p => p.type === 'year')?.value || '2026';
+  const month = parts.find(p => p.type === 'month')?.value || '1';
+  const day = parts.find(p => p.type === 'day')?.value || '1';
+ 
+  const fecha = new Date(Date.UTC(parseInt(year), parseInt(month) - 1, parseInt(day)));
+  fecha.setUTCDate(fecha.getUTCDate() + offsetDias);
+ 
   return fecha.toISOString().split('T')[0];
 }
 
 function formatearFecha(fechaISO) {
   if (!fechaISO || !fechaISO.match(/^\d{4}-\d{2}-\d{2}$/)) return fechaISO;
-  const fecha = new Date(fechaISO + 'T12:00:00-05:00');
+  const [anio, mes, dia] = fechaISO.split('-').map(Number);
+  const fecha = new Date(Date.UTC(anio, mes - 1, dia, 12, 0, 0));
   return fecha.toLocaleDateString('es-EC', { 
     weekday: 'long', 
     year: 'numeric', 
     month: 'long', 
     day: 'numeric',
-    timeZone: TIMEZONE
+    timeZone: 'UTC'
   });
 }
 
@@ -89,7 +87,7 @@ function generarSugerenciaEspecialistas(especialistas, servicioSolicitado) {
   return sugerencias.join('\n\n');
 }
 
-// ============ FUNCIONES AIRTABLE ============
+// ============ FUNCIONES AIRTABLE (CORREGIDAS) ============
 
 async function obtenerCitasOcupadas(fecha) {
   try {
@@ -109,18 +107,23 @@ async function obtenerCitasOcupadas(fecha) {
   }
 }
 
+// CORREGIDO: Ahora convierte correctamente Ecuador (UTC-5) a UTC para Airtable
 async function crearCitaAirtable(datos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     
-    // CORRECCIÓN: Enviar fecha y hora como strings simples, Airtable los interpretará según su configuración
+    // CORRECCIÓN CRÍTICA: Convertir fecha Ecuador a UTC sumando 5 horas
+    const [h, min] = datos.hora.split(':').map(Number);
+    const [anio, mes, dia] = datos.fecha.split('-').map(Number);
+    const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
+    
     const payload = {
       records: [{
         fields: {
           "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
           "Servicio": datos.servicio,
-          "Fecha": datos.fecha,           // YYYY-MM-DD
-          "Hora": datos.hora,             // HH:MM
+          "Fecha": fechaUTC,  // Airtable recibe UTC, muestra en hora local
+          "Hora": datos.hora, // Hora original Ecuador (HH:MM)
           "Especialista": datos.especialista,
           "Teléfono": datos.telefono,
           "Estado": "Confirmada",
@@ -131,7 +134,7 @@ async function crearCitaAirtable(datos) {
       }]
     };
     
-    console.log('📤 Airtable - Fecha:', datos.fecha, 'Hora:', datos.hora);
+    console.log('📤 Airtable - Fecha UTC:', fechaUTC, 'Hora Ecuador:', datos.hora);
     
     await axios.post(url, payload, {
       headers: {
@@ -141,7 +144,7 @@ async function crearCitaAirtable(datos) {
     });
     return true;
   } catch (error) {
-    console.error('Error Airtable:', error.message);
+    console.error('Error Airtable:', error.response?.data || error.message);
     return false;
   }
 }
@@ -189,11 +192,17 @@ async function reagendarCitaAirtable(telefono, datos) {
     if (busqueda.data.records.length === 0) return false;
 
     const record = busqueda.data.records[0];
+    
+    // CORREGIDO: También convertir a UTC en reagendamiento
+    const [h, min] = datos.cita_hora.split(':').map(Number);
+    const [anio, mes, dia] = datos.cita_fecha.split('-').map(Number);
+    const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
+    
     await axios.patch(url, {
       records: [{
         id: record.id,
         fields: {
-          "Fecha": datos.cita_fecha,
+          "Fecha": fechaUTC,
           "Hora": datos.cita_hora,
           "Especialista": datos.cita_especialista || record.fields.Especialista
         }
@@ -298,7 +307,7 @@ export default async function handler(req, res) {
     const { data: especialistas } = await supabase.from('especialistas').select('id, nombre, expertise');
     const { data: servicios } = await supabase.from('servicios').select('id, nombre, precio, duracion');
 
-    // 3. CALCULAR FECHAS CORRECTAMENTE
+    // 3. CALCULAR FECHAS (USANDO FUNCIÓN CORREGIDA)
     const fechaHoy = getFechaEcuador(0);
     const fechaManana = getFechaEcuador(1);
     
@@ -405,7 +414,6 @@ DATA_JSON:{
           cliente = nuevoCliente;
         }
 
-        // USAR SIEMPRE fechaReferencia (calculada del mensaje del usuario)
         let fechaFinal = fechaReferencia;
 
         // Buscar servicio y especialista
@@ -438,13 +446,13 @@ DATA_JSON:{
           if (!disponible.ok) {
             mensajeFinal = disponible.mensaje;
           } else {
-            // CORRECCIÓN: Crear timestamp ISO con zona horaria Ecuador explícita
+            // Timestamp con zona horaria Ecuador para Supabase
             const fechaHoraISO = `${fechaFinal}T${data.cita_hora}:00-05:00`;
             
             console.log('🕐 Registrando cita:', {
               fecha: fechaFinal,
               hora: data.cita_hora,
-              timestampISO: fechaHoraISO
+              timestamp: fechaHoraISO
             });
 
             const { data: citaSupabase, error: errorSupabase } = await supabase
@@ -453,7 +461,7 @@ DATA_JSON:{
                 cliente_id: cliente?.id,
                 servicio_id: servicio.id,
                 especialista_id: especialista.id,
-                fecha_hora: fechaHoraISO,  // Formato: 2026-04-14T10:00:00-05:00
+                fecha_hora: fechaHoraISO,
                 estado: 'Confirmada',
                 created_at: new Date().toISOString()
               })
@@ -465,13 +473,13 @@ DATA_JSON:{
               throw errorSupabase;
             }
 
-            // Crear en Airtable con fecha y hora separadas (como strings)
+            // Crear en Airtable (ahora con conversión UTC correcta)
             await crearCitaAirtable({
               telefono: userPhone,
               nombre: cliente?.nombre || data.nombre,
               apellido: cliente?.apellido || data.apellido || "",
-              fecha: fechaFinal,           // "2026-04-14"
-              hora: data.cita_hora,        // "10:00"
+              fecha: fechaFinal,
+              hora: data.cita_hora,
               servicio: servicio.nombre,
               especialista: especialista.nombre,
               precio: servicio.precio,
