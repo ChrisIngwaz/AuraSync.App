@@ -192,6 +192,20 @@ async function reagendarCitaAirtable(telefono, datos) {
     const record = busqueda.data.records[0];
     const camposAnteriores = record.fields;
     
+    // Mantener el especialista anterior si no se especificó uno nuevo
+    const especialistaFinal = datos.cita_especialista || camposAnteriores.Especialista;
+    
+    console.log('🔄 Reagendando:', {
+      telefono,
+      fechaAnterior: camposAnteriores.Fecha,
+      horaAnterior: camposAnteriores.Hora,
+      especialistaAnterior: camposAnteriores.Especialista,
+      fechaNueva: datos.cita_fecha,
+      horaNueva: datos.cita_hora,
+      especialistaNuevo: datos.cita_especialista,
+      especialistaFinal: especialistaFinal
+    });
+    
     // 1. CANCELAR la cita anterior en Airtable
     await axios.patch(url, {
       records: [{
@@ -217,10 +231,10 @@ async function reagendarCitaAirtable(telefono, datos) {
       records: [{
         fields: {
           "Cliente": camposAnteriores.Cliente,
-          "Servicio": datos.cita_servicio || camposAnteriores.Servicio,
+          "Servicio": camposAnteriores.Servicio,
           "Fecha": fechaUTC,
           "Hora": datos.cita_hora,
-          "Especialista": datos.cita_especialista || camposAnteriores.Especialista,
+          "Especialista": especialistaFinal,
           "Teléfono": telefono,
           "Estado": "Confirmada",
           "Importe estimado": camposAnteriores["Importe estimado"],
@@ -249,7 +263,7 @@ async function reagendarCitaAirtable(telefono, datos) {
     
     return true;
   } catch (error) {
-    console.error('Error reagendando:', error.message);
+    console.error('Error reagendando:', error.response?.data || error.message);
     return false;
   }
 }
