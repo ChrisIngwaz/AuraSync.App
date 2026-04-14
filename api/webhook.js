@@ -39,8 +39,8 @@ function formatearFecha(fechaISO) {
 // ============ FUNCIÓN: Sugerir especialistas persuasivamente ============
 
 function generarSugerenciaEspecialistas(especialistas, servicioSolicitado) {
-  if (!especialistas || especialistas.length === 0) {
-    return "Te recomiendo a **nuestro equipo de especialistas**, todos certificados con estándares internacionales.";
+  if (!especialistas || especialistas.length < 2) {
+    return especialistas?.[0]?.nombre || "nuestro equipo";
   }
   
   const seleccionados = especialistas.slice(0, 2);
@@ -50,27 +50,24 @@ function generarSugerenciaEspecialistas(especialistas, servicioSolicitado) {
     
     if (servicioSolicitado?.toLowerCase().includes('corte') || servicioSolicitado?.toLowerCase().includes('cabello')) {
       if (esp.expertise?.toLowerCase().includes('color')) {
-        mensaje = `**${esp.nombre}** — experto en colorimetría y tendencias. Sus degradados son impecables y duraderos, perfectos para quienes buscan un look moderno y sofisticado.`;
+        mensaje = `**${esp.nombre}** — experto en colorimetría y tendencias. Sus degradados son impecables y duraderos.`;
       } else if (esp.expertise?.toLowerCase().includes('corte')) {
-        mensaje = `**${esp.nombre}** — especialista en cortes estructurales. Tiene un ojo único para los ángulos que favorecen cada tipo de rostro, creando estilos personalizados que realzan tu belleza natural.`;
+        mensaje = `**${esp.nombre}** — especialista en cortes estructurales. Tiene un ojo único para los ángulos que favorecen cada rostro.`;
       } else {
-        mensaje = `**${esp.nombre}** — ${esp.expertise || 'estilista experto'} con técnicas de alta precisión y años de experiencia transformando looks.`;
+        mensaje = `**${esp.nombre}** — ${esp.expertise || 'estilista experto'} con técnicas de alta precisión.`;
       }
     } 
     else if (servicioSolicitado?.toLowerCase().includes('manicura') || servicioSolicitado?.toLowerCase().includes('uña')) {
       if (esp.expertise?.toLowerCase().includes('art') || esp.expertise?.toLowerCase().includes('diseño')) {
-        mensaje = `**${esp.nombre}** — artista en manicuras. Sus diseños son miniaturas perfectas que duran semanas intactas, ideal si buscas algo único y creativo.`;
+        mensaje = `**${esp.nombre}** — artista en manicuras. Sus diseños son miniaturas perfectas que duran semanas intactas.`;
       } else if (esp.expertise?.toLowerCase().includes('spa') || esp.expertise?.toLowerCase().includes('tratamiento')) {
-        mensaje = `**${esp.nombre}** — experto en tratamientos de spa para manos. Su técnica de masaje relajante es única, perfecta para una experiencia de cuidado completo.`;
+        mensaje = `**${esp.nombre}** — experto en tratamientos de spa para manos. Su técnica de masaje relajante es única en la ciudad.`;
       } else {
-        mensaje = `**${esp.nombre}** — ${esp.expertise || 'especialista en cuidado de uñas'} con acabados impecables y atención meticulosa al detalle.`;
+        mensaje = `**${esp.nombre}** — ${esp.expertise || 'especialista en cuidado de uñas'} con acabados impecables.`;
       }
     }
-    else if (servicioSolicitado?.toLowerCase().includes('facial') || servicioSolicitado?.toLowerCase().includes('tratamiento')) {
-      mensaje = `**${esp.nombre}** — ${esp.expertise || 'especialista en tratamientos faciales'}. Su enfoque holístico deja la piel radiante y revitalizada desde la primera sesión.`;
-    }
     else {
-      mensaje = `**${esp.nombre}** — ${esp.expertise || 'profesional de élite'}. Clientes VIP lo solicitan específicamente por su atención personalizada y resultados excepcionales.`;
+      mensaje = `**${esp.nombre}** — ${esp.expertise || 'profesional de élite'}. Clientes VIP lo solicitan específicamente por su atención al detalle.`;
     }
     
     return mensaje;
@@ -280,10 +277,10 @@ export default async function handler(req, res) {
       .eq('telefono', userPhone)
       .maybeSingle();
 
-    const { data: especialistas } = await supabase.from('especialistas').select('id, nombre, expertise');
+    const { data: especialistas } = await supabase.from('especialistas').select('nombre, expertise');
     const { data: servicios } = await supabase.from('servicios').select('id, nombre, precio, duracion');
 
-    // 3. CALCULAR FECHAS - CONFIGURACIÓN DEL CÓDIGO QUE FUNCIONA BIEN
+    // 3. CALCULAR FECHAS
     const fechaHoy = getFechaEcuador(0);
     const fechaManana = getFechaEcuador(1);
     
@@ -295,7 +292,7 @@ export default async function handler(req, res) {
     // 4. CONSULTAR AGENDA
     const citasOcupadas = await obtenerCitasOcupadas(fechaReferencia);
 
-    // 5. SYSTEM PROMPT PERSUASIVO
+    // 5. SYSTEM PROMPT PERSUASIVO - EXACTAMENTE IGUAL AL QUE FUNCIONA
     const systemPrompt = `Eres Aura, coordinadora de lujo de AuraSync. Tu misión: hacer sentir al cliente VIP desde el primer mensaje.
 
 [ESTILO DE COMUNICACIÓN]
@@ -369,7 +366,7 @@ DATA_JSON:{
           cliente = { nombre: data.nombre };
         }
 
-        // Determinar fecha final - CONFIGURACIÓN EXACTA DEL CÓDIGO QUE FUNCIONA
+        // Determinar fecha final
         let fechaFinal = data.cita_fecha;
         if (!fechaFinal || fechaFinal === "..." || !fechaFinal.match(/^\d{4}-\d{2}-\d{2}$/)) {
           fechaFinal = mencionaManana ? fechaManana : fechaHoy;
@@ -424,12 +421,12 @@ DATA_JSON:{
               console.error('Error Supabase:', errorSupabase);
             }
 
-            // Crear en Airtable - USANDO fechaFinal QUE YA ES LA CORRECTA
+            // Crear en Airtable
             await crearCitaAirtable({
               telefono: userPhone,
               nombre: cliente?.nombre || data.nombre,
               apellido: cliente?.apellido || data.apellido || "",
-              fecha: fechaFinal,  // ← Esta es la fecha correcta determinada arriba
+              fecha: fechaFinal,
               hora: data.cita_hora,
               servicio: data.cita_servicio,
               especialista: data.cita_especialista,
@@ -438,8 +435,7 @@ DATA_JSON:{
               supabase_id: citaSupabase?.id
             });
 
-            // Mensaje de confirmación sin precio ni duración
-            mensajeFinal = `✅ ¡Excelente elección! Tu cita está confirmada:\n\n📅 ${formatearFecha(fechaFinal)} a las ${data.cita_hora}\n💇‍♀️ ${data.cita_servicio}\n👤 Con ${data.cita_especialista}\n\nTe esperamos con los brazos abiertos. ✨`;
+            mensajeFinal = `✅ ¡Excelente elección! Tu cita está confirmada:\n\n📅 ${formatearFecha(fechaFinal)} a las ${data.cita_hora}\n💇‍♀️ ${data.cita_servicio}\n👤 Con ${data.cita_especialista}\n⏱️ ${servicio.duracion} minutos\n💰 $${servicio.precio}\n\nTe esperamos con los brazos abiertos. ✨`;
             accionEjecutada = true;
           }
         }
