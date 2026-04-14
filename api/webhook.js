@@ -1,5 +1,4 @@
 import express from 'express';
-import { createServer as createViteServer } from 'vite';
 import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
 import path from 'path';
@@ -55,7 +54,7 @@ function formatearFecha(fechaISO) {
   });
 }
 
-// Nueva función para que Aura "vea" la agenda
+// Nueva función para que Aura "vea" la agenda real
 async function obtenerCitasOcupadasAirtable(fechas) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
@@ -73,7 +72,7 @@ async function obtenerCitasOcupadasAirtable(fechas) {
       servicio: r.fields.Servicio
     }));
   } catch (error) {
-    console.error('Error obteniendo citas ocupadas:', error.message);
+    console.error('Error obteniendo agenda:', error.message);
     return [];
   }
 }
@@ -104,9 +103,7 @@ async function crearCitaAirtable(datos) {
       headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
     });
     return true;
-  } catch (error) {
-    return false;
-  }
+  } catch (error) { return false; }
 }
 
 async function cancelarCitaAirtable(telefono, citaId) {
@@ -131,12 +128,8 @@ async function cancelarCitaAirtable(telefono, citaId) {
     if (supabaseId) {
       await supabase.from('citas').update({ estado: 'Cancelada' }).eq('id', supabaseId);
     }
-
     return true;
-  } catch (error) {
-    console.error('Error al cancelar cita:', error.message);
-    return false;
-  }
+  } catch (error) { return false; }
 }
 
 async function reagendarCitaAirtable(telefono, datos) {
@@ -168,12 +161,8 @@ async function reagendarCitaAirtable(telefono, datos) {
         estado: 'Confirmada' 
       }).eq('id', supabaseId);
     }
-
     return true;
-  } catch (error) {
-    console.error('Error al reagendar cita:', error.message);
-    return false;
-  }
+  } catch (error) { return false; }
 }
 
 async function verificarDisponibilidadAirtable(fecha, hora, especialistaSolicitado, duracionMinutos) {
@@ -200,9 +189,7 @@ async function verificarDisponibilidadAirtable(fecha, hora, especialistaSolicita
       }
     }
     return { ok: true, especialista: especialistaSolicitado || 'Asignar' };
-  } catch (error) {
-    return { ok: true, especialista: especialistaSolicitado };
-  }
+  } catch (error) { return { ok: true, especialista: especialistaSolicitado }; }
 }
 
 async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSolicitado, duracion) {
@@ -236,9 +223,7 @@ async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSoli
       horaPropuesta += 15;
     }
     return { mensaje: "Ese día está completo." };
-  } catch (error) {
-    return { mensaje: "¿Te funciona otro horario?" };
-  }
+  } catch (error) { return { mensaje: "¿Te funciona otro horario?" }; }
 }
 
 // --- HANDLER PRINCIPAL ---
@@ -249,10 +234,6 @@ async function startServer() {
   app.use(express.urlencoded({ extended: true }));
 
   app.post('/api/whatsapp', async (req, res) => {
-    if (req.method !== 'POST') {
-      return res.status(200).send('<Response></Response>');
-    }
-
     const { Body, From, MediaUrl0 } = req.body;
     const userPhone = From ? From.replace('whatsapp:', '').trim() : 'test-user';
    
@@ -270,9 +251,7 @@ async function startServer() {
             }
           );
           textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
-        } catch (error) {
-          console.error('Error Deepgram:', error.message);
-        }
+        } catch (error) { console.error('Error Deepgram:', error.message); }
       }
 
       let { data: cliente } = await supabase.from('clientes').select('*').eq('telefono', userPhone).maybeSingle();
@@ -436,9 +415,7 @@ DATA_JSON:{
 
                 if (citaAirtable) {
                   mensajeAccion = `✅ Cita confirmada: ${formatearFecha(fechaFinal)} a las ${datosExtraidos.cita_hora} con ${especialistaFinal}.`;
-                } else {
-                  mensajeAccion = "Error registrando en Airtable.";
-                }
+                } else { mensajeAccion = "Error registrando en Airtable."; }
               }
               accionEjecutada = true;
             }
@@ -459,13 +436,16 @@ DATA_JSON:{
     }
   });
 
-  // Vite middleware for development
+  // Vite middleware for development (IMPORTACIÓN DINÁMICA PARA EVITAR ERRORES EN PRODUCCIÓN)
   if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
+    try {
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+    } catch (e) { console.log('Vite dev server skipped (Production)'); }
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
