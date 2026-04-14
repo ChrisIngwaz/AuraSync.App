@@ -411,7 +411,7 @@ DATA_JSON:{
           mensajeFinal = `¡${cliente?.nombre || 'Hola'}! ${data.cita_servicio ? `Un **${data.cita_servicio}** es una excelente elección.` : 'Qué bueno que quieras agendar con nosotros.'}\n\nTe propongo estos especialistas:\n\n${sugerencia}\n\n¿Con quién te gustaría reservar? Estoy aquí para asegurarte una experiencia exclusiva. ✨`;
           accionEjecutada = false;
         }
-        
+
         // ============ AGENDAR ============
         else if (data.accion === 'agendar' && data.cita_hora && data.cita_especialista && servicio && especialista) {
           
@@ -426,15 +426,14 @@ DATA_JSON:{
           if (!disponible.ok) {
             mensajeFinal = disponible.mensaje;
           } else {
-            // 🔥 CORRECCIÓN: Guardar fecha y hora como campos de texto separados
+            // 🔥 CORREGIDO: Usar fecha_hora (timestamp) en lugar de campos separados
             const { data: citaSupabase, error: errorSupabase } = await supabase
               .from('citas')
               .insert({
                 cliente_id: cliente?.id,
                 servicio_id: servicio.id,
                 especialista_id: especialista.id,
-                fecha: fechaFinal,
-                hora: data.cita_hora,
+                fecha_hora: `${fechaFinal}T${data.cita_hora}:00-05:00`,  // Formato ISO con zona horaria Ecuador
                 estado: 'Confirmada',
                 created_at: new Date().toISOString()
               })
@@ -446,7 +445,7 @@ DATA_JSON:{
               throw errorSupabase;
             }
 
-            // Crear en Airtable
+            // Crear en Airtable (fecha y hora separadas)
             await crearCitaAirtable({
               telefono: userPhone,
               nombre: cliente?.nombre || data.nombre,
