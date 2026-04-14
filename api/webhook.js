@@ -143,55 +143,42 @@ return false;
 // ... (Mantenemos todo tu código igual: funciones de fecha, disponibilidad, etc.)
 
 async function reagendarCitaAirtable(telefono, datos) {
-  try {
-    const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-    
-    // 1. Buscamos la cita activa actual
-    const filter = encodeURIComponent(`AND({Teléfono} = '${telefono}', {Estado} = 'Confirmada')`);
-    const busqueda = await axios.get(`${url}?filterByFormula=${filter}&maxRecords=1`, {
-      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
-    });
+try {
+const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
+const filter = encodeURIComponent(`AND({Teléfono} = '${telefono}', {Estado} = 'Confirmada')`);
+code 
+Code
+const busqueda = await axios.get(`${url}?filterByFormula=${filter}&maxRecords=1`, {
+  headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
+});if (busqueda.data.records.length === 0) return false;const record = busqueda.data.records[0];const [h, min] = datos.cita_hora.split(':').map(Number);const [anio, mes, dia] = datos.cita_fecha.split('-').map(Number);const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
 
-    if (busqueda.data.records.length === 0) return false;
-
-    const record = busqueda.data.records[0];
-
-    // 2. Preparar nueva fecha/hora manteniendo los datos originales del servicio si el JSON no trae nuevos
-    const [h, min] = datos.cita_hora.split(':').map(Number);
-    const [anio, mes, dia] = datos.cita_fecha.split('-').map(Number);
-    const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
-
-    // 3. ACTUALIZACIÓN SOBRE EL MISMO ID (Esto borra la cita de "hoy" y la mueve a "mañana")
-    await axios.patch(url, {
-      records: [{
-        id: record.id,
-        fields: {
-          "Fecha": fechaUTC,
-          "Hora": datos.cita_hora,
-          // Mantenemos el servicio y especialista original del registro si la IA no mandó uno válido
-          "Servicio": (datos.cita_servicio && datos.cita_servicio !== "...") ? datos.cita_servicio : record.fields.Servicio,
-          "Especialista": (datos.cita_especialista && datos.cita_especialista !== "...") ? datos.cita_especialista : record.fields.Especialista
-        }
-      }]
-    }, {
-      headers: {
-        'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    // 4. Sincronizar Supabase
-    if (record.fields.ID_Supabase) {
-      await supabase.from('citas')
-        .update({ fecha_hora: `${datos.cita_fecha}T${datos.cita_hora}:00-05:00` })
-        .eq('id', record.fields.ID_Supabase);
+// ACTUALIZACIÓN: Se usa el record.id para sobrescribir el registro existente. 
+// Al cambiar "Fecha" y "Hora" en el mismo registro, este se mueve en el calendario 
+// y desaparece de la posición anterior (hoy).
+await axios.patch(url, {
+  records: [{
+    id: record.id,
+    fields: {
+      "Fecha": fechaUTC,
+      "Hora": datos.cita_hora,
+      "Especialista": (datos.cita_especialista && datos.cita_especialista !== "...") ? datos.cita_especialista : record.fields.Especialista,
+      "Estado": "Confirmada"
     }
-
-    return true;
-  } catch (error) {
-    console.error('Error reagendando:', error.message);
-    return false;
+  }]
+}, {
+  headers: {
+    'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`,
+    'Content-Type': 'application/json'
   }
+});if (record.fields.ID_Supabase) {
+  await supabase.from('citas')
+    .update({ fecha_hora: `${datos.cita_fecha}T${datos.cita_hora}:00-05:00` })
+    .eq('id', record.fields.ID_Supabase);
+}return true;
+} catch (error) {
+console.error('Error reagendando:', error.message);
+return false;
+}
 }
 
 // ============ VERIFICACIÓN DE DISPONIBILIDAD ============
