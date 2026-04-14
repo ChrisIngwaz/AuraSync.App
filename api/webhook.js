@@ -190,18 +190,15 @@ async function reagendarCitaAirtable(telefono, datos) {
     if (busqueda.data.records.length === 0) return false;
 
     const record = busqueda.data.records[0];
+    const camposAnteriores = record.fields;
     
-    const [h, min] = datos.cita_hora.split(':').map(Number);
-    const [anio, mes, dia] = datos.cita_fecha.split('-').map(Number);
-    const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
-    
+    // 1. CANCELAR la cita anterior en Airtable
     await axios.patch(url, {
       records: [{
         id: record.id,
         fields: {
-          "Fecha": fechaUTC,
-          "Hora": datos.cita_hora,
-          "Especialista": datos.cita_especialista || record.fields.Especialista
+          "Estado": "Cancelada",
+          "Notas": `Reagendada para ${datos.cita_fecha} ${datos.cita_hora}`
         }
       }]
     }, {
@@ -211,11 +208,45 @@ async function reagendarCitaAirtable(telefono, datos) {
       }
     });
 
-    if (record.fields.ID_Supabase) {
+    // 2. CREAR nueva cita con la nueva fecha/hora
+    const [h, min] = datos.cita_hora.split(':').map(Number);
+    const [anio, mes, dia] = datos.cita_fecha.split('-').map(Number);
+    const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
+    
+    const nuevaCita = {
+      records: [{
+        fields: {
+          "Cliente": camposAnteriores.Cliente,
+          "Servicio": datos.cita_servicio || camposAnteriores.Servicio,
+          "Fecha": fechaUTC,
+          "Hora": datos.cita_hora,
+          "Especialista": datos.cita_especialista || camposAnteriores.Especialista,
+          "Teléfono": telefono,
+          "Estado": "Confirmada",
+          "Importe estimado": camposAnteriores["Importe estimado"],
+          "Duración estimada (minutos)": camposAnteriores["Duración estimada (minutos)"] || 60,
+          "ID_Supabase": camposAnteriores.ID_Supabase
+        }
+      }]
+    };
+    
+    await axios.post(url, nuevaCita, {
+      headers: {
+        'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    // 3. Actualizar Supabase
+    if (camposAnteriores.ID_Supabase) {
       await supabase.from('citas')
-        .update({ fecha_hora: `${datos.cita_fecha}T${datos.cita_hora}:00-05:00` })
-        .eq('id', record.fields.ID_Supabase);
+        .update({ 
+          fecha_hora: `${datos.cita_fecha}T${datos.cita_hora}:00-05:00`,
+          estado: 'Confirmada'
+        })
+        .eq('id', camposAnteriores.ID_Supabase);
     }
+    
     return true;
   } catch (error) {
     console.error('Error reagendando:', error.message);
