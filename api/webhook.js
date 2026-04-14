@@ -19,7 +19,7 @@ const CONFIG = {
 
 const TIMEZONE = 'America/Guayaquil';
 
-// --- FUNCIONES DE APOYO ---
+// --- FUNCIONES DE APOYO (FECHAS Y AGENDA) ---
 
 function getFechaEcuador(offsetDias = 0) {
   const ahora = new Date();
@@ -54,7 +54,6 @@ function formatearFecha(fechaISO) {
   });
 }
 
-// Nueva función para que Aura "vea" la agenda real
 async function obtenerCitasOcupadasAirtable(fechas) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
@@ -76,6 +75,8 @@ async function obtenerCitasOcupadasAirtable(fechas) {
     return [];
   }
 }
+
+// --- FUNCIONES DE AIRTABLE (AGENDAR, CANCELAR, REAGENDAR) ---
 
 async function crearCitaAirtable(datos) {
   try {
@@ -226,7 +227,7 @@ async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSoli
   } catch (error) { return { mensaje: "¿Te funciona otro horario?" }; }
 }
 
-// --- HANDLER PRINCIPAL ---
+// --- HANDLER PRINCIPAL (WEBHOOK) ---
 
 async function startServer() {
   const app = express();
@@ -436,7 +437,7 @@ DATA_JSON:{
     }
   });
 
-  // Vite middleware for development (IMPORTACIÓN DINÁMICA PARA EVITAR ERRORES EN PRODUCCIÓN)
+  // Vite middleware for development (DINÁMICO PARA EVITAR ERROR ROLLUP EN VERCEL)
   if (process.env.NODE_ENV !== "production") {
     try {
       const { createServer: createViteServer } = await import('vite');
