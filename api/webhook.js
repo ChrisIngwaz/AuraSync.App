@@ -283,62 +283,42 @@ export default async function handler(req, res) {
     const { data: especialistas } = await supabase.from('especialistas').select('id, nombre, expertise');
     const { data: servicios } = await supabase.from('servicios').select('id, nombre, precio, duracion');
 
-    // 3. CALCULAR FECHAS
+    // 3. CALCULAR FECHAS - CONFIGURACIÓN DEL CÓDIGO QUE FUNCIONA BIEN
     const fechaHoy = getFechaEcuador(0);
     const fechaManana = getFechaEcuador(1);
     
+    // Detectar si dijo "mañana"
     const textoLower = textoUsuario.toLowerCase();
     const mencionaManana = textoLower.includes('mañana') || textoLower.includes('manana');
-    const mencionaHoy = textoLower.includes('hoy');
-    
-    // Fecha de referencia basada en lo que dijo el usuario
     const fechaReferencia = mencionaManana ? fechaManana : fechaHoy;
 
     // 4. CONSULTAR AGENDA
     const citasOcupadas = await obtenerCitasOcupadas(fechaReferencia);
 
-    // Cargar historial
-    const { data: historial } = await supabase
-      .from('conversaciones')
-      .select('rol, contenido')
-      .eq('telefono', userPhone)
-      .order('created_at', { ascending: false })
-      .limit(6);
-
-    const historialFormateado = historial?.reverse().map(h => 
-      `${h.rol === 'user' ? 'Cliente' : 'Aura'}: ${h.contenido}`
-    ).join('\n') || '';
-
-    // 5. SYSTEM PROMPT PERSUASIVO Y HUMANIZADO
-    const systemPrompt = `Eres Aura, coordinadora de lujo de AuraSync. Tu misión: hacer sentir al cliente VIP desde el primer mensaje y agendar con estilo.
+    // 5. SYSTEM PROMPT PERSUASIVO
+    const systemPrompt = `Eres Aura, coordinadora de lujo de AuraSync. Tu misión: hacer sentir al cliente VIP desde el primer mensaje.
 
 [ESTILO DE COMUNICACIÓN]
-- NUNCA digas "No sé" o "Como prefieras". Eres experta, guías tú con elegancia.
-- Lenguaje cálido pero ejecutivo: "Perfecto", "Excelente elección", "Te tengo una propuesta ideal".
+- NUNCA digas "No sé" o "Como prefieras". Eres experta, guías tú.
+- Lenguaje cálido pero ejecutivo: "Perfecto", "Excelente elección", "Te tengo una propuesta".
 - Siempre destaca el valor: calidad, exclusividad, atención personalizada.
-- Usa emojis con moderación y elegancia.
 
 [DATOS DEL DÍA]
 - Hoy: ${formatearFecha(fechaHoy)}
 - Mañana: ${formatearFecha(fechaManana)}
-- Fecha de referencia para esta conversación: ${formatearFecha(fechaReferencia)}
 - Citas ocupadas: ${citasOcupadas.length > 0 ? citasOcupadas.map(c => `${c.hora} con ${c.especialista}`).join(', ') : 'Ninguna'}
 
 [ESPECIALISTAS DISPONIBLES]
 ${especialistas?.map(e => `- ${e.nombre}: ${e.expertise}`).join('\n')}
 
 [SERVICIOS]
-${servicios?.map(s => `- ${s.nombre}`).join('\n')}
-
-[HISTORIAL RECIENTE]
-${historialFormateado}
+${servicios?.map(s => `- ${s.nombre}: $${s.precio}, ${s.duracion} min`).join('\n')}
 
 [REGLAS DE ORO]
-1. PRIMER MENSAJE: Si el cliente pide cita pero NO especifica especialista, SUGIERE 2 opciones destacando su expertise con persuasión suave. NO agendes todavía.
-2. Si el cliente ELIGE especialista (ej: "Carlos", "el primero", "Ricardo"), ENTONCES confirma la cita completa.
-3. Si el horario solicitado está ocupado: Propón la siguiente hora disponible inmediata.
-4. Solo confirma cita cuando el cliente acepte explícitamente o elija especialista.
-5. Nunca pidas datos que ya tienes (nombre, teléfono).
+1. Si el cliente NO especifica especialista: SUGIERE 2 opciones destacando su expertise (persuasión suave).
+2. Si el horario solicitado está ocupado: Propón la siguiente hora disponible inmediata.
+3. Solo confirma cita cuando el cliente acepte explícitamente.
+4. Nunca pidas datos que ya tienes (nombre, teléfono).
 
 [FORMATO JSON FINAL]
 DATA_JSON:{
@@ -347,10 +327,9 @@ DATA_JSON:{
   "apellido": "${cliente?.apellido || ''}",
   "cita_fecha": "YYYY-MM-DD",
   "cita_hora": "HH:MM",
-  "cita_servicio": "nombre exacto del servicio",
-  "cita_especialista": "nombre exacto del especialista",
-  "necesita_sugerencia": true | false,
-  "especialista_elegido": true | false
+  "cita_servicio": "...",
+  "cita_especialista": "...",
+  "necesita_sugerencia": true | false
 }`;
 
     // 6. LLAMADA A OPENAI
@@ -381,62 +360,39 @@ DATA_JSON:{
         
         // Registrar cliente nuevo
         if (data.nombre && !cliente?.nombre) {
-          const { data: nuevoCliente } = await supabase.from('clientes').upsert({
+          await supabase.from('clientes').upsert({
             telefono: userPhone,
             nombre: data.nombre,
             apellido: data.apellido || "",
             created_at: new Date().toISOString()
-          }, { onConflict: 'telefono' }).select().single();
-          
-          cliente = nuevoCliente;
+          }, { onConflict: 'telefono' });
+          cliente = { nombre: data.nombre };
         }
 
-        // 🔥 CORRECCIÓN DEFINITIVA DE FECHA
-        // Priorizar fechaReferencia (detectada del mensaje del usuario) sobre data.cita_fecha (de OpenAI)
-        let fechaFinal;
-        
-        if (mencionaManana) {
-          // Si el usuario dijo "mañana", forzar fechaManana sin importar qué diga OpenAI
-          fechaFinal = fechaManana;
-        } else if (mencionaHoy) {
-          // Si dijo "hoy", usar fechaHoy
-          fechaFinal = fechaHoy;
-        } else if (data.cita_fecha && data.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/)) {
-          // Si OpenAI devolvió fecha válida y el usuario no especificó, usar la de OpenAI
-          fechaFinal = data.cita_fecha;
-        } else {
-          // Default: mañana (más natural para agendar)
-          fechaFinal = fechaManana;
+        // Determinar fecha final - CONFIGURACIÓN EXACTA DEL CÓDIGO QUE FUNCIONA
+        let fechaFinal = data.cita_fecha;
+        if (!fechaFinal || fechaFinal === "..." || !fechaFinal.match(/^\d{4}-\d{2}-\d{2}$/)) {
+          fechaFinal = mencionaManana ? fechaManana : fechaHoy;
         }
         
-        // Validar que no sea fecha pasada
+        // Si OpenAI generó fecha pasada, corregir a mañana
         if (fechaFinal < fechaHoy) {
           fechaFinal = fechaManana;
         }
 
-        console.log('📅 Fecha final determinada:', fechaFinal);
-        console.log('📅 Menciona mañana:', mencionaManana);
-        console.log('📅 Menciona hoy:', mencionaHoy);
-
-        // Buscar servicio y especialista
-        const servicio = servicios?.find(s => 
-          s.nombre.toLowerCase().includes((data.cita_servicio || '').toLowerCase())
-        );
-        
-        const especialista = especialistas?.find(e => 
-          e.nombre.toLowerCase().includes((data.cita_especialista || '').toLowerCase())
-        );
-
-        // ============ PERSUASIÓN: Sugerir especialistas ============
+        // ============ PERSUASIÓN: Si no especificó especialista ============
         if (data.necesita_sugerencia || (!data.cita_especialista || data.cita_especialista === "...")) {
           const sugerencia = generarSugerenciaEspecialistas(especialistas, data.cita_servicio);
-          mensajeFinal = `¡${cliente?.nombre || 'Hola'}! ${data.cita_servicio ? `Un **${data.cita_servicio}** es una excelente elección.` : 'Qué bueno que quieras agendar con nosotros.'}\n\nTe propongo estos especialistas:\n\n${sugerencia}\n\n¿Con quién te gustaría reservar? Estoy aquí para asegurarte una experiencia exclusiva. ✨`;
-          accionEjecutada = false;
+          mensajeFinal += `\n\n${sugerencia}\n\n¿Con quién te gustaría reservar?`;
+          accionEjecutada = true; // No agendar aún, esperar respuesta
         }
         
         // ============ AGENDAR ============
-        else if (data.accion === 'agendar' && data.cita_hora && data.cita_especialista && servicio && especialista) {
-          
+        else if (data.accion === 'agendar' && data.cita_hora && data.cita_especialista) {
+          const servicio = servicios?.find(s => 
+            s.nombre.toLowerCase().includes((data.cita_servicio || '').toLowerCase())
+          ) || { precio: 0, duracion: 60 };
+
           const disponible = await verificarDisponibilidad(
             fechaFinal,
             data.cita_hora,
@@ -454,9 +410,11 @@ DATA_JSON:{
               .insert({
                 cliente_id: cliente?.id,
                 servicio_id: servicio.id,
-                especialista_id: especialista.id,
                 fecha_hora: `${fechaFinal}T${data.cita_hora}:00-05:00`,
                 estado: 'Confirmada',
+                nombre_cliente_aux: `${cliente?.nombre || data.nombre} ${cliente?.apellido || data.apellido || ''}`.trim(),
+                servicio_aux: data.cita_servicio,
+                duracion_aux: servicio.duracion,
                 created_at: new Date().toISOString()
               })
               .select()
@@ -464,25 +422,24 @@ DATA_JSON:{
 
             if (errorSupabase) {
               console.error('Error Supabase:', errorSupabase);
-              throw errorSupabase;
             }
 
-            // Crear en Airtable con fechaFinal (ahora garantizada correcta)
+            // Crear en Airtable - USANDO fechaFinal QUE YA ES LA CORRECTA
             await crearCitaAirtable({
               telefono: userPhone,
               nombre: cliente?.nombre || data.nombre,
               apellido: cliente?.apellido || data.apellido || "",
-              fecha: fechaFinal,  // ← Fecha correcta: mañana si dijo mañana
+              fecha: fechaFinal,  // ← Esta es la fecha correcta determinada arriba
               hora: data.cita_hora,
-              servicio: servicio.nombre,
-              especialista: especialista.nombre,
-              precio: servicio.precio,      // Guardado en Airtable, no mostrado
-              duracion: servicio.duracion,  // Guardado en Airtable, no mostrado
+              servicio: data.cita_servicio,
+              especialista: data.cita_especialista,
+              precio: servicio.precio,
+              duracion: servicio.duracion,
               supabase_id: citaSupabase?.id
             });
 
-            // Mensaje de confirmación limpio (sin precio ni duración)
-            mensajeFinal = `✅ ¡Excelente elección, ${cliente?.nombre || data.nombre || ''}! Tu cita está confirmada:\n\n📅 ${formatearFecha(fechaFinal)} a las ${data.cita_hora}\n💇‍♀️ ${servicio.nombre}\n👤 Con ${especialista.nombre}\n\nTe esperamos con los brazos abiertos para consentirte. ✨`;
+            // Mensaje de confirmación sin precio ni duración
+            mensajeFinal = `✅ ¡Excelente elección! Tu cita está confirmada:\n\n📅 ${formatearFecha(fechaFinal)} a las ${data.cita_hora}\n💇‍♀️ ${data.cita_servicio}\n👤 Con ${data.cita_especialista}\n\nTe esperamos con los brazos abiertos. ✨`;
             accionEjecutada = true;
           }
         }
@@ -506,8 +463,7 @@ DATA_JSON:{
         }
 
       } catch (e) {
-        console.error('Error procesando:', e.message);
-        mensajeFinal = "Disculpa, tuve un problema. ¿Me repites?";
+        console.error('Error JSON:', e.message);
       }
     }
 
