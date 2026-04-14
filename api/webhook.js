@@ -140,7 +140,6 @@ console.error('Error cancelando:', error.message);
 return false;
 }
 }
-// ... (Mantenemos todo tu código igual: funciones de fecha, disponibilidad, etc.)
 
 async function reagendarCitaAirtable(telefono, datos) {
 try {
@@ -150,19 +149,14 @@ code 
 Code
 const busqueda = await axios.get(`${url}?filterByFormula=${filter}&maxRecords=1`, {
   headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
-});if (busqueda.data.records.length === 0) return false;const record = busqueda.data.records[0];const [h, min] = datos.cita_hora.split(':').map(Number);const [anio, mes, dia] = datos.cita_fecha.split('-').map(Number);const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
-
-// ACTUALIZACIÓN: Se usa el record.id para sobrescribir el registro existente. 
-// Al cambiar "Fecha" y "Hora" en el mismo registro, este se mueve en el calendario 
-// y desaparece de la posición anterior (hoy).
-await axios.patch(url, {
+});if (busqueda.data.records.length === 0) return false;const record = busqueda.data.records[0];const [h, min] = datos.cita_hora.split(':').map(Number);const [anio, mes, dia] = datos.cita_fecha.split('-').map(Number);const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();await axios.patch(url, {
   records: [{
     id: record.id,
     fields: {
       "Fecha": fechaUTC,
       "Hora": datos.cita_hora,
       "Servicio": datos.cita_servicio || record.fields.Servicio,
-      "Especialista": (datos.cita_especialista && datos.cita_especialista !== "...") ? datos.cita_especialista : record.fields.Especialista,
+      "Especialista": datos.cita_especialista || record.fields.Especialista,
       "Estado": "Confirmada"
     }
   }]
@@ -173,7 +167,9 @@ await axios.patch(url, {
   }
 });if (record.fields.ID_Supabase) {
   await supabase.from('citas')
-    .update({ fecha_hora: `${datos.cita_fecha}T${datos.cita_hora}:00-05:00` })
+    .update({ 
+      fecha_hora: `${datos.cita_fecha}T${datos.cita_hora}:00-05:00`
+    })
     .eq('id', record.fields.ID_Supabase);
 }return true;
 } catch (error) {
