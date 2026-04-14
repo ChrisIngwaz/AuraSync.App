@@ -43,7 +43,6 @@ function generarSugerenciaEspecialistas(especialistas, servicioSolicitado) {
     return "Te recomiendo a **nuestro equipo de especialistas**, todos certificados con estándares internacionales.";
   }
   
-  // Seleccionar hasta 2 especialistas relevantes
   const seleccionados = especialistas.slice(0, 2);
   
   const sugerencias = seleccionados.map(esp => {
@@ -109,7 +108,7 @@ async function crearCitaAirtable(datos) {
           "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
           "Servicio": datos.servicio,
           "Fecha": datos.fecha,
-          "Hora": datos.hora,
+          "Hora": datos.hora,  // ← Hora en formato HH:MM, sin zona horaria
           "Especialista": datos.especialista,
           "Teléfono": datos.telefono,
           "Estado": "Confirmada",
@@ -210,7 +209,6 @@ async function verificarDisponibilidad(fecha, hora, especialistaSolicitado, dura
   const inicioNuevo = h * 60 + m;
   const finNuevo = inicioNuevo + (duracionMinutos || 60);
 
-  // Horario: 9:00 - 18:00
   if (inicioNuevo < 540) {
     return { ok: false, mensaje: "Nuestro horario comienza a las 9:00. ¿Te funciona?" };
   }
@@ -285,7 +283,7 @@ export default async function handler(req, res) {
     const { data: especialistas } = await supabase.from('especialistas').select('id, nombre, expertise');
     const { data: servicios } = await supabase.from('servicios').select('id, nombre, precio, duracion');
 
-    // 3. CALCULAR FECHAS - CORREGIDO
+    // 3. CALCULAR FECHAS
     const fechaHoy = getFechaEcuador(0);
     const fechaManana = getFechaEcuador(1);
     
@@ -293,16 +291,8 @@ export default async function handler(req, res) {
     const mencionaManana = textoLower.includes('mañana') || textoLower.includes('manana');
     const mencionaHoy = textoLower.includes('hoy');
     
-    // 🔥 CORREGIDO: Determinar fecha correctamente
-    let fechaReferencia;
-    if (mencionaManana) {
-      fechaReferencia = fechaManana;
-    } else if (mencionaHoy) {
-      fechaReferencia = fechaHoy;
-    } else {
-      // Si no especifica, asumir mañana para citas nuevas (más natural)
-      fechaReferencia = fechaManana;
-    }
+    // Fecha de referencia basada en lo que dijo el usuario
+    const fechaReferencia = mencionaManana ? fechaManana : fechaHoy;
 
     // 4. CONSULTAR AGENDA
     const citasOcupadas = await obtenerCitasOcupadas(fechaReferencia);
@@ -401,16 +391,32 @@ DATA_JSON:{
           cliente = nuevoCliente;
         }
 
-        // Determinar fecha final - CORREGIDO
-        let fechaFinal = data.cita_fecha;
-        if (!fechaFinal || fechaFinal === "..." || !fechaFinal.match(/^\d{4}-\d{2}-\d{2}$/)) {
-          fechaFinal = fechaReferencia;
+        // 🔥 CORRECCIÓN DEFINITIVA DE FECHA
+        // Priorizar fechaReferencia (detectada del mensaje del usuario) sobre data.cita_fecha (de OpenAI)
+        let fechaFinal;
+        
+        if (mencionaManana) {
+          // Si el usuario dijo "mañana", forzar fechaManana sin importar qué diga OpenAI
+          fechaFinal = fechaManana;
+        } else if (mencionaHoy) {
+          // Si dijo "hoy", usar fechaHoy
+          fechaFinal = fechaHoy;
+        } else if (data.cita_fecha && data.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/)) {
+          // Si OpenAI devolvió fecha válida y el usuario no especificó, usar la de OpenAI
+          fechaFinal = data.cita_fecha;
+        } else {
+          // Default: mañana (más natural para agendar)
+          fechaFinal = fechaManana;
         }
         
-        // Si OpenAI generó fecha pasada, corregir
+        // Validar que no sea fecha pasada
         if (fechaFinal < fechaHoy) {
           fechaFinal = fechaManana;
         }
+
+        console.log('📅 Fecha final determinada:', fechaFinal);
+        console.log('📅 Menciona mañana:', mencionaManana);
+        console.log('📅 Menciona hoy:', mencionaHoy);
 
         // Buscar servicio y especialista
         const servicio = servicios?.find(s => 
@@ -461,21 +467,21 @@ DATA_JSON:{
               throw errorSupabase;
             }
 
-            // Crear en Airtable (con precio y duración - solo para registro interno)
+            // Crear en Airtable con fechaFinal (ahora garantizada correcta)
             await crearCitaAirtable({
               telefono: userPhone,
               nombre: cliente?.nombre || data.nombre,
               apellido: cliente?.apellido || data.apellido || "",
-              fecha: fechaFinal,
-              hora: data.cita_hora,
+              fecha: fechaFinal,  // ← Fecha correcta: mañana si dijo mañana
+              hora: data.cita_hora,  // ← Hora en formato HH:MM (10:00)
               servicio: servicio.nombre,
               especialista: especialista.nombre,
-              precio: servicio.precio,      // Se guarda en Airtable pero NO se muestra
-              duracion: servicio.duracion,  // Se guarda en Airtable pero NO se muestra
+              precio: servicio.precio,      // Guardado en Airtable, no mostrado
+              duracion: servicio.duracion,  // Guardado en Airtable, no mostrado
               supabase_id: citaSupabase?.id
             });
 
-            // 🔥 MENSAJE DE CONFIRMACIÓN LIMPIO - Sin precio ni duración
+            // Mensaje de confirmación limpio (sin precio ni duración)
             mensajeFinal = `✅ ¡Excelente elección, ${cliente?.nombre || data.nombre || ''}! Tu cita está confirmada:\n\n📅 ${formatearFecha(fechaFinal)} a las ${data.cita_hora}\n💇‍♀️ ${servicio.nombre}\n👤 Con ${especialista.nombre}\n\nTe esperamos con los brazos abiertos para consentirte. ✨`;
             accionEjecutada = true;
           }
@@ -500,7 +506,8 @@ DATA_JSON:{
         }
 
       } catch (e) {
-        console.error('Error JSON:', e.message);
+        console.error('Error procesando:', e.message);
+        mensajeFinal = "Disculpa, tuve un problema. ¿Me repites?";
       }
     }
 
@@ -516,6 +523,6 @@ DATA_JSON:{
 
   } catch (err) {
     console.error('❌ Error crítico:', err.message);
-    return res.status(200).send('<Response><Message>Disculpa, tuve un momento de distracción. ¿Me repites por favor? 🌸</Message></Response>');
+    return res.status(200).send('<Response><Message>Disculpa, tuve un momento. ¿Me repites? 🌸</Message></Response>');
   }
 }
