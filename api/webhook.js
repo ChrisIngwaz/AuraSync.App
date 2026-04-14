@@ -1,247 +1,3 @@
-import axios from 'axios';
-import { createClient } from '@supabase/supabase-js';
-
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-
-const CONFIG = {
-  AIRTABLE_BASE_ID: process.env.AIRTABLE_BASE_ID,
-  AIRTABLE_TOKEN: process.env.AIRTABLE_TOKEN,
-  AIRTABLE_TABLE_NAME: process.env.AIRTABLE_TABLE_NAME || 'Citas',
-  DEEPGRAM_API_KEY: process.env.DEEPGRAM_API_KEY,
-  OPENAI_API_KEY: process.env.OPENAI_API_KEY
-};
-
-const TIMEZONE = 'America/Guayaquil';
-
-// ============ FUNCIONES DE FECHA ROBUSTAS ============
-
-function getFechaEcuador(offsetDias = 0) {
-  const ahoraUTC = new Date();
-  // Ecuador es UTC-5 (pero usamos -5 horas en milisegundos)
-  const offsetMs = -5 * 60 * 60 * 1000;
-  const ahoraEcuador = new Date(ahoraUTC.getTime() + offsetMs);
-  
-  // Agregar días de offset
-  ahoraEcuador.setDate(ahoraEcuador.getDate() + offsetDias);
-  
-  return ahoraEcuador.toISOString().split('T')[0];
-}
-
-function formatearFecha(fechaISO) {
-  if (!fechaISO || !fechaISO.match(/^\d{4}-\d{2}-\d{2}$/)) return fechaISO;
-  
-  const [anio, mes, dia] = fechaISO.split('-').map(Number);
-  const fecha = new Date(Date.UTC(anio, mes - 1, dia, 12, 0, 0));
-  
-  return fecha.toLocaleDateString('es-EC', { 
-    weekday: 'long', 
-    year: 'numeric', 
-    month: 'long', 
-    day: 'numeric',
-    timeZone: 'UTC'
-  });
-}
-
-// ============ FUNCIÓN: Sugerir especialistas persuasivamente ============
-
-function generarSugerenciaEspecialistas(especialistas, servicioSolicitado) {
-  if (!especialistas || especialistas.length < 2) {
-    return especialistas?.[0]?.nombre || "nuestro equipo";
-  }
-  
-  // Seleccionar 2 especialistas (o todos si hay menos)
-  const seleccionados = especialistas.slice(0, 2);
-  
-  const sugerencias = seleccionados.map(esp => {
-    // Personalizar mensaje según el servicio y expertise
-    let mensaje = "";
-    
-    if (servicioSolicitado?.toLowerCase().includes('corte') || servicioSolicitado?.toLowerCase().includes('cabello')) {
-      if (esp.expertise?.toLowerCase().includes('color')) {
-        mensaje = `**${esp.nombre}** — experto en colorimetría y tendencias. Sus degradados son impecables y duraderos.`;
-      } else if (esp.expertise?.toLowerCase().includes('corte')) {
-        mensaje = `**${esp.nombre}** — especialista en cortes estructurales. Tiene un ojo único para los ángulos que favorecen cada rostro.`;
-      } else {
-        mensaje = `**${esp.nombre}** — ${esp.expertise || 'estilista experto'} con técnicas de alta precisión.`;
-      }
-    } 
-    else if (servicioSolicitado?.toLowerCase().includes('manicura') || servicioSolicitado?.toLowerCase().includes('uña')) {
-      if (esp.expertise?.toLowerCase().includes('art') || esp.expertise?.toLowerCase().includes('diseño')) {
-        mensaje = `**${esp.nombre}** — artista en manicuras. Sus diseños son miniaturas perfectas que duran semanas intactas.`;
-      } else if (esp.expertise?.toLowerCase().includes('spa') || esp.expertise?.toLowerCase().includes('tratamiento')) {
-        mensaje = `**${esp.nombre}** — experto en tratamientos de spa para manos. Su técnica de masaje relajante es única en la ciudad.`;
-      } else {
-        mensaje = `**${esp.nombre}** — ${esp.expertise || 'especialista en cuidado de uñas'} con acabados impecables.`;
-      }
-    }
-    else {
-      // Mensaje genérico persuasivo
-      mensaje = `**${esp.nombre}** — ${esp.expertise || 'profesional de élite'}. Clientes VIP lo solicitan específicamente por su atención al detalle.`;
-    }
-    
-    return mensaje;
-  });
-  
-  return sugerencias.join('\n\n');
-}
-
-// ============ FUNCIONES AIRTABLE ============
-
-async function obtenerCitasOcupadas(fecha) {
-  try {
-    const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-    const filter = encodeURIComponent(`AND({Fecha} = '${fecha}', {Estado} = 'Confirmada')`);
-    const response = await axios.get(`${url}?filterByFormula=${filter}`, {
-      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
-    });
-    return response.data.records.map(r => ({
-      hora: r.fields.Hora,
-      duracion: r.fields['Duración estimada (minutos)'] || 60,
-      especialista: r.fields.Especialista
-    }));
-  } catch (error) {
-    console.error('Error consultando Airtable:', error.message);
-    return [];
-  }
-}
-
-async function crearCitaAirtable(datos) {
-  try {
-    const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-    const payload = {
-      records: [{
-        fields: {
-          "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
-          "Servicio": datos.servicio,
-          "Fecha": datos.fecha,
-          "Hora": datos.hora,
-          "Especialista": datos.especialista,
-          "Teléfono": datos.telefono,
-          "Estado": "Confirmada",
-          "Importe estimado": datos.precio,
-          "Duración estimada (minutos)": datos.duracion,
-          "ID_Supabase": datos.supabase_id
-        }
-      }]
-    };
-    await axios.post(url, payload, {
-      headers: {
-        'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`,
-        'Content-Type': 'application/json'
-      }
-    });
-    return true;
-  } catch (error) {
-    console.error('Error Airtable:', error.message);
-    return false;
-  }
-}
-
-async function cancelarCitaAirtable(telefono) {
-  try {
-    const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-    const filter = encodeURIComponent(`AND({Teléfono} = '${telefono}', {Estado} = 'Confirmada')`);
-    
-    const busqueda = await axios.get(`${url}?filterByFormula=${filter}&maxRecords=1`, {
-      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
-    });
-
-    if (busqueda.data.records.length === 0) return false;
-
-    const record = busqueda.data.records[0];
-    await axios.patch(url, {
-      records: [{ id: record.id, fields: { "Estado": "Cancelada" } }]
-    }, {
-      headers: {
-        'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    if (record.fields.ID_Supabase) {
-      await supabase.from('citas').update({ estado: 'Cancelada' }).eq('id', record.fields.ID_Supabase);
-    }
-    return true;
-  } catch (error) {
-    console.error('Error cancelando:', error.message);
-    return false;
-  }
-}
-
-async function reagendarCitaAirtable(telefono, datos) {
-  try {
-    const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-    const filter = encodeURIComponent(`AND({Teléfono} = '${telefono}', {Estado} = 'Confirmada')`);
-    
-    const busqueda = await axios.get(`${url}?filterByFormula=${filter}&maxRecords=1`, {
-      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
-    });
-
-    if (busqueda.data.records.length === 0) return false;
-
-    const record = busqueda.data.records[0];
-    await axios.patch(url, {
-      records: [{
-        id: record.id,
-        fields: {
-          "Fecha": datos.cita_fecha,
-          "Hora": datos.cita_hora,
-          "Especialista": datos.cita_especialista || record.fields.Especialista
-        }
-      }]
-    }, {
-      headers: {
-        'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    if (record.fields.ID_Supabase) {
-      await supabase.from('citas')
-        .update({ fecha_hora: `${datos.cita_fecha}T${datos.cita_hora}:00-05:00` })
-        .eq('id', record.fields.ID_Supabase);
-    }
-    return true;
-  } catch (error) {
-    console.error('Error reagendando:', error.message);
-    return false;
-  }
-}
-
-// ============ VERIFICACIÓN DE DISPONIBILIDAD ============
-
-async function verificarDisponibilidad(fecha, hora, especialistaSolicitado, duracionMinutos, citasOcupadas) {
-  const [h, m] = hora.split(':').map(Number);
-  const inicioNuevo = h * 60 + m;
-  const finNuevo = inicioNuevo + (duracionMinutos || 60);
-
-  // Horario: 9:00 - 18:00
-  if (inicioNuevo < 540) { // 9:00
-    return { ok: false, mensaje: "Nuestro horario comienza a las 9:00. ¿Te funciona?" };
-  }
-  if (finNuevo > 1080) { // 18:00
-    return { ok: false, mensaje: "Ese horario excede nuestra jornada. ¿Otra hora?" };
-  }
-
-  for (const cita of citasOcupadas) {
-    const [he, me] = cita.hora.split(':').map(Number);
-    const inicioExistente = he * 60 + me;
-    const finExistente = inicioExistente + cita.duracion;
-
-    if (inicioNuevo < finExistente && finNuevo > inicioExistente) {
-      if (!especialistaSolicitado || cita.especialista === especialistaSolicitado) {
-        return {
-          ok: false,
-          mensaje: `${cita.especialista} no está disponible a las ${hora}. ¿Otra hora u otro especialista?`,
-          conflicto: true
-        };
-      }
-    }
-  }
-
-  return { ok: true, especialista: especialistaSolicitado };
-}
-
 // ============ WEBHOOK PRINCIPAL ============
 
 export default async function handler(req, res) {
@@ -287,14 +43,13 @@ export default async function handler(req, res) {
       .eq('telefono', userPhone)
       .maybeSingle();
 
-    const { data: especialistas } = await supabase.from('especialistas').select('nombre, expertise');
+    const { data: especialistas } = await supabase.from('especialistas').select('id, nombre, expertise');
     const { data: servicios } = await supabase.from('servicios').select('id, nombre, precio, duracion');
 
     // 3. CALCULAR FECHAS
     const fechaHoy = getFechaEcuador(0);
     const fechaManana = getFechaEcuador(1);
     
-    // Detectar si dijo "mañana"
     const textoLower = textoUsuario.toLowerCase();
     const mencionaManana = textoLower.includes('mañana') || textoLower.includes('manana');
     const fechaReferencia = mencionaManana ? fechaManana : fechaHoy;
@@ -302,41 +57,57 @@ export default async function handler(req, res) {
     // 4. CONSULTAR AGENDA
     const citasOcupadas = await obtenerCitasOcupadas(fechaReferencia);
 
-    // 5. SYSTEM PROMPT PERSUASIVO
-    const systemPrompt = `Eres Aura, coordinadora de lujo de AuraSync. Tu misión: hacer sentir al cliente VIP desde el primer mensaje.
+    // 🔥 Cargar historial de conversación (últimos 6 mensajes)
+    const { data: historial } = await supabase
+      .from('conversaciones')
+      .select('rol, contenido')
+      .eq('telefono', userPhone)
+      .order('created_at', { ascending: false })
+      .limit(6);
 
-[ESTILO DE COMUNICACIÓN]
-- NUNCA digas "No sé" o "Como prefieras". Eres experta, guías tú.
-- Lenguaje cálido pero ejecutivo: "Perfecto", "Excelente elección", "Te tengo una propuesta".
-- Siempre destaca el valor: calidad, exclusividad, atención personalizada.
+    const historialFormateado = historial?.reverse().map(h => 
+      `${h.rol === 'user' ? 'Cliente' : 'Aura'}: ${h.contenido}`
+    ).join('\n') || '';
 
-[DATOS DEL DÍA]
+    // 5. SYSTEM PROMPT CORREGIDO
+    const systemPrompt = `Eres Aura, coordinadora de AuraSync. CONCRETA RÁPIDO. Máximo 2 intercambios para agendar.
+
+[REGLA CRÍTICA]
+Si en el historial el cliente YA dijo: servicio + fecha + hora → CONFIRMA ESPECIALISTA Y AGENDA. No preguntes de nuevo.
+
+[ESTILO]
+- Directa: "Perfecto, confirmo tu cita:"
+- NUNCA repreguntes lo que ya sabes
+- Guía tú, no dejes que el cliente adivine
+
+[DATOS]
 - Hoy: ${formatearFecha(fechaHoy)}
 - Mañana: ${formatearFecha(fechaManana)}
-- Citas ocupadas: ${citasOcupadas.length > 0 ? citasOcupadas.map(c => `${c.hora} con ${c.especialista}`).join(', ') : 'Ninguna'}
+- Ocupadas: ${citasOcupadas.length > 0 ? citasOcupadas.map(c => `${c.hora} ${c.especialista}`).join(', ') : 'Ninguna'}
 
-[ESPECIALISTAS DISPONIBLES]
-${especialistas?.map(e => `- ${e.nombre}: ${e.expertise}`).join('\n')}
+[ESPECIALISTAS]
+${especialistas?.map(e => `- ${e.nombre} (ID: ${e.id}): ${e.expertise}`).join('\n')}
 
 [SERVICIOS]
-${servicios?.map(s => `- ${s.nombre}: $${s.precio}, ${s.duracion} min`).join('\n')}
+${servicios?.map(s => `- ${s.nombre}: $${s.precio}, ${s.duracion}min`).join('\n')}
 
-[REGLAS DE ORO]
-1. Si el cliente NO especifica especialista: SUGIERE 2 opciones destacando su expertise (persuasión suave).
-2. Si el horario solicitado está ocupado: Propón la siguiente hora disponible inmediata.
-3. Solo confirma cita cuando el cliente acepte explícitamente.
-4. Nunca pidas datos que ya tienes (nombre, teléfono).
+[HISTORIAL RECIENTE]
+${historialFormateado}
 
-[FORMATO JSON FINAL]
+[INSTRUCCIÓN]
+Analiza el historial. Si el mensaje actual es una elección de especialista (ej: "Carlos", "el primero", "Ricardo") y en mensajes anteriores ya dijo servicio/hora/fecha → ASUME esos datos y agenda inmediatamente.
+
+[JSON]
 DATA_JSON:{
   "accion": "none" | "agendar" | "cancelar" | "reagendar",
   "nombre": "${cliente?.nombre || ''}",
   "apellido": "${cliente?.apellido || ''}",
   "cita_fecha": "YYYY-MM-DD",
   "cita_hora": "HH:MM",
-  "cita_servicio": "...",
-  "cita_especialista": "...",
-  "necesita_sugerencia": true | false
+  "cita_servicio": "nombre exacto del servicio",
+  "cita_especialista": "nombre exacto del especialista",
+  "especialista_id": "ID del especialista",
+  "servicio_id": "ID del servicio"
 }`;
 
     // 6. LLAMADA A OPENAI
@@ -346,7 +117,7 @@ DATA_JSON:{
         { role: "system", content: systemPrompt },
         { role: "user", content: textoUsuario }
       ],
-      temperature: 0.4,
+      temperature: 0.2,
       max_tokens: 500
     }, {
       headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` }
@@ -367,13 +138,14 @@ DATA_JSON:{
         
         // Registrar cliente nuevo
         if (data.nombre && !cliente?.nombre) {
-          await supabase.from('clientes').upsert({
+          const { data: nuevoCliente } = await supabase.from('clientes').upsert({
             telefono: userPhone,
             nombre: data.nombre,
             apellido: data.apellido || "",
             created_at: new Date().toISOString()
-          }, { onConflict: 'telefono' });
-          cliente = { nombre: data.nombre };
+          }, { onConflict: 'telefono' }).select().single();
+          
+          cliente = nuevoCliente;
         }
 
         // Determinar fecha final
@@ -382,24 +154,22 @@ DATA_JSON:{
           fechaFinal = mencionaManana ? fechaManana : fechaHoy;
         }
         
-        // Si OpenAI generó fecha pasada, corregir a mañana
         if (fechaFinal < fechaHoy) {
           fechaFinal = fechaManana;
         }
 
-        // ============ PERSUASIÓN: Si no especificó especialista ============
-        if (data.necesita_sugerencia || (!data.cita_especialista || data.cita_especialista === "...")) {
-          const sugerencia = generarSugerenciaEspecialistas(especialistas, data.cita_servicio);
-          mensajeFinal += `\n\n${sugerencia}\n\n¿Con quién te gustaría reservar?`;
-          accionEjecutada = true; // No agendar aún, esperar respuesta
-        }
+        // Buscar IDs reales
+        const servicio = servicios?.find(s => 
+          s.nombre.toLowerCase().includes((data.cita_servicio || '').toLowerCase())
+        );
         
-        // ============ AGENDAR ============
-        else if (data.accion === 'agendar' && data.cita_hora && data.cita_especialista) {
-          const servicio = servicios?.find(s => 
-            s.nombre.toLowerCase().includes((data.cita_servicio || '').toLowerCase())
-          ) || { precio: 0, duracion: 60 };
+        const especialista = especialistas?.find(e => 
+          e.nombre.toLowerCase().includes((data.cita_especialista || '').toLowerCase())
+        );
 
+        // ============ AGENDAR ============
+        if (data.accion === 'agendar' && data.cita_hora && data.cita_especialista && servicio && especialista) {
+          
           const disponible = await verificarDisponibilidad(
             fechaFinal,
             data.cita_hora,
@@ -411,17 +181,15 @@ DATA_JSON:{
           if (!disponible.ok) {
             mensajeFinal = disponible.mensaje;
           } else {
-            // Crear en Supabase
+            // Crear en Supabase con IDs correctos
             const { data: citaSupabase, error: errorSupabase } = await supabase
               .from('citas')
               .insert({
                 cliente_id: cliente?.id,
                 servicio_id: servicio.id,
+                especialista_id: especialista.id,
                 fecha_hora: `${fechaFinal}T${data.cita_hora}:00-05:00`,
                 estado: 'Confirmada',
-                nombre_cliente_aux: `${cliente?.nombre || data.nombre} ${cliente?.apellido || data.apellido || ''}`.trim(),
-                servicio_aux: data.cita_servicio,
-                duracion_aux: servicio.duracion,
                 created_at: new Date().toISOString()
               })
               .select()
@@ -429,6 +197,7 @@ DATA_JSON:{
 
             if (errorSupabase) {
               console.error('Error Supabase:', errorSupabase);
+              throw errorSupabase;
             }
 
             // Crear en Airtable
@@ -438,24 +207,31 @@ DATA_JSON:{
               apellido: cliente?.apellido || data.apellido || "",
               fecha: fechaFinal,
               hora: data.cita_hora,
-              servicio: data.cita_servicio,
-              especialista: data.cita_especialista,
+              servicio: servicio.nombre,
+              especialista: especialista.nombre,
               precio: servicio.precio,
               duracion: servicio.duracion,
               supabase_id: citaSupabase?.id
             });
 
-            mensajeFinal = `✅ ¡Excelente elección! Tu cita está confirmada:\n\n📅 ${formatearFecha(fechaFinal)} a las ${data.cita_hora}\n💇‍♀️ ${data.cita_servicio}\n👤 Con ${data.cita_especialista}\n⏱️ ${servicio.duracion} minutos\n💰 $${servicio.precio}\n\nTe esperamos con los brazos abiertos. ✨`;
+            mensajeFinal = `✅ ¡Listo! Cita confirmada:\n\n📅 ${formatearFecha(fechaFinal)} a las ${data.cita_hora}\n💇‍♀️ ${servicio.nombre}\n👤 Con ${especialista.nombre}\n⏱️ ${servicio.duracion} min\n💰 $${servicio.precio}\n\nTe esperamos. ✨`;
             accionEjecutada = true;
           }
+        }
+        
+        // Si falta especialista pero tiene todo lo demás → sugerir
+        else if (data.accion === 'agendar' && servicio && data.cita_hora && !especialista) {
+          const sugerencia = generarSugerenciaEspecialistas(especialistas, data.cita_servicio);
+          mensajeFinal = `Perfecto, tengo: **${servicio.nombre}** para el ${formatearFecha(fechaFinal)} a las ${data.cita_hora}.\n\n${sugerencia}\n\n¿Con quién reservamos?`;
+          accionEjecutada = false; // Esperar respuesta
         }
         
         // ============ CANCELAR ============
         else if (data.accion === 'cancelar') {
           const resultado = await cancelarCitaAirtable(userPhone);
           mensajeFinal = resultado 
-            ? "✅ He cancelado tu cita. ¿Te gustaría agendar otra?"
-            : "No encontré citas activas para cancelar.";
+            ? "✅ Cancelado. ¿Quieres agendar otra?"
+            : "No encontré citas activas.";
           accionEjecutada = true;
         }
         
@@ -463,13 +239,14 @@ DATA_JSON:{
         else if (data.accion === 'reagendar') {
           const resultado = await reagendarCitaAirtable(userPhone, { ...data, cita_fecha: fechaFinal });
           mensajeFinal = resultado
-            ? `✅ Cita actualizada para ${formatearFecha(fechaFinal)} a las ${data.cita_hora}.`
+            ? `✅ Actualizado: ${formatearFecha(fechaFinal)} a las ${data.cita_hora}.`
             : "No pude actualizar. ¿Tienes una cita activa?";
           accionEjecutada = true;
         }
 
       } catch (e) {
-        console.error('Error JSON:', e.message);
+        console.error('Error procesando:', e.message);
+        mensajeFinal = "Disculpa, tuve un problema. ¿Me repites?";
       }
     }
 
@@ -485,6 +262,6 @@ DATA_JSON:{
 
   } catch (err) {
     console.error('❌ Error crítico:', err.message);
-    return res.status(200).send('<Response><Message>Disculpa, tuve un momento de distracción. ¿Me repites por favor? 🌸</Message></Response>');
+    return res.status(200).send('<Response><Message>Disculpa, tuve un momento. ¿Me repites? 🌸</Message></Response>');
   }
 }
