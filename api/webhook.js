@@ -13,7 +13,7 @@ const CONFIG = {
 
 const TIMEZONE = 'America/Guayaquil';
 
-// ============ FUNCIONES DE FECHA ROBUSTAS ============
+// ============ FUNCIONES DE FECHA ============
 
 function getFechaEcuador(offsetDias = 0) {
   const ahoraUTC = new Date();
@@ -39,10 +39,11 @@ function formatearFecha(fechaISO) {
 // ============ FUNCIÓN: Sugerir especialistas persuasivamente ============
 
 function generarSugerenciaEspecialistas(especialistas, servicioSolicitado) {
-  if (!especialistas || especialistas.length < 2) {
-    return especialistas?.[0]?.nombre || "nuestro equipo";
+  if (!especialistas || especialistas.length === 0) {
+    return "Te recomiendo a **nuestro equipo de especialistas**, todos certificados con estándares internacionales.";
   }
   
+  // Seleccionar hasta 2 especialistas relevantes
   const seleccionados = especialistas.slice(0, 2);
   
   const sugerencias = seleccionados.map(esp => {
@@ -50,24 +51,27 @@ function generarSugerenciaEspecialistas(especialistas, servicioSolicitado) {
     
     if (servicioSolicitado?.toLowerCase().includes('corte') || servicioSolicitado?.toLowerCase().includes('cabello')) {
       if (esp.expertise?.toLowerCase().includes('color')) {
-        mensaje = `**${esp.nombre}** — experto en colorimetría y tendencias. Sus degradados son impecables y duraderos.`;
+        mensaje = `**${esp.nombre}** — experto en colorimetría y tendencias. Sus degradados son impecables y duraderos, perfectos para quienes buscan un look moderno y sofisticado.`;
       } else if (esp.expertise?.toLowerCase().includes('corte')) {
-        mensaje = `**${esp.nombre}** — especialista en cortes estructurales. Tiene un ojo único para los ángulos que favorecen cada rostro.`;
+        mensaje = `**${esp.nombre}** — especialista en cortes estructurales. Tiene un ojo único para los ángulos que favorecen cada tipo de rostro, creando estilos personalizados que realzan tu belleza natural.`;
       } else {
-        mensaje = `**${esp.nombre}** — ${esp.expertise || 'estilista experto'} con técnicas de alta precisión.`;
+        mensaje = `**${esp.nombre}** — ${esp.expertise || 'estilista experto'} con técnicas de alta precisión y años de experiencia transformando looks.`;
       }
     } 
     else if (servicioSolicitado?.toLowerCase().includes('manicura') || servicioSolicitado?.toLowerCase().includes('uña')) {
       if (esp.expertise?.toLowerCase().includes('art') || esp.expertise?.toLowerCase().includes('diseño')) {
-        mensaje = `**${esp.nombre}** — artista en manicuras. Sus diseños son miniaturas perfectas que duran semanas intactas.`;
+        mensaje = `**${esp.nombre}** — artista en manicuras. Sus diseños son miniaturas perfectas que duran semanas intactas, ideal si buscas algo único y creativo.`;
       } else if (esp.expertise?.toLowerCase().includes('spa') || esp.expertise?.toLowerCase().includes('tratamiento')) {
-        mensaje = `**${esp.nombre}** — experto en tratamientos de spa para manos. Su técnica de masaje relajante es única en la ciudad.`;
+        mensaje = `**${esp.nombre}** — experto en tratamientos de spa para manos. Su técnica de masaje relajante es única, perfecta para una experiencia de cuidado completo.`;
       } else {
-        mensaje = `**${esp.nombre}** — ${esp.expertise || 'especialista en cuidado de uñas'} con acabados impecables.`;
+        mensaje = `**${esp.nombre}** — ${esp.expertise || 'especialista en cuidado de uñas'} con acabados impecables y atención meticulosa al detalle.`;
       }
     }
+    else if (servicioSolicitado?.toLowerCase().includes('facial') || servicioSolicitado?.toLowerCase().includes('tratamiento')) {
+      mensaje = `**${esp.nombre}** — ${esp.expertise || 'especialista en tratamientos faciales'}. Su enfoque holístico deja la piel radiante y revitalizada desde la primera sesión.`;
+    }
     else {
-      mensaje = `**${esp.nombre}** — ${esp.expertise || 'profesional de élite'}. Clientes VIP lo solicitan específicamente por su atención al detalle.`;
+      mensaje = `**${esp.nombre}** — ${esp.expertise || 'profesional de élite'}. Clientes VIP lo solicitan específicamente por su atención personalizada y resultados excepcionales.`;
     }
     
     return mensaje;
@@ -206,6 +210,7 @@ async function verificarDisponibilidad(fecha, hora, especialistaSolicitado, dura
   const inicioNuevo = h * 60 + m;
   const finNuevo = inicioNuevo + (duracionMinutos || 60);
 
+  // Horario: 9:00 - 18:00
   if (inicioNuevo < 540) {
     return { ok: false, mensaje: "Nuestro horario comienza a las 9:00. ¿Te funciona?" };
   }
@@ -277,45 +282,73 @@ export default async function handler(req, res) {
       .eq('telefono', userPhone)
       .maybeSingle();
 
-    const { data: especialistas } = await supabase.from('especialistas').select('nombre, expertise');
+    const { data: especialistas } = await supabase.from('especialistas').select('id, nombre, expertise');
     const { data: servicios } = await supabase.from('servicios').select('id, nombre, precio, duracion');
 
-    // 3. CALCULAR FECHAS
+    // 3. CALCULAR FECHAS - CORREGIDO
     const fechaHoy = getFechaEcuador(0);
     const fechaManana = getFechaEcuador(1);
     
-    // Detectar si dijo "mañana"
     const textoLower = textoUsuario.toLowerCase();
     const mencionaManana = textoLower.includes('mañana') || textoLower.includes('manana');
-    const fechaReferencia = mencionaManana ? fechaManana : fechaHoy;
+    const mencionaHoy = textoLower.includes('hoy');
+    
+    // 🔥 CORREGIDO: Determinar fecha correctamente
+    let fechaReferencia;
+    if (mencionaManana) {
+      fechaReferencia = fechaManana;
+    } else if (mencionaHoy) {
+      fechaReferencia = fechaHoy;
+    } else {
+      // Si no especifica, asumir mañana para citas nuevas (más natural)
+      fechaReferencia = fechaManana;
+    }
 
     // 4. CONSULTAR AGENDA
     const citasOcupadas = await obtenerCitasOcupadas(fechaReferencia);
 
-    // 5. SYSTEM PROMPT PERSUASIVO - EXACTAMENTE IGUAL AL QUE FUNCIONA
-    const systemPrompt = `Eres Aura, coordinadora de lujo de AuraSync. Tu misión: hacer sentir al cliente VIP desde el primer mensaje.
+    // Cargar historial
+    const { data: historial } = await supabase
+      .from('conversaciones')
+      .select('rol, contenido')
+      .eq('telefono', userPhone)
+      .order('created_at', { ascending: false })
+      .limit(6);
+
+    const historialFormateado = historial?.reverse().map(h => 
+      `${h.rol === 'user' ? 'Cliente' : 'Aura'}: ${h.contenido}`
+    ).join('\n') || '';
+
+    // 5. SYSTEM PROMPT PERSUASIVO Y HUMANIZADO
+    const systemPrompt = `Eres Aura, coordinadora de lujo de AuraSync. Tu misión: hacer sentir al cliente VIP desde el primer mensaje y agendar con estilo.
 
 [ESTILO DE COMUNICACIÓN]
-- NUNCA digas "No sé" o "Como prefieras". Eres experta, guías tú.
-- Lenguaje cálido pero ejecutivo: "Perfecto", "Excelente elección", "Te tengo una propuesta".
+- NUNCA digas "No sé" o "Como prefieras". Eres experta, guías tú con elegancia.
+- Lenguaje cálido pero ejecutivo: "Perfecto", "Excelente elección", "Te tengo una propuesta ideal".
 - Siempre destaca el valor: calidad, exclusividad, atención personalizada.
+- Usa emojis con moderación y elegancia.
 
 [DATOS DEL DÍA]
 - Hoy: ${formatearFecha(fechaHoy)}
 - Mañana: ${formatearFecha(fechaManana)}
+- Fecha de referencia para esta conversación: ${formatearFecha(fechaReferencia)}
 - Citas ocupadas: ${citasOcupadas.length > 0 ? citasOcupadas.map(c => `${c.hora} con ${c.especialista}`).join(', ') : 'Ninguna'}
 
 [ESPECIALISTAS DISPONIBLES]
 ${especialistas?.map(e => `- ${e.nombre}: ${e.expertise}`).join('\n')}
 
 [SERVICIOS]
-${servicios?.map(s => `- ${s.nombre}: $${s.precio}, ${s.duracion} min`).join('\n')}
+${servicios?.map(s => `- ${s.nombre}`).join('\n')}
+
+[HISTORIAL RECIENTE]
+${historialFormateado}
 
 [REGLAS DE ORO]
-1. Si el cliente NO especifica especialista: SUGIERE 2 opciones destacando su expertise (persuasión suave).
-2. Si el horario solicitado está ocupado: Propón la siguiente hora disponible inmediata.
-3. Solo confirma cita cuando el cliente acepte explícitamente.
-4. Nunca pidas datos que ya tienes (nombre, teléfono).
+1. PRIMER MENSAJE: Si el cliente pide cita pero NO especifica especialista, SUGIERE 2 opciones destacando su expertise con persuasión suave. NO agendes todavía.
+2. Si el cliente ELIGE especialista (ej: "Carlos", "el primero", "Ricardo"), ENTONCES confirma la cita completa.
+3. Si el horario solicitado está ocupado: Propón la siguiente hora disponible inmediata.
+4. Solo confirma cita cuando el cliente acepte explícitamente o elija especialista.
+5. Nunca pidas datos que ya tienes (nombre, teléfono).
 
 [FORMATO JSON FINAL]
 DATA_JSON:{
@@ -324,9 +357,10 @@ DATA_JSON:{
   "apellido": "${cliente?.apellido || ''}",
   "cita_fecha": "YYYY-MM-DD",
   "cita_hora": "HH:MM",
-  "cita_servicio": "...",
-  "cita_especialista": "...",
-  "necesita_sugerencia": true | false
+  "cita_servicio": "nombre exacto del servicio",
+  "cita_especialista": "nombre exacto del especialista",
+  "necesita_sugerencia": true | false,
+  "especialista_elegido": true | false
 }`;
 
     // 6. LLAMADA A OPENAI
@@ -357,39 +391,46 @@ DATA_JSON:{
         
         // Registrar cliente nuevo
         if (data.nombre && !cliente?.nombre) {
-          await supabase.from('clientes').upsert({
+          const { data: nuevoCliente } = await supabase.from('clientes').upsert({
             telefono: userPhone,
             nombre: data.nombre,
             apellido: data.apellido || "",
             created_at: new Date().toISOString()
-          }, { onConflict: 'telefono' });
-          cliente = { nombre: data.nombre };
+          }, { onConflict: 'telefono' }).select().single();
+          
+          cliente = nuevoCliente;
         }
 
-        // Determinar fecha final
+        // Determinar fecha final - CORREGIDO
         let fechaFinal = data.cita_fecha;
         if (!fechaFinal || fechaFinal === "..." || !fechaFinal.match(/^\d{4}-\d{2}-\d{2}$/)) {
-          fechaFinal = mencionaManana ? fechaManana : fechaHoy;
+          fechaFinal = fechaReferencia;
         }
         
-        // Si OpenAI generó fecha pasada, corregir a mañana
+        // Si OpenAI generó fecha pasada, corregir
         if (fechaFinal < fechaHoy) {
           fechaFinal = fechaManana;
         }
 
-        // ============ PERSUASIÓN: Si no especificó especialista ============
+        // Buscar servicio y especialista
+        const servicio = servicios?.find(s => 
+          s.nombre.toLowerCase().includes((data.cita_servicio || '').toLowerCase())
+        );
+        
+        const especialista = especialistas?.find(e => 
+          e.nombre.toLowerCase().includes((data.cita_especialista || '').toLowerCase())
+        );
+
+        // ============ PERSUASIÓN: Sugerir especialistas ============
         if (data.necesita_sugerencia || (!data.cita_especialista || data.cita_especialista === "...")) {
           const sugerencia = generarSugerenciaEspecialistas(especialistas, data.cita_servicio);
-          mensajeFinal += `\n\n${sugerencia}\n\n¿Con quién te gustaría reservar?`;
-          accionEjecutada = true; // No agendar aún, esperar respuesta
+          mensajeFinal = `¡${cliente?.nombre || 'Hola'}! ${data.cita_servicio ? `Un **${data.cita_servicio}** es una excelente elección.` : 'Qué bueno que quieras agendar con nosotros.'}\n\nTe propongo estos especialistas:\n\n${sugerencia}\n\n¿Con quién te gustaría reservar? Estoy aquí para asegurarte una experiencia exclusiva. ✨`;
+          accionEjecutada = false;
         }
         
         // ============ AGENDAR ============
-        else if (data.accion === 'agendar' && data.cita_hora && data.cita_especialista) {
-          const servicio = servicios?.find(s => 
-            s.nombre.toLowerCase().includes((data.cita_servicio || '').toLowerCase())
-          ) || { precio: 0, duracion: 60 };
-
+        else if (data.accion === 'agendar' && data.cita_hora && data.cita_especialista && servicio && especialista) {
+          
           const disponible = await verificarDisponibilidad(
             fechaFinal,
             data.cita_hora,
@@ -407,11 +448,9 @@ DATA_JSON:{
               .insert({
                 cliente_id: cliente?.id,
                 servicio_id: servicio.id,
+                especialista_id: especialista.id,
                 fecha_hora: `${fechaFinal}T${data.cita_hora}:00-05:00`,
                 estado: 'Confirmada',
-                nombre_cliente_aux: `${cliente?.nombre || data.nombre} ${cliente?.apellido || data.apellido || ''}`.trim(),
-                servicio_aux: data.cita_servicio,
-                duracion_aux: servicio.duracion,
                 created_at: new Date().toISOString()
               })
               .select()
@@ -419,23 +458,25 @@ DATA_JSON:{
 
             if (errorSupabase) {
               console.error('Error Supabase:', errorSupabase);
+              throw errorSupabase;
             }
 
-            // Crear en Airtable
+            // Crear en Airtable (con precio y duración - solo para registro interno)
             await crearCitaAirtable({
               telefono: userPhone,
               nombre: cliente?.nombre || data.nombre,
               apellido: cliente?.apellido || data.apellido || "",
               fecha: fechaFinal,
               hora: data.cita_hora,
-              servicio: data.cita_servicio,
-              especialista: data.cita_especialista,
-              precio: servicio.precio,
-              duracion: servicio.duracion,
+              servicio: servicio.nombre,
+              especialista: especialista.nombre,
+              precio: servicio.precio,      // Se guarda en Airtable pero NO se muestra
+              duracion: servicio.duracion,  // Se guarda en Airtable pero NO se muestra
               supabase_id: citaSupabase?.id
             });
 
-            mensajeFinal = `✅ ¡Excelente elección! Tu cita está confirmada:\n\n📅 ${formatearFecha(fechaFinal)} a las ${data.cita_hora}\n💇‍♀️ ${data.cita_servicio}\n👤 Con ${data.cita_especialista}\n⏱️ ${servicio.duracion} minutos\n💰 $${servicio.precio}\n\nTe esperamos con los brazos abiertos. ✨`;
+            // 🔥 MENSAJE DE CONFIRMACIÓN LIMPIO - Sin precio ni duración
+            mensajeFinal = `✅ ¡Excelente elección, ${cliente?.nombre || data.nombre || ''}! Tu cita está confirmada:\n\n📅 ${formatearFecha(fechaFinal)} a las ${data.cita_hora}\n💇‍♀️ ${servicio.nombre}\n👤 Con ${especialista.nombre}\n\nTe esperamos con los brazos abiertos para consentirte. ✨`;
             accionEjecutada = true;
           }
         }
