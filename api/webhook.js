@@ -3,11 +3,11 @@ import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import fs from 'fs'; // Añadido para verificar archivos
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// --- CONFIGURACIÓN ---
 const supabase = createClient(process.env.SUPABASE_URL || '', process.env.SUPABASE_KEY || '');
 
 const CONFIG = {
@@ -20,7 +20,7 @@ const CONFIG = {
 
 const TIMEZONE = 'America/Guayaquil';
 
-// --- TUS FUNCIONES ORIGINALES (SIN TOCAR) ---
+// --- FUNCIONES DE APOYO ---
 
 function getFechaEcuador(offsetDias = 0) {
   const ahora = new Date();
@@ -42,7 +42,6 @@ function formatearFecha(fechaISO) {
   return fecha.toLocaleDateString('es-EC', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
 }
 
-// --- MEJORA: FUNCIÓN PARA QUE AURA VEA LA AGENDA ---
 async function obtenerCitasOcupadasAirtable(fechas) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
@@ -58,7 +57,7 @@ async function obtenerCitasOcupadasAirtable(fechas) {
   } catch (error) { return []; }
 }
 
-// --- TUS FUNCIONES DE AIRTABLE (MANTENIDAS) ---
+// --- FUNCIONES DE AIRTABLE ---
 
 async function crearCitaAirtable(datos) {
   try {
@@ -121,11 +120,14 @@ async function verificarDisponibilidadAirtable(fecha, hora, especialista, duraci
   } catch (error) { return { ok: true }; }
 }
 
-// --- WEBHOOK PRINCIPAL ---
+// --- APP Y RUTAS ---
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Ruta de prueba para Vercel
+app.get('/', (req, res) => res.send('AuraSync Webhook Activo 🚀'));
 
 app.post('/api/whatsapp', async (req, res) => {
   const { Body, From, MediaUrl0 } = req.body;
@@ -134,22 +136,22 @@ app.post('/api/whatsapp', async (req, res) => {
   try {
     let textoUsuario = Body || "";
     if (MediaUrl0) {
-      const deepgramRes = await axios.post("https://api.deepgram.com/v1/listen?model=nova-2&language=es", { url: MediaUrl0 }, { headers: { 'Authorization': `Token ${CONFIG.DEEPGRAM_API_KEY}` } });
-      textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
+      try {
+        const deepgramRes = await axios.post("https://api.deepgram.com/v1/listen?model=nova-2&language=es", { url: MediaUrl0 }, { headers: { 'Authorization': `Token ${CONFIG.DEEPGRAM_API_KEY}` } });
+        textoUsuario = deepgramRes.data.results?.channels?.[0]?.alternatives?.[0]?.transcript || "";
+      } catch (e) { console.error("Error Deepgram"); }
     }
 
-    // Cargar datos de Supabase
     let { data: cliente } = await supabase.from('clientes').select('*').eq('telefono', userPhone).maybeSingle();
     const { data: especialistas } = await supabase.from('especialistas').select('nombre, expertise');
     const { data: servicios } = await supabase.from('servicios').select('id, nombre, precio, duracion');
 
-    // Cargar agenda de Airtable para que Aura "vea"
     const fechaHoy = getFechaEcuador(0);
     const fechaManana = getFechaEcuador(1);
     const ocupadas = await obtenerCitasOcupadasAirtable([fechaHoy, fechaManana]);
     const agendaTexto = ocupadas.map(c => `- ${c.fecha} ${c.hora} con ${c.especialista} (${c.servicio})`).join('\n') || "Todo libre";
 
-    const systemPrompt = `Eres Aura, una concierge de lujo humana y cálida.
+    const systemPrompt = `Eres Aura, asistente de lujo de AuraSync. Tu tono es humano, cálido y elegante.
 [AGENDA REAL ACTUAL - NO OFRECER ESTOS HORARIOS]
 ${agendaTexto}
 
@@ -160,9 +162,9 @@ ${especialistas?.map(e => `${e.nombre} (Experto en: ${e.expertise})`).join(', ')
 ${servicios?.map(s => `${s.nombre} ($${s.precio}, ${s.duracion} min)`).join(', ')}
 
 [REGLAS]
-1. Saluda y descubre qué necesita.
+1. Saluda y descubre qué necesita el cliente.
 2. Propón UN solo horario basado en la agenda real.
-3. Confirma solo cuando el usuario diga que sí.
+3. Confirma solo cuando el usuario acepte explícitamente.
 DATA_JSON:{"accion":"none","nombre":"","cita_fecha":"","cita_hora":"","cita_servicio":"","cita_especialista":""}`;
 
     const aiRes = await axios.post('https://api.openai.com/v1/chat/completions', { 
@@ -175,54 +177,38 @@ DATA_JSON:{"accion":"none","nombre":"","cita_fecha":"","cita_hora":"","cita_serv
     const jsonMatch = reply.match(/\{.*\}/s);
 
     if (jsonMatch) {
-      const data = JSON.parse(jsonMatch[0]);
-      if (data.accion === 'agendar' && data.cita_hora) {
-        const serv = servicios.find(s => s.nombre.toLowerCase().includes(data.cita_servicio.toLowerCase()));
-        const disp = await verificarDisponibilidadAirtable(data.cita_fecha || fechaHoy, data.cita_hora, data.cita_especialista, serv?.duracion);
-        if (disp.ok) {
-          const { data: newCita } = await supabase.from('citas').insert({ cliente_id: cliente?.id, fecha_hora: `${data.cita_fecha || fechaHoy}T${data.cita_hora}:00-05:00`, estado: 'Confirmada' }).select().single();
-          await crearCitaAirtable({ ...data, fecha: data.cita_fecha || fechaHoy, hora: data.cita_hora, telefono: userPhone, precio: serv?.precio, duracion: serv?.duracion, supabase_id: newCita?.id });
-          reply = reply.split('DATA_JSON')[0] + "\n\n✅ ¡Listo! Tu cita ha sido reservada.";
-        } else {
-          reply = "Lo siento, ese horario se acaba de ocupar. ¿Te gustaría intentar en otro momento?";
+      try {
+        const data = JSON.parse(jsonMatch[0]);
+        if (data.accion === 'agendar' && data.cita_hora) {
+          const serv = servicios.find(s => s.nombre.toLowerCase().includes(data.cita_servicio.toLowerCase()));
+          const disp = await verificarDisponibilidadAirtable(data.cita_fecha || fechaHoy, data.cita_hora, data.cita_especialista, serv?.duracion);
+          if (disp.ok) {
+            const { data: newCita } = await supabase.from('citas').insert({ cliente_id: cliente?.id, fecha_hora: `${data.cita_fecha || fechaHoy}T${data.cita_hora}:00-05:00`, estado: 'Confirmada' }).select().single();
+            await crearCitaAirtable({ ...data, fecha: data.cita_fecha || fechaHoy, hora: data.cita_hora, telefono: userPhone, precio: serv?.precio, duracion: serv?.duracion, supabase_id: newCita?.id });
+            reply = reply.split('DATA_JSON')[0] + "\n\n✅ ¡Hecho! Tu cita ha sido reservada.";
+          } else {
+            reply = "Lo siento, ese horario se acaba de ocupar. ¿Te parece bien otro momento?";
+          }
+        } else if (data.accion === 'cancelar') {
+          await cancelarCitaAirtable(userPhone);
+          reply = reply.split('DATA_JSON')[0] + "\n\n✅ He cancelado tu cita.";
+        } else if (data.accion === 'reagendar') {
+          await reagendarCitaAirtable(userPhone, data);
+          reply = reply.split('DATA_JSON')[0] + "\n\n✅ He actualizado tu cita.";
         }
-      } else if (data.accion === 'cancelar') {
-        await cancelarCitaAirtable(userPhone);
-        reply = reply.split('DATA_JSON')[0] + "\n\n✅ He cancelado tu cita como solicitaste.";
-      } else if (data.accion === 'reagendar') {
-        await reagendarCitaAirtable(userPhone, data);
-        reply = reply.split('DATA_JSON')[0] + "\n\n✅ He actualizado tu cita al nuevo horario.";
-      }
+      } catch (e) { console.error("Error JSON"); }
     }
 
     res.setHeader('Content-Type', 'text/xml');
     res.send(`<Response><Message>${reply.split('DATA_JSON')[0].trim()}</Message></Response>`);
   } catch (err) {
-    res.status(200).send('<Response><Message>Lo siento, tuve un problema técnico. ¿Podrías repetirme eso? 🌸</Message></Response>');
+    res.status(200).send('<Response><Message>Lo siento, tuve un problema. ¿Me repites? 🌸</Message></Response>');
   }
 });
 
-// --- INICIO DEL SERVIDOR (PARCHE VERCEL) ---
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Servidor corriendo en puerto ${PORT}`);
+});
 
-async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
-    try {
-      const { createServer } = await import('vite');
-      const vite = await createServer({ server: { middlewareMode: true }, appType: "spa" });
-      app.use(vite.middlewares);
-    } catch (e) { console.log("Vite no disponible"); }
-  } else {
-    // Si no hay carpeta dist, solo mostramos un mensaje para que no falle
-    const distPath = path.join(process.cwd(), 'dist');
-    if (fs.existsSync(distPath)) {
-      app.use(express.static(distPath));
-      app.get('*', (req, res) => res.sendFile(path.join(distPath, 'index.html')));
-    } else {
-      app.get('/', (req, res) => res.send("AuraSync Webhook Activo 🚀"));
-    }
-  }
-  app.listen(3000, "0.0.0.0", () => console.log("Servidor en puerto 3000"));
-}
-
-startServer();
 export default app;
