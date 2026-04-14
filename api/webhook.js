@@ -13,26 +13,36 @@ const CONFIG = {
 
 const TIMEZONE = 'America/Guayaquil';
 
-// ============ FUNCIONES DE FECHA ============
+// ============ FUNCIONES DE FECHA CORREGIDAS ============
 
 function getFechaEcuador(offsetDias = 0) {
-  const ahoraUTC = new Date();
-  const offsetMs = -5 * 60 * 60 * 1000;
-  const ahoraEcuador = new Date(ahoraUTC.getTime() + offsetMs);
-  ahoraEcuador.setDate(ahoraEcuador.getDate() + offsetDias);
-  return ahoraEcuador.toISOString().split('T')[0];
+  // Crear fecha en zona horaria Ecuador directamente
+  const ahora = new Date();
+  const opciones = { 
+    timeZone: TIMEZONE, 
+    year: 'numeric', 
+    month: '2-digit', 
+    day: '2-digit' 
+  };
+  const fechaEcuador = new Intl.DateTimeFormat('en-CA', opciones).format(ahora);
+  
+  if (offsetDias === 0) return fechaEcuador;
+  
+  // Sumar días si es necesario
+  const fecha = new Date(fechaEcuador + 'T12:00:00');
+  fecha.setDate(fecha.getDate() + offsetDias);
+  return fecha.toISOString().split('T')[0];
 }
 
 function formatearFecha(fechaISO) {
   if (!fechaISO || !fechaISO.match(/^\d{4}-\d{2}-\d{2}$/)) return fechaISO;
-  const [anio, mes, dia] = fechaISO.split('-').map(Number);
-  const fecha = new Date(Date.UTC(anio, mes - 1, dia, 12, 0, 0));
+  const fecha = new Date(fechaISO + 'T12:00:00-05:00');
   return fecha.toLocaleDateString('es-EC', { 
     weekday: 'long', 
     year: 'numeric', 
     month: 'long', 
     day: 'numeric',
-    timeZone: 'UTC'
+    timeZone: TIMEZONE
   });
 }
 
@@ -102,13 +112,15 @@ async function obtenerCitasOcupadas(fecha) {
 async function crearCitaAirtable(datos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
+    
+    // CORRECCIÓN: Enviar fecha y hora como strings simples, Airtable los interpretará según su configuración
     const payload = {
       records: [{
         fields: {
           "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
           "Servicio": datos.servicio,
-          "Fecha": datos.fecha,
-          "Hora": datos.hora,
+          "Fecha": datos.fecha,           // YYYY-MM-DD
+          "Hora": datos.hora,             // HH:MM
           "Especialista": datos.especialista,
           "Teléfono": datos.telefono,
           "Estado": "Confirmada",
@@ -286,7 +298,7 @@ export default async function handler(req, res) {
     const { data: especialistas } = await supabase.from('especialistas').select('id, nombre, expertise');
     const { data: servicios } = await supabase.from('servicios').select('id, nombre, precio, duracion');
 
-    // 3. CALCULAR FECHAS
+    // 3. CALCULAR FECHAS CORRECTAMENTE
     const fechaHoy = getFechaEcuador(0);
     const fechaManana = getFechaEcuador(1);
     
@@ -426,14 +438,22 @@ DATA_JSON:{
           if (!disponible.ok) {
             mensajeFinal = disponible.mensaje;
           } else {
-            // 🔥 CORREGIDO: Usar fecha_hora (timestamp) en lugar de campos separados
+            // CORRECCIÓN: Crear timestamp ISO con zona horaria Ecuador explícita
+            const fechaHoraISO = `${fechaFinal}T${data.cita_hora}:00-05:00`;
+            
+            console.log('🕐 Registrando cita:', {
+              fecha: fechaFinal,
+              hora: data.cita_hora,
+              timestampISO: fechaHoraISO
+            });
+
             const { data: citaSupabase, error: errorSupabase } = await supabase
               .from('citas')
               .insert({
                 cliente_id: cliente?.id,
                 servicio_id: servicio.id,
                 especialista_id: especialista.id,
-                fecha_hora: `${fechaFinal}T${data.cita_hora}:00-05:00`,  // Formato ISO con zona horaria Ecuador
+                fecha_hora: fechaHoraISO,  // Formato: 2026-04-14T10:00:00-05:00
                 estado: 'Confirmada',
                 created_at: new Date().toISOString()
               })
@@ -445,13 +465,13 @@ DATA_JSON:{
               throw errorSupabase;
             }
 
-            // Crear en Airtable (fecha y hora separadas)
+            // Crear en Airtable con fecha y hora separadas (como strings)
             await crearCitaAirtable({
               telefono: userPhone,
               nombre: cliente?.nombre || data.nombre,
               apellido: cliente?.apellido || data.apellido || "",
-              fecha: fechaFinal,
-              hora: data.cita_hora,
+              fecha: fechaFinal,           // "2026-04-14"
+              hora: data.cita_hora,        // "10:00"
               servicio: servicio.nombre,
               especialista: especialista.nombre,
               precio: servicio.precio,
