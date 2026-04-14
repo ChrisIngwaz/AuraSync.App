@@ -161,6 +161,7 @@ await axios.patch(url, {
     fields: {
       "Fecha": fechaUTC,
       "Hora": datos.cita_hora,
+      "Servicio": datos.cita_servicio || record.fields.Servicio,
       "Especialista": (datos.cita_especialista && datos.cita_especialista !== "...") ? datos.cita_especialista : record.fields.Especialista,
       "Estado": "Confirmada"
     }
