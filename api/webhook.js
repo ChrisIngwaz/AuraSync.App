@@ -181,34 +181,38 @@ async function cancelarCitaAirtable(telefono) {
 async function reagendarCitaAirtable(telefono, datos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-    // Buscamos la cita confirmada actual del cliente
-    const filter = encodeURIComponent(`AND({Teléfono} = '${telefono}', {Estado} = 'Confirmada')`);
     
+    // 1. Buscamos la cita que está activa actualmente para ese teléfono
+    const filter = encodeURIComponent(`AND({Teléfono} = '${telefono}', {Estado} = 'Confirmada')`);
     const busqueda = await axios.get(`${url}?filterByFormula=${filter}&maxRecords=1`, {
       headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
     });
 
-    if (busqueda.data.records.length === 0) return false;
+    if (busqueda.data.records.length === 0) {
+      console.log("⚠️ No se encontró ninguna cita activa para reagendar.");
+      return false;
+    }
 
     const record = busqueda.data.records[0];
-    
-    // Preparar la nueva fecha en formato UTC para Airtable (Ecuador +5)
+    const recordId = record.id;
+
+    // 2. Preparar la nueva fecha y hora
     const [h, min] = datos.cita_hora.split(':').map(Number);
     const [anio, mes, dia] = datos.cita_fecha.split('-').map(Number);
-    const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
+    // Ajuste UTC para Ecuador (GMT-5)
+    const nuevaFechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
 
-    // ACTUALIZACIÓN EN AIRTABLE
-    // Al actualizar el campo "Fecha" y "Hora", la cita se "mueve" en el calendario de Airtable.
-    // Si la cita antigua sigue apareciendo, es porque Airtable necesita que se limpien los campos 
-    // antiguos o que se asegure el cambio de estado si fuera necesario.
+    // 3. ACTUALIZACIÓN QUIRÚRGICA: Sobreescribimos el registro existente.
+    // Al usar PATCH sobre el ID específico del registro, Airtable MOVERÁ la cita en el calendario.
+    // No crea una nueva; transforma la de "hoy" en la de "mañana", liberando el espacio de hoy.
     await axios.patch(url, {
       records: [{
-        id: record.id,
+        id: recordId,
         fields: {
-          "Fecha": fechaUTC,
+          "Fecha": nuevaFechaUTC,
           "Hora": datos.cita_hora,
           "Especialista": datos.cita_especialista || record.fields.Especialista,
-          "Estado": "Confirmada" // Nos aseguramos que mantenga el estado
+          "Estado": "Confirmada"
         }
       }]
     }, {
@@ -218,22 +222,21 @@ async function reagendarCitaAirtable(telefono, datos) {
       }
     });
 
-    // ACTUALIZACIÓN EN SUPABASE (Sincronización)
-    // Buscamos por el ID_Supabase que guardamos en Airtable originalmente
+    // 4. Sincronizar Supabase para que la IA también vea el cambio
     if (record.fields.ID_Supabase) {
       const fechaHoraISO = `${datos.cita_fecha}T${datos.cita_hora}:00-05:00`;
       await supabase.from('citas')
         .update({ 
           fecha_hora: fechaHoraISO,
-          especialista_id: datos.especialista_id || undefined // Solo si lo tenemos
+          especialista_id: datos.especialista_id || undefined 
         })
         .eq('id', record.fields.ID_Supabase);
     }
 
-    console.log(`✅ Cita movida exitosamente: de ${record.fields.Fecha} a ${fechaUTC}`);
+    console.log(`✅ Espacio liberado. Cita movida de ${record.fields.Hora} hoy a las ${datos.cita_hora} de ${datos.cita_fecha}`);
     return true;
   } catch (error) {
-    console.error('Error reagendando:', error.response?.data || error.message);
+    console.error('❌ Error crítico en reagendamiento:', error.response?.data || error.message);
     return false;
   }
 }
