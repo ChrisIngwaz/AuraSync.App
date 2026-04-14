@@ -398,7 +398,7 @@ export default async function handler(req, res) {
       `${h.rol === 'user' ? 'Cliente' : 'Aura'}: ${h.contenido}`
     ).join('\n') || '';
 
-    // 8. SYSTEM PROMPT ORIGINAL RESTAURADO (EL QUE FUNCIONABA BIEN)
+    // 8. SYSTEM PROMPT ORIGINAL (SIN CAMBIOS)
     const systemPrompt = `Eres Aura, coordinadora de lujo de AuraSync. Tu misión: hacer sentir al cliente VIP desde el primer mensaje y agendar con estilo.
 
 [ESTILO DE COMUNICACIÓN]
@@ -468,13 +468,11 @@ DATA_JSON:{
       try {
         data = JSON.parse(jsonMatch[1]);
         
-        // SOBREESCRIBIR fecha del JSON con la fecha calculada
         if (data.cita_fecha !== fechaFinal) {
           console.log(`⚠️ Corrigiendo fecha del JSON: ${data.cita_fecha} → ${fechaFinal}`);
           data.cita_fecha = fechaFinal;
         }
         
-        // Registrar cliente nuevo
         if (data.nombre && !cliente?.nombre) {
           const { data: nuevoCliente } = await supabase.from('clientes').upsert({
             telefono: userPhone,
@@ -486,7 +484,6 @@ DATA_JSON:{
           cliente = nuevoCliente;
         }
 
-        // Buscar servicio y especialista
         const servicio = servicios?.find(s => 
           s.nombre.toLowerCase().includes((data.cita_servicio || '').toLowerCase())
         );
@@ -496,9 +493,10 @@ DATA_JSON:{
         );
 
         // ============ PERSUASIÓN: Sugerir especialistas ============
+        // CORRECCIÓN: Eliminada la mención explícita de la fecha para evitar mensaje robótico
         if (data.necesita_sugerencia || (!data.cita_especialista || data.cita_especialista === "...")) {
           const sugerencia = generarSugerenciaEspecialistas(especialistas, data.cita_servicio);
-          mensajeFinal = `¡${cliente?.nombre || 'Hola'}! ${data.cita_servicio ? `Un **${data.cita_servicio}** es una excelente elección.` : 'Qué bueno que quieras agendar con nosotros.'}\n\nTe propongo estos especialistas para ${formatearFecha(fechaFinal)}:\n\n${sugerencia}\n\n¿Con quién te gustaría reservar? Estoy aquí para asegurarte una experiencia exclusiva. ✨`;
+          mensajeFinal = `¡${cliente?.nombre || 'Hola'}! ${data.cita_servicio ? `Un **${data.cita_servicio}** es una excelente elección.` : 'Qué bueno que quieras agendar con nosotros.'}\n\nTe propongo estos especialistas:\n\n${sugerencia}\n\n¿Con quién te gustaría reservar? Estoy aquí para asegurarte una experiencia exclusiva. ✨`;
           accionEjecutada = false;
         }
 
