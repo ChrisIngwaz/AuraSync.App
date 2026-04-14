@@ -119,7 +119,7 @@ async function crearCitaAirtable(datos) {
       }]
     };
     
-    console.log('📤 Enviando a Airtable - Fecha:', datos.fecha, 'Hora:', datos.hora);
+    console.log('📤 Airtable - Fecha:', datos.fecha, 'Hora:', datos.hora);
     
     await axios.post(url, payload, {
       headers: {
@@ -294,7 +294,6 @@ export default async function handler(req, res) {
     const mencionaManana = textoLower.includes('mañana') || textoLower.includes('manana');
     const mencionaHoy = textoLower.includes('hoy');
     
-    // Fecha de referencia basada en lo que dijo el usuario
     const fechaReferencia = mencionaManana ? fechaManana : fechaHoy;
 
     // 4. CONSULTAR AGENDA
@@ -394,15 +393,8 @@ DATA_JSON:{
           cliente = nuevoCliente;
         }
 
-        // 🔥 CORRECCIÓN DEFINITIVA: Usar SIEMPRE fechaReferencia, ignorar data.cita_fecha de OpenAI
-        // La fechaReferencia se calculó del mensaje del usuario (mañana = fechaManana)
+        // USAR SIEMPRE fechaReferencia (calculada del mensaje del usuario)
         let fechaFinal = fechaReferencia;
-        
-        console.log('📅 fechaReferencia (del mensaje usuario):', fechaReferencia);
-        console.log('📅 fechaManana:', fechaManana);
-        console.log('📅 mencionaManana:', mencionaManana);
-        console.log('📅 data.cita_fecha (de OpenAI):', data.cita_fecha);
-        console.log('📅 fechaFinal a usar:', fechaFinal);
 
         // Buscar servicio y especialista
         const servicio = servicios?.find(s => 
@@ -434,14 +426,15 @@ DATA_JSON:{
           if (!disponible.ok) {
             mensajeFinal = disponible.mensaje;
           } else {
-            // Crear en Supabase
+            // 🔥 CORRECCIÓN: Guardar fecha y hora como campos de texto separados
             const { data: citaSupabase, error: errorSupabase } = await supabase
               .from('citas')
               .insert({
                 cliente_id: cliente?.id,
                 servicio_id: servicio.id,
                 especialista_id: especialista.id,
-                fecha_hora: `${fechaFinal}T${data.cita_hora}:00-05:00`,
+                fecha: fechaFinal,
+                hora: data.cita_hora,
                 estado: 'Confirmada',
                 created_at: new Date().toISOString()
               })
@@ -453,12 +446,12 @@ DATA_JSON:{
               throw errorSupabase;
             }
 
-            // Crear en Airtable - USANDO fechaFinal QUE ES fechaReferencia (mañana si dijo mañana)
+            // Crear en Airtable
             await crearCitaAirtable({
               telefono: userPhone,
               nombre: cliente?.nombre || data.nombre,
               apellido: cliente?.apellido || data.apellido || "",
-              fecha: fechaFinal,  // ← AHORA ES fechaReferencia, no data.cita_fecha
+              fecha: fechaFinal,
               hora: data.cita_hora,
               servicio: servicio.nombre,
               especialista: especialista.nombre,
@@ -467,7 +460,6 @@ DATA_JSON:{
               supabase_id: citaSupabase?.id
             });
 
-            // Mensaje de confirmación limpio (sin precio ni duración)
             mensajeFinal = `✅ ¡Excelente elección, ${cliente?.nombre || data.nombre || ''}! Tu cita está confirmada:\n\n📅 ${formatearFecha(fechaFinal)} a las ${data.cita_hora}\n💇‍♀️ ${servicio.nombre}\n👤 Con ${especialista.nombre}\n\nTe esperamos con los brazos abiertos para consentirte. ✨`;
             accionEjecutada = true;
           }
