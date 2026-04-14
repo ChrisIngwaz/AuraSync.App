@@ -320,21 +320,18 @@ export default async function handler(req, res) {
     let intencionFechaDetectada = null;
     let fechaExplicitaEncontrada = null;
     
-    // Revisar mensajes del usuario en orden cronológico inverso (más reciente primero)
     for (const msg of historialCompleto || []) {
       if (msg.rol === 'user') {
         const contenidoLower = msg.contenido.toLowerCase();
         
-        // Buscar mención explícita de fecha
         if (contenidoLower.includes('mañana') || contenidoLower.includes('manana')) {
           intencionFechaDetectada = 'manana';
-          break; // La más reciente tiene prioridad
+          break;
         } else if (contenidoLower.includes('hoy')) {
           intencionFechaDetectada = 'hoy';
           break;
         }
         
-        // Buscar fecha explícita tipo "15 de abril" o "2026-04-15"
         const matchFechaISO = msg.contenido.match(/(\d{4}-\d{2}-\d{2})/);
         if (matchFechaISO) {
           fechaExplicitaEncontrada = matchFechaISO[1];
@@ -343,7 +340,6 @@ export default async function handler(req, res) {
       }
     }
     
-    // También revisar el mensaje actual
     const textoLower = textoUsuario.toLowerCase();
     if (textoLower.includes('mañana') || textoLower.includes('manana')) {
       intencionFechaDetectada = 'manana';
@@ -365,11 +361,9 @@ export default async function handler(req, res) {
       fechaFinal = fechaHoy;
       fuenteFecha = 'intencion_hoy';
     } else {
-      // Si hay una cita previa en la conversación, mantener esa fecha
       let fechaPrevioMensaje = null;
       for (const msg of historialCompleto || []) {
         if (msg.rol === 'assistant') {
-          // Buscar patrón "martes, 15 de abril de 2026" o similar
           const matchFechaFormateada = msg.contenido.match(/(\d{4}-\d{2}-\d{2})/);
           if (matchFechaFormateada) {
             fechaPrevioMensaje = matchFechaFormateada[1];
@@ -393,8 +387,7 @@ export default async function handler(req, res) {
       intencionDetectada: intencionFechaDetectada,
       fechaExplicita: fechaExplicitaEncontrada,
       fechaFinal,
-      fuente: fuenteFecha,
-      mensajeActual: textoUsuario.substring(0, 50)
+      fuente: fuenteFecha
     });
 
     // 7. CONSULTAR AGENDA CON FECHA FINAL
@@ -405,35 +398,34 @@ export default async function handler(req, res) {
       `${h.rol === 'user' ? 'Cliente' : 'Aura'}: ${h.contenido}`
     ).join('\n') || '';
 
-    // 8. SYSTEM PROMPT CON FECHA BLOQUEADA
-    const systemPrompt = `Eres Aura, coordinadora de lujo de AuraSync.
+    // 8. SYSTEM PROMPT MODIFICADO - MÁS HUMANIZADO
+    const systemPrompt = `Eres Aura, coordinadora de lujo de AuraSync. Eres una concierge humana, cálida y natural. NUNCA suenes como un bot que repite datos obvios.
 
-[FECHA BLOQUEADA PARA ESTA CITA]
-Fecha definitiva: ${formatearFecha(fechaFinal)} (${fechaFinal})
-Esta fecha fue determinada por: ${fuenteFecha}
-NO CAMBIES ESTA FECHA bajo ninguna circunstancia a menos que el usuario pida explícitamente otra fecha.
+[CONTEXTO INTERNO - NO MENCIONAR DIRECTAMENTE]
+- Fecha actual del sistema: ${fechaHoy}
+- Fecha objetivo para esta cita: ${fechaFinal}
+- Servicios disponibles: ${servicios?.map(s => s.nombre).join(', ')}
+- Especialistas: ${especialistas?.map(e => e.nombre).join(', ')}
 
-[DATOS]
-- Hoy: ${formatearFecha(fechaHoy)}
-- Mañana: ${formatearFecha(fechaManana)}
-- Fecha de la cita: ${formatearFecha(fechaFinal)}
-- Citas ocupadas: ${citasOcupadas.length > 0 ? citasOcupadas.map(c => `${c.hora} con ${c.especialista}`).join(', ') : 'Ninguna'}
+[ESTILO DE COMUNICACIÓN]
+- Sé natural y conversacional, como una amiga experta en belleza.
+- NO repitas la fecha de forma mecánica ("la fecha disponible es...").
+- Si el usuario dice "hoy", asume que sabes que es hoy sin aclararlo.
+- Si el usuario dice "mañana", asume que sabes que es mañana sin aclararlo.
+- Fluye directamente a la acción: sugerir especialistas, confirmar horarios, etc.
+- Usa frases como "Perfecto", "Claro que sí", "Me encanta esa idea".
 
-[ESPECIALISTAS]
-${especialistas?.map(e => `- ${e.nombre}: ${e.expertise}`).join('\n')}
+[REGLAS DE FLUJO]
+1. Cuando el usuario pide cita para hoy/mañana con hora y servicio → Sugiere especialistas directamente.
+2. Cuando el usuario elige especialista → Confirma la cita completa inmediatamente.
+3. Si hay conflicto de horario → Propón alternativa naturalmente.
+4. NUNCA digas "Sin embargo, la fecha disponible es..." - eso suena robótico.
 
-[SERVICIOS]
-${servicios?.map(s => `- ${s.nombre}`).join('\n')}
+[DATOS PARA AGENDA]
+Fecha a usar en JSON: ${fechaFinal}
+Citas ocupadas: ${citasOcupadas.length > 0 ? citasOcupadas.map(c => `${c.hora} con ${c.especialista}`).join(', ') : 'Ninguna'}
 
-[HISTORIAL]
-${historialFormateado}
-
-[REGLAS ABSOLUTAS]
-1. La cita SIEMPRE será para el ${formatearFecha(fechaFinal)} - NUNCA para hoy ni para otro día.
-2. Si el usuario ya dijo "mañana" antes, mantén la fecha de mañana aunque ahora solo diga el nombre del especialista.
-3. En el JSON, cita_fecha DEBE SER EXACTAMENTE: "${fechaFinal}"
-
-[JSON OBLIGATORIO]
+[JSON OBLIGATORIO AL FINAL]
 DATA_JSON:{
   "accion": "none" | "agendar" | "cancelar" | "reagendar",
   "nombre": "${cliente?.nombre || ''}",
@@ -453,7 +445,7 @@ DATA_JSON:{
         { role: "system", content: systemPrompt },
         { role: "user", content: textoUsuario }
       ],
-      temperature: 0.1, // Muy determinista
+      temperature: 0.4,
       max_tokens: 500
     }, {
       headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` }
@@ -472,13 +464,11 @@ DATA_JSON:{
       try {
         data = JSON.parse(jsonMatch[1]);
         
-        // SOBREESCRIBIR cualquier fecha que venga del JSON con nuestra fechaFinal calculada
         if (data.cita_fecha !== fechaFinal) {
           console.log(`⚠️ Corrigiendo fecha del JSON: ${data.cita_fecha} → ${fechaFinal}`);
           data.cita_fecha = fechaFinal;
         }
         
-        // Registrar cliente nuevo
         if (data.nombre && !cliente?.nombre) {
           const { data: nuevoCliente } = await supabase.from('clientes').upsert({
             telefono: userPhone,
@@ -490,7 +480,6 @@ DATA_JSON:{
           cliente = nuevoCliente;
         }
 
-        // Buscar servicio y especialista
         const servicio = servicios?.find(s => 
           s.nombre.toLowerCase().includes((data.cita_servicio || '').toLowerCase())
         );
@@ -509,7 +498,6 @@ DATA_JSON:{
         // ============ AGENDAR ============
         else if (data.accion === 'agendar' && data.cita_hora && data.cita_especialista && servicio && especialista) {
           
-          // Verificar con fechaFinal (nunca con data.cita_fecha)
           const disponible = await verificarDisponibilidad(
             fechaFinal,
             data.cita_hora,
@@ -521,7 +509,6 @@ DATA_JSON:{
           if (!disponible.ok) {
             mensajeFinal = disponible.mensaje;
           } else {
-            // Timestamp ISO
             const fechaHoraISO = `${fechaFinal}T${data.cita_hora}:00-05:00`;
             
             console.log('🕐 AGENDANDO:', {
@@ -550,7 +537,6 @@ DATA_JSON:{
               throw errorSupabase;
             }
 
-            // Crear en Airtable con fechaFinal
             await crearCitaAirtable({
               telefono: userPhone,
               nombre: cliente?.nombre || data.nombre,
@@ -564,7 +550,6 @@ DATA_JSON:{
               supabase_id: citaSupabase?.id
             });
 
-            // Confirmación con fechaFinal explícita
             mensajeFinal = `✅ ¡Excelente elección, ${cliente?.nombre || data.nombre || ''}! Tu cita está confirmada:\n\n📅 ${formatearFecha(fechaFinal)} a las ${data.cita_hora}\n💇‍♀️ ${servicio.nombre}\n👤 Con ${especialista.nombre}\n\nTe esperamos con los brazos abiertos para consentirte. ✨`;
             accionEjecutada = true;
           }
