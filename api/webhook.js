@@ -181,6 +181,7 @@ async function cancelarCitaAirtable(telefono) {
 async function reagendarCitaAirtable(telefono, datos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
+    // Buscamos la cita confirmada actual del cliente
     const filter = encodeURIComponent(`AND({Teléfono} = '${telefono}', {Estado} = 'Confirmada')`);
     
     const busqueda = await axios.get(`${url}?filterByFormula=${filter}&maxRecords=1`, {
@@ -190,28 +191,24 @@ async function reagendarCitaAirtable(telefono, datos) {
     if (busqueda.data.records.length === 0) return false;
 
     const record = busqueda.data.records[0];
-    const camposAnteriores = record.fields;
     
-    // Mantener el especialista anterior si no se especificó uno nuevo
-    const especialistaFinal = datos.cita_especialista || camposAnteriores.Especialista;
-    
-    console.log('🔄 Reagendando:', {
-      telefono,
-      fechaAnterior: camposAnteriores.Fecha,
-      horaAnterior: camposAnteriores.Hora,
-      especialistaAnterior: camposAnteriores.Especialista,
-      fechaNueva: datos.cita_fecha,
-      horaNueva: datos.cita_hora,
-      especialistaNuevo: datos.cita_especialista,
-      especialistaFinal: especialistaFinal
-    });
-    
-    // 1. CANCELAR la cita anterior en Airtable (solo cambiamos el estado)
+    // Preparar la nueva fecha en formato UTC para Airtable (Ecuador +5)
+    const [h, min] = datos.cita_hora.split(':').map(Number);
+    const [anio, mes, dia] = datos.cita_fecha.split('-').map(Number);
+    const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
+
+    // ACTUALIZACIÓN EN AIRTABLE
+    // Al actualizar el campo "Fecha" y "Hora", la cita se "mueve" en el calendario de Airtable.
+    // Si la cita antigua sigue apareciendo, es porque Airtable necesita que se limpien los campos 
+    // antiguos o que se asegure el cambio de estado si fuera necesario.
     await axios.patch(url, {
       records: [{
         id: record.id,
         fields: {
-          "Estado": "Cancelada"
+          "Fecha": fechaUTC,
+          "Hora": datos.cita_hora,
+          "Especialista": datos.cita_especialista || record.fields.Especialista,
+          "Estado": "Confirmada" // Nos aseguramos que mantenga el estado
         }
       }]
     }, {
@@ -221,45 +218,19 @@ async function reagendarCitaAirtable(telefono, datos) {
       }
     });
 
-    // 2. CREAR nueva cita con la nueva fecha/hora
-    const [h, min] = datos.cita_hora.split(':').map(Number);
-    const [anio, mes, dia] = datos.cita_fecha.split('-').map(Number);
-    const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
-    
-    const nuevaCita = {
-      records: [{
-        fields: {
-          "Cliente": camposAnteriores.Cliente,
-          "Servicio": camposAnteriores.Servicio,
-          "Fecha": fechaUTC,
-          "Hora": datos.cita_hora,
-          "Especialista": especialistaFinal,
-          "Teléfono": telefono,
-          "Estado": "Confirmada",
-          "Importe estimado": camposAnteriores["Importe estimado"],
-          "Duración estimada (minutos)": camposAnteriores["Duración estimada (minutos)"] || 60,
-          "ID_Supabase": camposAnteriores.ID_Supabase
-        }
-      }]
-    };
-    
-    await axios.post(url, nuevaCita, {
-      headers: {
-        'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`,
-        'Content-Type': 'application/json'
-      }
-    });
-
-    // 3. Actualizar Supabase
-    if (camposAnteriores.ID_Supabase) {
+    // ACTUALIZACIÓN EN SUPABASE (Sincronización)
+    // Buscamos por el ID_Supabase que guardamos en Airtable originalmente
+    if (record.fields.ID_Supabase) {
+      const fechaHoraISO = `${datos.cita_fecha}T${datos.cita_hora}:00-05:00`;
       await supabase.from('citas')
         .update({ 
-          fecha_hora: `${datos.cita_fecha}T${datos.cita_hora}:00-05:00`,
-          estado: 'Confirmada'
+          fecha_hora: fechaHoraISO,
+          especialista_id: datos.especialista_id || undefined // Solo si lo tenemos
         })
-        .eq('id', camposAnteriores.ID_Supabase);
+        .eq('id', record.fields.ID_Supabase);
     }
-    
+
+    console.log(`✅ Cita movida exitosamente: de ${record.fields.Fecha} a ${fechaUTC}`);
     return true;
   } catch (error) {
     console.error('Error reagendando:', error.response?.data || error.message);
