@@ -108,7 +108,7 @@ async function crearCitaAirtable(datos) {
           "Cliente": `${datos.nombre} ${datos.apellido}`.trim(),
           "Servicio": datos.servicio,
           "Fecha": datos.fecha,
-          "Hora": datos.hora,  // ← Hora en formato HH:MM, sin zona horaria
+          "Hora": datos.hora,
           "Especialista": datos.especialista,
           "Teléfono": datos.telefono,
           "Estado": "Confirmada",
@@ -118,6 +118,9 @@ async function crearCitaAirtable(datos) {
         }
       }]
     };
+    
+    console.log('📤 Enviando a Airtable - Fecha:', datos.fecha, 'Hora:', datos.hora);
+    
     await axios.post(url, payload, {
       headers: {
         'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`,
@@ -391,32 +394,15 @@ DATA_JSON:{
           cliente = nuevoCliente;
         }
 
-        // 🔥 CORRECCIÓN DEFINITIVA DE FECHA
-        // Priorizar fechaReferencia (detectada del mensaje del usuario) sobre data.cita_fecha (de OpenAI)
-        let fechaFinal;
+        // 🔥 CORRECCIÓN DEFINITIVA: Usar SIEMPRE fechaReferencia, ignorar data.cita_fecha de OpenAI
+        // La fechaReferencia se calculó del mensaje del usuario (mañana = fechaManana)
+        let fechaFinal = fechaReferencia;
         
-        if (mencionaManana) {
-          // Si el usuario dijo "mañana", forzar fechaManana sin importar qué diga OpenAI
-          fechaFinal = fechaManana;
-        } else if (mencionaHoy) {
-          // Si dijo "hoy", usar fechaHoy
-          fechaFinal = fechaHoy;
-        } else if (data.cita_fecha && data.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/)) {
-          // Si OpenAI devolvió fecha válida y el usuario no especificó, usar la de OpenAI
-          fechaFinal = data.cita_fecha;
-        } else {
-          // Default: mañana (más natural para agendar)
-          fechaFinal = fechaManana;
-        }
-        
-        // Validar que no sea fecha pasada
-        if (fechaFinal < fechaHoy) {
-          fechaFinal = fechaManana;
-        }
-
-        console.log('📅 Fecha final determinada:', fechaFinal);
-        console.log('📅 Menciona mañana:', mencionaManana);
-        console.log('📅 Menciona hoy:', mencionaHoy);
+        console.log('📅 fechaReferencia (del mensaje usuario):', fechaReferencia);
+        console.log('📅 fechaManana:', fechaManana);
+        console.log('📅 mencionaManana:', mencionaManana);
+        console.log('📅 data.cita_fecha (de OpenAI):', data.cita_fecha);
+        console.log('📅 fechaFinal a usar:', fechaFinal);
 
         // Buscar servicio y especialista
         const servicio = servicios?.find(s => 
@@ -467,17 +453,17 @@ DATA_JSON:{
               throw errorSupabase;
             }
 
-            // Crear en Airtable con fechaFinal (ahora garantizada correcta)
+            // Crear en Airtable - USANDO fechaFinal QUE ES fechaReferencia (mañana si dijo mañana)
             await crearCitaAirtable({
               telefono: userPhone,
               nombre: cliente?.nombre || data.nombre,
               apellido: cliente?.apellido || data.apellido || "",
-              fecha: fechaFinal,  // ← Fecha correcta: mañana si dijo mañana
-              hora: data.cita_hora,  // ← Hora en formato HH:MM (10:00)
+              fecha: fechaFinal,  // ← AHORA ES fechaReferencia, no data.cita_fecha
+              hora: data.cita_hora,
               servicio: servicio.nombre,
               especialista: especialista.nombre,
-              precio: servicio.precio,      // Guardado en Airtable, no mostrado
-              duracion: servicio.duracion,  // Guardado en Airtable, no mostrado
+              precio: servicio.precio,
+              duracion: servicio.duracion,
               supabase_id: citaSupabase?.id
             });
 
