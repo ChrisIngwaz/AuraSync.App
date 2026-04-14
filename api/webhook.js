@@ -206,13 +206,12 @@ async function reagendarCitaAirtable(telefono, datos) {
       especialistaFinal: especialistaFinal
     });
     
-    // 1. CANCELAR la cita anterior en Airtable
+    // 1. CANCELAR la cita anterior en Airtable (solo cambiamos el estado)
     await axios.patch(url, {
       records: [{
         id: record.id,
         fields: {
-          "Estado": "Cancelada",
-          "Notas": `Reagendada para ${datos.cita_fecha} ${datos.cita_hora}`
+          "Estado": "Cancelada"
         }
       }]
     }, {
@@ -443,7 +442,7 @@ export default async function handler(req, res) {
       `${h.rol === 'user' ? 'Cliente' : 'Aura'}: ${h.contenido}`
     ).join('\n') || '';
 
-    // 8. SYSTEM PROMPT ORIGINAL (SIN CAMBIOS)
+        // 8. SYSTEM PROMPT ORIGINAL (SIN CAMBIOS) + REGLA DE REAGENDAMIENTO
     const systemPrompt = `Eres Aura, coordinadora de lujo de AuraSync. Tu misión: hacer sentir al cliente VIP desde el primer mensaje y agendar con estilo.
 
 [ESTILO DE COMUNICACIÓN]
@@ -473,6 +472,12 @@ ${historialFormateado}
 3. Si el horario solicitado está ocupado: Propón la siguiente hora disponible inmediata.
 4. Solo confirma cita cuando el cliente acepte explícitamente o elija especialista.
 5. Nunca pidas datos que ya tienes (nombre, teléfono).
+
+[REGLAS ADICIONALES PARA REAGENDAMIENTO]
+- Cuando el usuario pide "reagendar" o "cambiar" su cita, busca su cita activa actual.
+- Si el usuario NO especifica un nuevo especialista, MANTENER el especialista actual de la cita existente.
+- NUNCA sugieras un especialista diferente al reagendar a menos que el usuario lo pida explícitamente.
+- Ejemplo: Si la cita actual es con Ricardo, al reagendar sigue siendo con Ricardo salvo que el usuario diga "quiero cambiar a Carlos".
 
 [FORMATO JSON FINAL]
 DATA_JSON:{
