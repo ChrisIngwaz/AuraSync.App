@@ -831,7 +831,7 @@ export default async function handler(req, res) {
     ]);
 
     res.setHeader('Content-Type', 'text/xml');
-    return res.status(200).send(`<Response><Message>${mensajeFinal}</Message></Response>');
+    return res.status(200).send(`<Response><Message>${mensajeFinal}</Message></Response>`);
 
   } catch (err) {
     console.error('❌ Error crítico:', err);
