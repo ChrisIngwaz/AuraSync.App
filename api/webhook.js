@@ -138,7 +138,6 @@ async function crearCitaAirtable(datos) {
     });
     return true;
   } catch (error) {
-    console.error('Error creando cita:', error.message);
     return false;
   }
 }
@@ -275,133 +274,6 @@ async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSoli
   }
 }
 
-// ============ MEJORA 1: SINCRONIZACIÓN BIDIRECCIONAL ============
-
-async function sincronizarDesdeAirtable(telefono) {
-  try {
-    const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-    
-    // Buscar citas canceladas en Airtable que tengan ID_Supabase
-    const filter = encodeURIComponent(`AND({ID_Supabase}!='',OR({Estado}='Cancelada',{Estado}='Reprogramada'))`);
-    const response = await axios.get(`${url}?filterByFormula=${filter}`, {
-      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
-    });
-    
-    for (const record of response.data.records) {
-      const supabaseId = record.fields.ID_Supabase;
-      const estadoAirtable = record.fields.Estado;
-      
-      if (supabaseId) {
-        // Verificar estado actual en Supabase
-        const { data: citaSupa } = await supabase
-          .from('citas')
-          .select('estado')
-          .eq('id', supabaseId)
-          .single();
-        
-        // Solo actualizar si hay diferencia
-        if (citaSupa && citaSupa.estado !== estadoAirtable) {
-          await supabase
-            .from('citas')
-            .update({ estado: estadoAirtable })
-            .eq('id', supabaseId);
-          console.log(`Sincronizado: Cita ${supabaseId} → ${estadoAirtable}`);
-        }
-      }
-    }
-    return true;
-  } catch (error) {
-    console.error('Error sincronización:', error.message);
-    return false;
-  }
-}
-
-// ============ MEJORA 2: DETECCIÓN INTELIGENTE DE ESPECIALISTA ============
-
-async function detectarEspecialistaElegido(textoUsuario, telefono, candidatos) {
-  const textoLower = textoUsuario.toLowerCase().trim();
-  
-  // Patrones de elección directa
-  for (const cand of candidatos) {
-    const nombreLower = cand.nombre.toLowerCase();
-    const primerNombre = nombreLower.split(' ')[0];
-    const partes = nombreLower.split(' ');
-    
-    // Coincidencias exactas o parciales del nombre
-    if (textoLower.includes(nombreLower) || 
-        textoLower.includes(primerNombre) ||
-        partes.some(p => textoLower.includes(p) && p.length > 3)) {
-      return cand.nombre;
-    }
-  }
-  
-  // Patrones posicionales con contexto
-  const esPrimero = /\b(primero|primera|1|uno|option 1|opción 1|el primero|la primera)\b/i.test(textoLower);
-  const esSegundo = /\b(segundo|segunda|2|dos|option 2|opción 2|el segundo|la segunda)\b/i.test(textoLower);
-  const esCualquiera = /\b(cualquiera|me da igual|quien sea|el que tengas|disponible| primera que tengas)\b/i.test(textoLower);
-  
-  if (esPrimero && candidatos[0]) return candidatos[0].nombre;
-  if (esSegundo && candidatos[1]) return candidatos[1].nombre;
-  if (esCualquiera && candidatos[0]) return candidatos[0].nombre;
-  
-  // Si solo hay uno y el usuario confirma genéricamente
-  if (candidatos.length === 1 && /\b(sí|si|dale|ok|perfecto|bueno|va|listo)\b/i.test(textoLower)) {
-    return candidatos[0].nombre;
-  }
-  
-  return null;
-}
-
-// ============ MEJORA 3: SYSTEM PROMPT OPTIMIZADO ============
-
-function construirSystemPrompt(cliente, especialistas, servicios) {
-  const listaEsp = especialistas?.map(e => `${e.nombre} (Experto en: ${e.expertise})`).join(', ') || "nuestro equipo";
-  const catalogo = servicios?.map(s => `${s.nombre} ($${s.precio})`).join(', ') || "servicios";
-  const nombreCliente = cliente?.nombre || '';
-  
-  return `Eres Aura, asistente de élite de AuraSync. Agendas citas de belleza/bienestar por WhatsApp de forma natural y humana.
-
-[FLUJO OBLIGATORIO - NUNCA LO SALTES]
-
-PASO 1 - RECOPILACIÓN: Si falta servicio, fecha u hora, pregunta lo que falta.
-PASO 2 - SUGERENCIA: Cuando tengas servicio+fecha+hora pero NO especialista, sugiere 2 especialistas y pregunta "¿Con quién prefieres?". USA accion: "none".
-PASO 3 - CONFIRMACIÓN: Solo cuando el usuario elija especialista (nombre, "primero", "segundo", "cualquiera"), confirma y USA accion: "agendar".
-
-[REGLAS CRÍTICAS]
-
-✓ Si el usuario dice "mañana a las 11 para pedicure", USA esos datos exactos. NO preguntes otra fecha/hora.
-✓ NUNCA propongas horarios diferentes a los que pidió el usuario.
-✓ NUNCA agendes (accion: "agendar") sin especialista confirmado.
-✓ Mensajes cortos, máximo 2-3 oraciones. Tono cálido pero eficiente.
-✓ Si hay elección pendiente de especialista, espera a que elija.
-
-[INTENCIONES]
-
-- Cancelar: "cancelar", "anular", "eliminar" → accion: "cancelar"
-- Reagendar: "cambiar", "mover", "otro día", "reagendar" → accion: "reagendar"  
-- Agendar: Solo cuando tengas todos los datos + especialista confirmado
-
-[DATOS]
-Especialistas: ${listaEsp}
-Servicios: ${catalogo}
-Hoy: ${formatearFecha(getFechaEcuador())}
-Mañana: ${formatearFecha(getFechaEcuador(1))}
-
-[RESPUESTA]
-Responde de forma natural, breve y conversacional.
-
-DATA_JSON:{
-"accion": "none"|"agendar"|"cancelar"|"reagendar",
-"nombre": "${nombreCliente}",
-"apellido": "${cliente?.apellido || ''}",
-"cita_fecha": "YYYY-MM-DD",
-"cita_hora": "HH:MM",
-"cita_servicio": "...",
-"cita_especialista": "...",
-"cita_id": "..."
-}`;
-}
-
 // --- HANDLER PRINCIPAL ---
 
 export default async function handler(req, res) {
@@ -413,9 +285,6 @@ export default async function handler(req, res) {
   const userPhone = From ? From.replace('whatsapp:', '').trim() : 'test-user';
 
   try {
-    // Sincronizar estados desde Airtable primero
-    await sincronizarDesdeAirtable(userPhone);
-    
     let textoUsuario = Body || "";
 
     if (MediaUrl0) {
@@ -445,8 +314,65 @@ export default async function handler(req, res) {
       if (mensajes) historialFiltrado = mensajes.reverse();
     }
 
-    // Construir prompt optimizado
-    const systemPrompt = construirSystemPrompt(cliente, especialistas, servicios);
+    const listaEsp = especialistas?.map(e => `${e.nombre} (Experto en: ${e.expertise})`).join(', ') || "nuestro equipo";
+    const catalogo = servicios?.map(s => `${s.nombre} ($${s.precio})`).join(', ') || "servicios";
+
+    const systemPrompt = `Tu nombre es Aura, asistente de élite de AuraSync. Tu comunicación debe ser indistinguible de la de un humano: cálida, elegante, natural y persuasiva.
+[IDENTIDAD]
+
+Tono: Profesional pero cercano, sofisticado y conversacional.
+
+Personalidad: Eres una concierge de lujo muy humana.
+
+[FLUJO DE CONVERSACIÓN - REGLA DE ORO]
+Para que la conversación sea natural, NUNCA hagas más de una cosa a la vez. Sigue este flujo estrictamente:
+
+FASE DE DESCUBRIMIENTO: Si el cliente pide cita, saluda cálidamente y pregunta qué servicio busca (si no lo dijo) o sugiere especialistas. NUNCA propongas horarios en este paso.
+
+FASE DE PROPUESTA: Una vez elegido el especialista, propón UN SOLO horario concreto y pregunta si le queda bien.
+
+FASE DE CONFIRMACIÓN: SOLO cuando el cliente acepte el horario (diga "sí", "dale", "perfecto", etc.), procedes a confirmar.
+
+[RESTRICCIONES CRÍTICAS]
+
+NUNCA saludes, sugieras especialista y propongas horario en el mismo mensaje.
+
+NUNCA confirmes la cita (accion: agendar) hasta que el cliente haya dicho que SÍ al horario propuesto.
+
+Si el cliente aún no confirma el horario, usa "accion": "none".
+
+Mantén tus respuestas breves, como si estuvieras chateando por WhatsApp.
+
+[CANCELACIONES Y REAGENDAMIENTOS]
+
+Si el cliente quiere cancelar: Confirma primero si está seguro. Una vez confirmado, usa "accion": "cancelar".
+
+Si el cliente quiere cambiar su cita: Pregunta por el nuevo horario/día. Sigue el flujo de propuesta y confirmación. Una vez que acepte el nuevo horario, usa "accion": "reagendar".
+
+[RECOMENDACIONES]
+
+Especialistas: ${listaEsp}
+
+Servicios: ${catalogo}
+
+[FECHAS]
+
+Hoy es: ${formatearFecha(getFechaEcuador())}
+
+Mañana es: ${formatearFecha(getFechaEcuador(1))}
+
+[DATA_JSON ESTRUCTURA]
+Al final de cada respuesta, incluye estrictamente:
+DATA_JSON:{
+"accion": "none" | "agendar" | "cancelar" | "reagendar",
+"nombre": "${cliente?.nombre || ''}",
+"apellido": "${cliente?.apellido || ''}",
+"cita_fecha": "YYYY-MM-DD",
+"cita_hora": "HH:MM",
+"cita_servicio": "...",
+"cita_especialista": "...",
+"cita_id": "..."
+}`;
 
     const messages = [{ role: "system", content: systemPrompt }];
     historialFiltrado.forEach(msg => {
@@ -464,20 +390,17 @@ export default async function handler(req, res) {
     let datosExtraidos = {};
     let accionEjecutada = false;
     let mensajeAccion = '';
-    const textoLower = (textoUsuario || '').toLowerCase();
-    
     const jsonMatch = fullReply.match(/(?:DATA_JSON\s*:?\s*)?(?:```json\s*)?(\{[\s\S]*?"accion"[\s\S]*?\})(?:\s*```)?/i);
 
     if (jsonMatch) {
       try {
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
+        const textoLower = (textoUsuario || '').toLowerCase();
         
-        // Determinar fecha final
         let fechaFinal = getFechaEcuador(1); 
         if (textoLower.includes('hoy')) fechaFinal = getFechaEcuador(0);
         else if (datosExtraidos.cita_fecha && datosExtraidos.cita_fecha.match(/^\d{4}-\d{2}-\d{2}$/)) fechaFinal = datosExtraidos.cita_fecha;
 
-        // Guardar datos del cliente si es nuevo
         if (datosExtraidos.nombre && esNuevo) {
           await supabase.from('clientes').upsert({
             telefono: userPhone,
@@ -512,7 +435,15 @@ export default async function handler(req, res) {
           if (fechaFinal && datosExtraidos.cita_hora) {
             let servicioData = (servicios?.find(s => (datosExtraidos.cita_servicio || '').toLowerCase().includes(s.nombre.toLowerCase())) || { id: null, nombre: "Servicio", precio: 0, duracion: 60 });
             
-            // Buscar si hay elección pendiente reciente
+            // ============================================================
+            // CORRECCIÓN: LÓGICA MEJORADA PARA DETECTAR ESPECIALISTA
+            // ============================================================
+            
+            let especialistaFinal = datosExtraidos.cita_especialista;
+            let candidatosPendientes = [];
+            let hayPendienteActivo = false;
+            
+            // Buscar si hay elección pendiente reciente (últimos 10 minutos)
             const { data: pendienteRaw } = await supabase
               .from('conversaciones')
               .select('contenido, created_at')
@@ -523,40 +454,96 @@ export default async function handler(req, res) {
               .limit(1)
               .single();
 
-            let especialistaFinal = datosExtraidos.cita_especialista;
-            let candidatosPendientes = [];
-            
-            // Verificar si hay pendiente válido (menos de 10 minutos)
             if (pendienteRaw?.contenido) {
               const pendienteTime = new Date(pendienteRaw.created_at);
               const ahora = new Date();
               const diffMinutos = (ahora - pendienteTime) / 1000 / 60;
               
               if (diffMinutos < 10) {
+                hayPendienteActivo = true;
                 const pendiente = JSON.parse(pendienteRaw.contenido.replace('PENDIENTE_ELECCION:', ''));
                 candidatosPendientes = pendiente.candidatos || [];
                 
-                // Detectar elección del usuario
-                especialistaFinal = await detectarEspecialistaElegido(textoUsuario, userPhone, candidatosPendientes);
+                // Detectar elección del usuario en el mensaje ACTUAL
+                for (const cand of candidatosPendientes) {
+                  const nombreLower = cand.nombre.toLowerCase();
+                  const primerNombre = nombreLower.split(' ')[0];
+                  
+                  // Coincidencia exacta o parcial del nombre
+                  if (textoLower.includes(nombreLower) || 
+                      textoLower.includes(primerNombre) ||
+                      // Opción primera
+                      ((textoLower.includes('primero') || 
+                        textoLower.includes('primera') || 
+                        textoLower.includes('1') ||
+                        textoLower.includes('opción 1') ||
+                        textoLower.includes('option 1')) && 
+                       candidatosPendientes[0]?.id === cand.id) ||
+                      // Opción segunda  
+                      ((textoLower.includes('segundo') || 
+                        textoLower.includes('segunda') || 
+                        textoLower.includes('2') ||
+                        textoLower.includes('opción 2') ||
+                        textoLower.includes('option 2')) && 
+                       candidatosPendientes[1]?.id === cand.id)) {
+                    especialistaFinal = cand.nombre;
+                    break;
+                  }
+                }
+                
+                // Si dice "cualquiera", asignar el primero
+                if (!especialistaFinal && 
+                    (textoLower.includes('cualquiera') || 
+                     textoLower.includes('me da igual') ||
+                     textoLower.includes('quien sea'))) {
+                  especialistaFinal = candidatosPendientes[0]?.nombre;
+                }
               }
             }
 
-            // Si no hay especialista elegido, sugerir 2
+            // ============================================================
+            // SI NO HAY ESPECIALISTA ELEGIDO, SUGERIR 2
+            // ============================================================
+            
             if (!especialistaFinal) {
+              // Buscar especialistas que puedan hacer el servicio
               let candidatos = especialistas.filter(e => puedeHacerServicio(e, servicioData.nombre));
               
-              if (candidatos.length < 2) {
+              // Si hay menos de 2, completar con otros disponibles
+              if (candidatos.length === 0) {
+                candidatos = especialistas.slice(0, 2);
+              } else if (candidatos.length === 1) {
+                // Agregar otro especialista diferente
                 const usados = new Set(candidatos.map(c => c.id));
                 const extras = especialistas.filter(e => !usados.has(e.id));
-                candidatos = [...candidatos, ...extras].slice(0, 2);
-              } else {
+                if (extras.length > 0) {
+                  candidatos.push(extras[0]);
+                }
+              } else if (candidatos.length > 2) {
+                // Aleatorizar y tomar solo 2
                 candidatos = candidatos.sort(() => Math.random() - 0.5).slice(0, 2);
               }
               
-              const sugerencia = generarSugerenciaEspecialistas(candidatos, servicioData, fechaFinal, datosExtraidos.cita_hora, { nombre: cliente?.nombre || datosExtraidos.nombre });
+              // Generar sugerencia
+              const sugerencia = generarSugerenciaEspecialistas(
+                candidatos, 
+                servicioData, 
+                fechaFinal, 
+                datosExtraidos.cita_hora, 
+                { nombre: cliente?.nombre || datosExtraidos.nombre }
+              );
+              
               mensajeAccion = sugerencia.mensaje;
               
-              // Guardar pendiente
+              // Guardar pendiente (eliminar anterior si existe)
+              if (hayPendienteActivo) {
+                await supabase.from('conversaciones')
+                  .delete()
+                  .eq('telefono', userPhone)
+                  .eq('rol', 'system')
+                  .ilike('contenido', 'PENDIENTE_ELECCION:%');
+              }
+              
               await supabase.from('conversaciones').insert({
                 telefono: userPhone,
                 rol: 'system',
@@ -571,14 +558,16 @@ export default async function handler(req, res) {
               
               accionEjecutada = true;
             } else {
-              // Verificar disponibilidad y agendar
+              // ============================================================
+              // TENEMOS ESPECIALISTA: PROCEDER A AGENDAR
+              // ============================================================
+              
               const disponible = await verificarDisponibilidadAirtable(fechaFinal, datosExtraidos.cita_hora, especialistaFinal, servicioData.duracion);
 
               if (!disponible.ok) {
                 const alternativa = await buscarAlternativaAirtable(fechaFinal, datosExtraidos.cita_hora, especialistaFinal, servicioData.duracion);
                 mensajeAccion = `Ese horario no está disponible. ${alternativa.mensaje}`;
               } else {
-                // Crear cita en Supabase
                 const { data: citaSupabase } = await supabase.from('citas').insert({
                   cliente_id: cliente?.id || null,
                   servicio_id: servicioData.id || null,
@@ -586,11 +575,9 @@ export default async function handler(req, res) {
                   estado: 'Confirmada',
                   nombre_cliente_aux: `${datosExtraidos.nombre || cliente?.nombre} ${datosExtraidos.apellido || cliente?.apellido}`.trim(),
                   servicio_aux: servicioData.nombre,
-                  duracion_aux: servicioData.duracion,
-                  especialista_aux: especialistaFinal
+                  duracion_aux: servicioData.duracion
                 }).select().single();
 
-                // Crear en Airtable
                 const citaAirtable = await crearCitaAirtable({
                   telefono: userPhone,
                   nombre: datosExtraidos.nombre || cliente?.nombre,
@@ -620,26 +607,20 @@ export default async function handler(req, res) {
                     datosExtraidos.cita_hora
                   );
                 } else {
-                  mensajeAccion = "Hubo un error registrando tu cita. Por favor intenta de nuevo.";
+                  mensajeAccion = "Error registrando en Airtable.";
                 }
               }
               accionEjecutada = true;
             }
           }
         }
-      } catch (e) { 
-        console.error('Error JSON:', e.message); 
-      }
+      } catch (e) { console.error('Error JSON:', e.message); }
     }
 
     let cleanReply = fullReply.split(/DATA_JSON|```json/i)[0].trim();
-    if (accionEjecutada && mensajeAccion) cleanReply = `${cleanReply}\n\n${mensajeAccion}`.trim();
+    if (accionEjecutada && mensajeAccion) cleanReply = `${cleanReply}\n\n${mensajeAccion}`;
 
-    await supabase.from('conversaciones').insert([
-      { telefono: userPhone, rol: 'user', contenido: textoUsuario }, 
-      { telefono: userPhone, rol: 'assistant', contenido: cleanReply }
-    ]);
-    
+    await supabase.from('conversaciones').insert([{ telefono: userPhone, rol: 'user', contenido: textoUsuario }, { telefono: userPhone, rol: 'assistant', contenido: cleanReply }]);
     res.setHeader('Content-Type', 'text/xml');
     return res.status(200).send(`<Response><Message>${cleanReply}</Message></Response>`);
   } catch (err) {
