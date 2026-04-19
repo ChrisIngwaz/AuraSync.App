@@ -247,7 +247,6 @@ async function verificarDisponibilidadReal(fecha, hora, duracion, especialistaNo
   const inicio = h * 60 + m;
   const fin = inicio + (duracion || 60);
   
-  // Validar horario de atención 9 AM - 6 PM
   if (inicio < 540) return { disponible: false, razon: 'horario_cerrado', mensaje: 'Nuestro horario comienza a las 9:00 AM. ¿Te funciona?' };
   if (fin > 1080) return { disponible: false, razon: 'horario_cerrado', mensaje: 'Ese horario excede nuestra jornada (6:00 PM). ¿Otra hora?' };
   
@@ -269,49 +268,6 @@ async function verificarDisponibilidadReal(fecha, hora, duracion, especialistaNo
   }
   
   return { disponible: true };
-}
-
-async function buscarAlternativas(fecha, horaPreferida, duracion, especialistaNombre, limite = 3) {
-  const citasOcupadas = await obtenerCitasOcupadas(fecha);
-  const ocupadasEspecialista = citasOcupadas.filter(c => c.especialista === especialistaNombre);
-  
-  const alternativas = [];
-  const [hPref, mPref] = horaPreferida.split(':').map(Number);
-  const minutosPref = hPref * 60 + mPref;
-  
-  // Buscar antes y después de la hora preferida
-  const rangos = [
-    { inicio: 540, fin: minutosPref }, // Antes
-    { inicio: minutosPref + duracion, fin: 1080 - duracion } // Después
-  ];
-  
-  for (const rango of rangos) {
-    for (let min = rango.inicio; min <= rango.fin; min += 30) {
-      const h = Math.floor(min / 60);
-      const m = min % 60;
-      const horaStr = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-      
-      let libre = true;
-      for (const cita of ocupadasEspecialista) {
-        const [hc, mc] = cita.hora.split(':').map(Number);
-        const inicioC = hc * 60 + mc;
-        const finC = inicioC + (cita.duracion || 60);
-        
-        if (min < finC && (min + duracion) > inicioC) {
-          libre = false;
-          break;
-        }
-      }
-      
-      if (libre) {
-        alternativas.push(horaStr);
-        if (alternativas.length >= limite) break;
-      }
-    }
-    if (alternativas.length >= limite) break;
-  }
-  
-  return alternativas;
 }
 
 // ============ GENERADORES DE MENSAJES ============
@@ -345,7 +301,6 @@ function generarSugerenciaEspecialistas(especialistasFiltrados, servicio, fecha,
   };
 }
 
-// MENSAJE CON CHECK VERDE DOBLE
 function mensajeConfirmacion(cliente, servicio, especialista, fecha, hora) {
   return `✅ ¡Confirmado ${cliente?.nombre || ''}! ✅\n\n📅 ${formatearFecha(fecha)} a las ${formatearHora(hora)}\n💇‍♀️ ${servicio.nombre}\n✨ Con ${especialista.nombre}\n\n¡Te esperamos! 😊✨`;
 }
@@ -408,8 +363,7 @@ export default async function handler(req, res) {
       fechaDetectada = getFechaEcuador(0);
     }
     
-    // 4. PREPARAR CONTEXTO SIMPLE PARA OPENAI
-    const fechaContexto = fechaDetectada || getFechaEcuador(1);
+    // 4. PREPARAR CONTEXTO
     const fechaHoy = getFechaEcuador(0);
     const fechaManana = getFechaEcuador(1);
     
@@ -417,8 +371,8 @@ export default async function handler(req, res) {
       ? citasUsuario.map(c => `- ${c.servicio} el ${formatearFecha(c.fecha)} a las ${formatearHora(c.hora)}`).join('\n')
       : "Sin citas activas";
 
-    // 5. SYSTEM PROMPT SIMPLIFICADO - SIN DATOS DE OCUPACIÓN QUE CONFUNDAN A OPENAI
-const systemPrompt = `Eres Aura, coordinadora de agenda de lujo de AuraSync. Eres cálida, profesional y eficiente.
+    // 5. SYSTEM PROMPT SIMPLIFICADO
+    const systemPrompt = `Eres Aura, coordinadora de agenda de lujo de AuraSync. Eres cálida, profesional y eficiente.
 
 [DATOS DEL CLIENTE]
 Teléfono: ${userPhone}
@@ -434,7 +388,7 @@ ${servicios.map(s => `- ${s.nombre}`).join('\n')}
 [REGLAS]
 - Si el usuario dice "mañana", la fecha es ${fechaManana}
 - Si dice "hoy", la fecha es ${fechaHoy}
-- NO digas que algo está ocupado o disponible - eso lo verifico yo después
+- NO confirmes citas directamente - siempre sugiere especialistas primero
 - Solo extrae lo que pide el usuario en el JSON
 
 Cuando detectes intención de agendar, extrae en JSON:
@@ -448,13 +402,13 @@ DATA_JSON:{
   "apellido": "${cliente?.apellido || ''}"
 }`;
 
-    // 6. OBTENER HISTORIAL CORTO (solo últimos 4 para no saturar)
+    // 6. OBTENER HISTORIAL
     const { data: historial } = await supabase
       .from('conversaciones')
       .select('rol, contenido')
       .eq('telefono', userPhone)
       .order('created_at', { ascending: false })
-      .limit(4);
+      .limit(6);
     
     const messages = [{ role: "system", content: systemPrompt }];
     if (historial) {
@@ -499,35 +453,125 @@ DATA_JSON:{
       }
     }
 
-    // 9. EJECUTAR ACCIONES CON LÓGICA PROPIA, NO DELEGADA A OPENAI
+    // 9. EJECUTAR ACCIONES
     let resultadoAccion = null;
     
-    if (datosAccion && datosAccion.accion === 'agendar') {
-      const { cita_fecha, cita_hora, cita_servicio, cita_especialista, nombre, apellido } = datosAccion;
+    // PRIMERO: Verificar si hay elección pendiente de especialista
+    const { data: pendienteRaw } = await supabase
+      .from('conversaciones')
+      .select('contenido')
+      .eq('telefono', userPhone)
+      .eq('rol', 'system')
+      .ilike('contenido', 'PENDIENTE_ELECCION:%')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+    
+    if (pendienteRaw?.contenido) {
+      const pendiente = JSON.parse(pendienteRaw.contenido.replace('PENDIENTE_ELECCION:', ''));
       
-      // Usar fecha detectada si OpenAI no la puso bien
-      const fechaFinal = cita_fecha || fechaDetectada || getFechaEcuador(1);
+      // Detectar si el usuario eligió uno de los candidatos
+      let elegido = null;
       
-      // Buscar servicio
-      const servicio = servicios.find(s => 
-        s.nombre.toLowerCase().includes((cita_servicio || '').toLowerCase())
-      );
+      for (const cand of pendiente.candidatos) {
+        const nombreLower = cand.nombre.toLowerCase();
+        const primerNombre = nombreLower.split(' ')[0];
+        
+        if (textoLower.includes(nombreLower) || 
+            textoLower.includes(primerNombre) ||
+            (textoLower.includes('primero') && pendiente.candidatos[0]?.id === cand.id) ||
+            (textoLower.includes('segundo') && pendiente.candidatos[1]?.id === cand.id) ||
+            (textoLower.includes('1') && pendiente.candidatos[0]?.id === cand.id) ||
+            (textoLower.includes('2') && pendiente.candidatos[1]?.id === cand.id)) {
+          elegido = cand;
+          break;
+        }
+      }
       
-      if (!servicio) {
-        resultadoAccion = "No reconocí ese servicio. ¿Podrías repetir? Tenemos: " + servicios.map(s => s.nombre).join(', ');
-      } else if (!cita_hora) {
-        resultadoAccion = `¿A qué hora te gustaría tu ${servicio.nombre}?`;
-      } else {
-        // Buscar especialista o sugerir
-        let especialista = especialistas.find(e => 
-          e.nombre.toLowerCase().includes((cita_especialista || '').toLowerCase())
+      if (elegido) {
+        // Verificar disponibilidad y agendar
+        const servicio = servicios.find(s => s.nombre === pendiente.servicio.nombre);
+        const especialista = especialistas.find(e => e.id === elegido.id);
+        
+        const verificacion = await verificarDisponibilidadReal(
+          pendiente.fecha,
+          pendiente.hora,
+          servicio?.duracion || 60,
+          elegido.nombre
         );
         
-        if (!especialista) {
-          // SUGERIR 2 ESPECIALISTAS ALEATORIOS CON EXPERTISE
+        if (verificacion.disponible) {
+          // Agendar
+          const clienteActual = clientes.find(c => c.telefono === userPhone) ||
+            (await supabase.from('clientes').upsert({
+              telefono: userPhone,
+              nombre: cliente?.nombre || 'Cliente',
+              apellido: cliente?.apellido || '',
+              created_at: new Date().toISOString()
+            }, { onConflict: 'telefono' }).select().single()).data;
+          
+          const { data: citaSupabase, error: errorSupabase } = await supabase
+            .from('citas')
+            .insert({
+              cliente_id: clienteActual?.id,
+              servicio_id: servicio?.id,
+              especialista_id: elegido.id,
+              fecha_hora: `${pendiente.fecha}T${pendiente.hora}:00-05:00`,
+              estado: 'Confirmada',
+              created_at: new Date().toISOString()
+            })
+            .select()
+            .single();
+          
+          if (!errorSupabase && citaSupabase) {
+            await crearCitaAirtable({
+              telefono: userPhone,
+              nombre: clienteActual?.nombre || cliente?.nombre || 'Cliente',
+              apellido: clienteActual?.apellido || cliente?.apellido || '',
+              fecha: pendiente.fecha,
+              hora: pendiente.hora,
+              servicio: servicio?.nombre || pendiente.servicio.nombre,
+              especialista: elegido.nombre,
+              precio: servicio?.precio || 0,
+              duracion: servicio?.duracion || 60,
+              supabase_id: citaSupabase.id
+            });
+            
+            resultadoAccion = mensajeConfirmacion(
+              clienteActual || cliente || { nombre: cliente?.nombre },
+              servicio || pendiente.servicio,
+              especialista,
+              pendiente.fecha,
+              pendiente.hora
+            );
+          } else {
+            resultadoAccion = "Tuve un problema. ¿Me repites?";
+          }
+        } else {
+          resultadoAccion = `${elegido.nombre} ya no está disponible a esa hora. ¿Te gustaría otra opción?`;
+        }
+      }
+    }
+    
+    // SI NO HAY ELECCIÓN PENDIENTE, procesar acción normal
+    else if (datosAccion) {
+      const { accion, cita_fecha, cita_hora, cita_servicio, cita_especialista, nombre, apellido } = datosAccion;
+      
+      if (accion === 'agendar') {
+        const fechaFinal = cita_fecha || fechaDetectada || getFechaEcuador(1);
+        
+        const servicio = servicios.find(s => 
+          s.nombre.toLowerCase().includes((cita_servicio || '').toLowerCase())
+        );
+        
+        if (!servicio) {
+          resultadoAccion = "No reconocí ese servicio. ¿Podrías repetir? Tenemos: " + servicios.map(s => s.nombre).join(', ');
+        } else if (!cita_hora) {
+          resultadoAccion = `¿A qué hora te gustaría tu ${servicio.nombre}?`;
+        } else {
+          // SIEMPRE sugerir especialistas primero, nunca confirmar directo
           let candidatos = especialistas.filter(e => puedeHacerServicio(e, servicio.nombre));
           
-          // Completar hasta 2 si hace falta
           if (candidatos.length < 2) {
             const usados = new Set(candidatos.map(c => c.id));
             const extras = especialistas.filter(e => !usados.has(e.id));
@@ -543,106 +587,41 @@ DATA_JSON:{
           await supabase.from('conversaciones').insert({
             telefono: userPhone,
             rol: 'system',
-            contenido: `PENDIENTE:${JSON.stringify({fecha: fechaFinal, hora: cita_hora, servicio: servicio.nombre})}`,
+            contenido: `PENDIENTE_ELECCION:${JSON.stringify({
+              fecha: fechaFinal,
+              hora: cita_hora,
+              servicio: servicio,
+              candidatos: candidatos.map(c => ({ id: c.id, nombre: c.nombre }))
+            })}`,
             created_at: new Date().toISOString()
           });
-        } else {
-          // VERIFICAR DISPONIBILIDAD Y AGENDAR
-          const verificacion = await verificarDisponibilidadReal(fechaFinal, cita_hora, servicio.duracion, especialista.nombre);
-          
-          if (!verificacion.disponible) {
-            // Buscar alternativas de hora
-            const alternativas = await buscarAlternativas(fechaFinal, cita_hora, servicio.duracion, especialista.nombre);
-            
-            if (alternativas.length > 0) {
-              resultadoAccion = `${especialista.nombre} no está disponible a las ${formatearHora(cita_hora)}. ¿Te funciona a las ${alternativas.map(formatearHora).join(', ')}?`;
-            } else {
-              // Sugerir otros especialistas
-              const otros = especialistas
-                .filter(e => e.id !== especialista.id && puedeHacerServicio(e, servicio.nombre))
-                .slice(0, 2);
-              
-              if (otros.length > 0) {
-                const sugerencia = generarSugerenciaEspecialistas(otros, servicio, fechaFinal, cita_hora, { nombre });
-                resultadoAccion = `Ese horario está ocupado. ${sugerencia.mensaje}`;
-              } else {
-                resultadoAccion = "No hay disponibilidad ese día. ¿Otra fecha?";
-              }
-            }
-          } else {
-            // AGENDAR: Supabase primero, luego Airtable
-            const clienteActual = clientes.find(c => c.telefono === userPhone) || 
-              (await supabase.from('clientes').upsert({
-                telefono: userPhone,
-                nombre: nombre || 'Cliente',
-                apellido: apellido || '',
-                created_at: new Date().toISOString()
-              }, { onConflict: 'telefono' }).select().single()).data;
-            
-            const { data: citaSupabase, error: errorSupabase } = await supabase
-              .from('citas')
-              .insert({
-                cliente_id: clienteActual?.id,
-                servicio_id: servicio.id,
-                especialista_id: especialista.id,
-                fecha_hora: `${fechaFinal}T${cita_hora}:00-05:00`,
-                estado: 'Confirmada',
-                created_at: new Date().toISOString()
-              })
-              .select()
-              .single();
-            
-            if (errorSupabase) {
-              resultadoAccion = "Tuve un problema. ¿Me repites?";
-            } else {
-              const resultadoAirtable = await crearCitaAirtable({
-                telefono: userPhone,
-                nombre: clienteActual?.nombre || nombre || 'Cliente',
-                apellido: clienteActual?.apellido || apellido || '',
-                fecha: fechaFinal,
-                hora: cita_hora,
-                servicio: servicio.nombre,
-                especialista: especialista.nombre,
-                precio: servicio.precio,
-                duracion: servicio.duracion,
-                supabase_id: citaSupabase.id
-              });
-              
-              if (resultadoAirtable.ok) {
-                resultadoAccion = mensajeConfirmacion(clienteActual || { nombre }, servicio, especialista, fechaFinal, cita_hora);
-              } else {
-                await supabase.from('citas').delete().eq('id', citaSupabase.id);
-                resultadoAccion = "No pude confirmar. ¿Intentamos de nuevo?";
-              }
-            }
+        }
+      }
+      else if (accion === 'cancelar') {
+        const cita = citasUsuario[0];
+        if (cita) {
+          await actualizarEstadoCitaAirtable(cita.id, 'Cancelada');
+          if (cita.idSupabase) {
+            await supabase.from('citas').update({ estado: 'Cancelada' }).eq('id', cita.idSupabase);
           }
+          resultadoAccion = mensajeCancelacion();
+        } else {
+          resultadoAccion = "No encontré citas para cancelar.";
         }
       }
-    }
-    else if (datosAccion && datosAccion.accion === 'cancelar') {
-      const cita = citasUsuario[0];
-      if (cita) {
-        await actualizarEstadoCitaAirtable(cita.id, 'Cancelada');
-        if (cita.idSupabase) {
-          await supabase.from('citas').update({ estado: 'Cancelada' }).eq('id', cita.idSupabase);
+      else if (accion === 'reagendar') {
+        const cita = citasUsuario.find(c => c.id === datosAccion.cita_id) || citasUsuario[0];
+        if (cita && datosAccion.cita_fecha && datosAccion.cita_hora) {
+          const ok = await reagendarCitaAirtable(cita.id, datosAccion.cita_fecha, datosAccion.cita_hora, datosAccion.cita_especialista);
+          if (ok && cita.idSupabase) {
+            await supabase.from('citas').update({
+              fecha_hora: `${datosAccion.cita_fecha}T${datosAccion.cita_hora}:00-05:00`
+            }).eq('id', cita.idSupabase);
+          }
+          resultadoAccion = ok ? mensajeReagendamiento(datosAccion.cita_fecha, datosAccion.cita_hora, datosAccion.cita_especialista || cita.especialista) : "No pude reagendar.";
+        } else {
+          resultadoAccion = "No encontré cita para reagendar.";
         }
-        resultadoAccion = mensajeCancelacion();
-      } else {
-        resultadoAccion = "No encontré citas para cancelar.";
-      }
-    }
-    else if (datosAccion && datosAccion.accion === 'reagendar') {
-      const cita = citasUsuario.find(c => c.id === datosAccion.cita_id) || citasUsuario[0];
-      if (cita && datosAccion.cita_fecha && datosAccion.cita_hora) {
-        const ok = await reagendarCitaAirtable(cita.id, datosAccion.cita_fecha, datosAccion.cita_hora, datosAccion.cita_especialista);
-        if (ok && cita.idSupabase) {
-          await supabase.from('citas').update({
-            fecha_hora: `${datosAccion.cita_fecha}T${datosAccion.cita_hora}:00-05:00`
-          }).eq('id', cita.idSupabase);
-        }
-        resultadoAccion = ok ? mensajeReagendamiento(datosAccion.cita_fecha, datosAccion.cita_hora, datosAccion.cita_especialista || cita.especialista) : "No pude reagendar.";
-      } else {
-        resultadoAccion = "No encontré cita para reagendar.";
       }
     }
 
