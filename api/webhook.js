@@ -505,59 +505,51 @@ DATA_JSON:{
             // SI NO HAY ESPECIALISTA ELEGIDO, SUGERIR 2
             // ============================================================
             
-            if (!especialistaFinal) {
-              // Buscar especialistas que puedan hacer el servicio
-              let candidatos = especialistas.filter(e => puedeHacerServicio(e, servicioData.nombre));
-              
-              // Si hay menos de 2, completar con otros disponibles
-              if (candidatos.length === 0) {
-                candidatos = especialistas.slice(0, 2);
-              } else if (candidatos.length === 1) {
-                // Agregar otro especialista diferente
-                const usados = new Set(candidatos.map(c => c.id));
-                const extras = especialistas.filter(e => !usados.has(e.id));
-                if (extras.length > 0) {
-                  candidatos.push(extras[0]);
-                }
-              } else if (candidatos.length > 2) {
-                // Aleatorizar y tomar solo 2
-                candidatos = candidatos.sort(() => Math.random() - 0.5).slice(0, 2);
-              }
-              
-              // Generar sugerencia
-              const sugerencia = generarSugerenciaEspecialistas(
-                candidatos, 
-                servicioData, 
-                fechaFinal, 
-                datosExtraidos.cita_hora, 
-                { nombre: cliente?.nombre || datosExtraidos.nombre }
-              );
-              
-              mensajeAccion = sugerencia.mensaje;
-              
-              // Guardar pendiente (eliminar anterior si existe)
-              if (hayPendienteActivo) {
-                await supabase.from('conversaciones')
-                  .delete()
-                  .eq('telefono', userPhone)
-                  .eq('rol', 'system')
-                  .ilike('contenido', 'PENDIENTE_ELECCION:%');
-              }
-              
-              await supabase.from('conversaciones').insert({
-                telefono: userPhone,
-                rol: 'system',
-                contenido: `PENDIENTE_ELECCION:${JSON.stringify({
-                  fecha: fechaFinal,
-                  hora: datosExtraidos.cita_hora,
-                  servicio: servicioData,
-                  candidatos: candidatos.map(c => ({ id: c.id, nombre: c.nombre }))
-                })}`,
-                created_at: new Date().toISOString()
-              });
-              
-              accionEjecutada = true;
-            } else {
+            // ... (dentro de else if (accion === 'agendar'))
+
+if (!especialistaFinal) {
+  // 1. Filtrar especialistas que realmente pueden hacer el servicio
+  let candidatos = especialistas.filter(e => puedeHacerServicio(e, servicioData.nombre));
+  
+  // 2. Si no hay específicos, tomar los 2 primeros disponibles por defecto
+  if (candidatos.length === 0) {
+    candidatos = especialistas.slice(0, 2);
+  } else if (candidatos.length === 1) {
+    const extras = especialistas.filter(e => e.id !== candidatos[0].id);
+    if (extras.length > 0) candidatos.push(extras[0]);
+  } else if (candidatos.length > 2) {
+    candidatos = candidatos.sort(() => Math.random() - 0.5).slice(0, 2);
+  }
+
+  // 3. Generar el mensaje de sugerencia con el formato de medallas
+  const sugerencia = generarSugerenciaEspecialistas(
+    candidatos, 
+    servicioData, 
+    fechaFinal, 
+    datosExtraidos.cita_hora, 
+    { nombre: cliente?.nombre || datosExtraidos.nombre }
+  );
+  
+  // IMPORTANTE: Sobrescribimos el mensaje de la IA para que use el de las 2 opciones
+  mensajeAccion = sugerencia.mensaje;
+  fullReply = ""; // Limpiamos la respuesta de la IA para usar solo la sugerencia técnica
+  
+  // 4. Guardar en Supabase para recordar qué opciones le dimos al usuario
+  await supabase.from('conversaciones').insert({
+    telefono: userPhone,
+    rol: 'system',
+    contenido: `PENDIENTE_ELECCION:${JSON.stringify({
+      fecha: fechaFinal,
+      hora: datosExtraidos.cita_hora,
+      servicio: servicioData,
+      candidatos: candidatos.map(c => ({ id: c.id, nombre: c.nombre }))
+    })}`
+  });
+  
+  accionEjecutada = true;
+} else {
+  // ... (proceder a agendar si ya hay un especialista elegido)
+}
               // ============================================================
               // TENEMOS ESPECIALISTA: PROCEDER A AGENDAR
               // ============================================================
