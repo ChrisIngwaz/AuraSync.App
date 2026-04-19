@@ -333,9 +333,6 @@ function generarSugerenciaEspecialistas(especialistasFiltrados, servicio, fecha,
     const descripcion = generarDescripcionPersuasiva(esp, servicio.nombre);
     
     mensaje += `${label}:\n**${esp.nombre}** — ${descripcion}\n`;
-    
-    // Verificar si está realmente disponible
-    // (esto se hará en el handler, aquí solo mostramos)
     mensaje += `✅ Disponible para confirmar\n\n`;
   });
   
@@ -348,8 +345,9 @@ function generarSugerenciaEspecialistas(especialistasFiltrados, servicio, fecha,
   };
 }
 
+// CAMBIO 1: Check verde doble para énfasis visual
 function mensajeConfirmacion(cliente, servicio, especialista, fecha, hora) {
-  return `¡Listo ${cliente?.nombre || ''}! 🎉 Tu cita está confirmada:\n\n📅 ${formatearFecha(fecha)} a las ${formatearHora(hora)}\n💇‍♀️ ${servicio.nombre}\n✨ Con ${especialista.nombre}\n\n¡Te esperamos! 😊✨`;
+  return `✅ ¡Confirmado ${cliente?.nombre || ''}! ✅\n\n📅 ${formatearFecha(fecha)} a las ${formatearHora(hora)}\n💇‍♀️ ${servicio.nombre}\n✨ Con ${especialista.nombre}\n\n¡Te esperamos! 😊✨`;
 }
 
 function mensajeReagendamiento(fecha, hora, especialista) {
@@ -625,9 +623,23 @@ DATA_JSON:{
       
       // AGENDAR
       else if (accion === 'agendar' && cita_fecha && cita_hora && servicio) {
-        // Si no especificó especialista, sugerir
+        // Si no especificó especialista, sugerir mínimo 2 aleatorios
         if (!especialista) {
-          const candidatos = especialistas.filter(e => puedeHacerServicio(e, servicio.nombre));
+          // CAMBIO 2: Mínimo 2 especialistas aleatorios
+          let candidatos = especialistas.filter(e => puedeHacerServicio(e, servicio.nombre));
+          
+          // Si hay menos de 2, completar con cualquier especialista disponible
+          if (candidatos.length < 2) {
+            const idsUsados = new Set(candidatos.map(c => c.id));
+            const extras = especialistas
+              .filter(e => !idsUsados.has(e.id))
+              .sort(() => Math.random() - 0.5);
+            candidatos = [...candidatos, ...extras].slice(0, 2);
+          } else {
+            // Mezclar aleatoriamente y tomar 2
+            candidatos = candidatos.sort(() => Math.random() - 0.5).slice(0, 2);
+          }
+          
           const sugerencia = generarSugerenciaEspecialistas(candidatos, servicio, cita_fecha, cita_hora, cliente || { nombre });
           
           if (sugerencia.tipo === 'sugerencia') {
@@ -668,9 +680,10 @@ DATA_JSON:{
             if (alternativas.length > 0) {
               resultadoAccion = `${especialista.nombre} no está disponible a esa hora. ¿Te funciona a las ${alternativas.map(formatearHora).join(', ')}?`;
             } else {
-              // Sugerir otros especialistas
+              // CAMBIO 3: Sugerir otros especialistas aleatorios cuando hay conflicto
               const otros = especialistas
                 .filter(e => e.id !== especialista.id && puedeHacerServicio(e, servicio.nombre))
+                .sort(() => Math.random() - 0.5)
                 .slice(0, 2);
               
               if (otros.length > 0) {
