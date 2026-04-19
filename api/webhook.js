@@ -448,9 +448,6 @@ DATA_JSON:{
   "apellido": "${cliente?.apellido || ''}"
 }`;
 
-Citas activas del usuario:
-${citasInfo}`;
-
     // 6. OBTENER HISTORIAL CORTO (solo últimos 4 para no saturar)
     const { data: historial } = await supabase
       .from('conversaciones')
