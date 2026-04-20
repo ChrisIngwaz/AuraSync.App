@@ -746,7 +746,7 @@ REGLAS DEL JSON:
               especialista_nombre: mapaEsp[c.especialista_id] || 'Asignar'
             }));
 
-            // Seleccionar cita a mover — PRIORIDAD: fecha+hora exacta > servicio > primera
+            // Seleccionar cita a mover — PRIORIDAD: fecha+hora exacta > fecha mencionada > servicio > primera
             if (todasLasCitas.length > 0) {
               // Intento 1: Match exacto por fecha y hora original (más preciso)
               if (datosExtraidos.cita_fecha_original && datosExtraidos.cita_hora_original) {
@@ -760,7 +760,25 @@ REGLAS DEL JSON:
                 }
               }
 
-              // Intento 2: Match por servicio
+              // Intento 2: Buscar por la fecha que el usuario mencionó en el mensaje (ej: "mañana", "hoy")
+              if (!citaAMover) {
+                const textoLower = (textoUsuario || '').toLowerCase();
+                let fechaMencionada = null;
+                if (textoLower.includes('hoy')) fechaMencionada = getFechaEcuador(0);
+                else if (textoLower.includes('mañana')) fechaMencionada = getFechaEcuador(1);
+                else if (textoLower.includes('pasado mañana')) fechaMencionada = getFechaEcuador(2);
+
+                if (fechaMencionada) {
+                  citaAMover = todasLasCitas.find(c =>
+                    c.fecha_hora?.startsWith(fechaMencionada)
+                  );
+                  if (citaAMover) {
+                    console.log('✅ Cita encontrada por fecha mencionada:', fechaMencionada, citaAMover.fecha_hora);
+                  }
+                }
+              }
+
+              // Intento 3: Match por servicio
               if (!citaAMover && datosExtraidos.cita_servicio) {
                 citaAMover = todasLasCitas.find(c =>
                   c.servicio_aux?.toLowerCase().includes(datosExtraidos.cita_servicio.toLowerCase())
@@ -770,7 +788,7 @@ REGLAS DEL JSON:
                 }
               }
 
-              // Intento 3: Fallback a la primera (más próxima)
+              // Intento 4: Fallback a la primera (más próxima)
               if (!citaAMover) {
                 citaAMover = todasLasCitas[0];
                 console.log('⚠️ Fallback a primera cita:', citaAMover.fecha_hora, citaAMover.servicio_aux);
