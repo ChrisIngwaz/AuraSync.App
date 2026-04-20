@@ -499,13 +499,15 @@ REGLAS DE ORO — VIOLARLAS ES UN ERROR CRÍTICO:
    • NUNCA saludes, sugieras especialista Y propongas horario en el mismo mensaje.
    • Máximo 3 mensajes de intercambio antes de la confirmación final.
 
-5. Para REAGENDAR:
-   • Cuando el cliente diga "quiero cambiar/mover/reagendar mi cita", PRIMERO busca en su historial y dile EXACTAMENTE qué citas tiene:
-     "Veo que tienes una cita de [SERVICIO] hoy a las [HORA] con [ESPECIALISTA]. ¿Es esa la que quieres mover?"
-   • Si tiene VARIAS citas, pregúntale cuál quiere mover.
-   • SOLO cuando confirme CUÁL cita, propón nueva fecha/hora.
-   • Espera confirmación de la nueva fecha/hora.
-   • SOLO entonces ejecuta reagendar.
+5. Para REAGENDAR — REGLAS ESTRICTAS:
+   • Cuando el cliente diga "quiero cambiar/mover/reagendar mi cita", PRIMERO dile EXACTAMENTE qué citas tiene:
+     "Veo que tienes [N] citas confirmadas:
+      1. [SERVICIO] el [FECHA] a las [HORA] con [ESPECIALISTA]
+      2. [SERVICIO] el [FECHA] a las [HORA] con [ESPECIALISTA]
+      ¿Cuál quieres mover?"
+   • Cuando el cliente confirme CUÁL cita (diciendo el número, la fecha, la hora o el servicio), propón nueva fecha/hora.
+   • En el JSON, DEBES incluir "cita_fecha_original" y "cita_hora_original" con los valores EXACTOS de la cita que el cliente confirmó mover.
+   • NUNCA inventes la fecha/hora original. Usa los datos reales de la cita del cliente.
 
 6. Para CANCELAR: confirma cuál cita quiere cancelar, luego ejecuta.
 
@@ -535,8 +537,8 @@ DATA_JSON:{
   "cita_hora": "HH:MM",
   "cita_servicio": "nombre exacto del servicio",
   "cita_especialista": "nombre exacto del especialista o vacío",
-  "cita_fecha_original": "YYYY-MM-DD (solo para reagendar: fecha de la cita que se va a mover)",
-  "cita_hora_original": "HH:MM (solo para reagendar: hora de la cita que se va a mover)"
+  "cita_fecha_original": "YYYY-MM-DD (OBLIGATORIO para reagendar: fecha EXACTA de la cita que se va a mover)",
+  "cita_hora_original": "HH:MM (OBLIGATORIO para reagendar: hora EXACTA de la cita que se va a mover)"
 }
 
 REGLAS DEL JSON:
@@ -545,7 +547,7 @@ REGLAS DEL JSON:
 - "accion": "cancelar" SOLO cuando el cliente CONFIRME explícitamente que quiere cancelar.
 - "cita_servicio": debe coincidir EXACTAMENTE con un nombre de la lista de servicios.
 - "cita_especialista": debe coincidir EXACTAMENTE con un nombre de la lista de especialistas, o vacío si no importa.
-- "cita_fecha_original" y "cita_hora_original": SOLO para reagendar. Deben contener la fecha y hora EXACTAS de la cita que el cliente confirmó que quiere mover. Esto evita mover la cita equivocada.`;
+- "cita_fecha_original" y "cita_hora_original": OBLIGATORIOS para reagendar. Deben contener la fecha y hora EXACTAS de la cita que el cliente confirmó que quiere mover. Si no los incluyes, se moverá la cita equivocada.`;
 
     // ── Construir mensajes para OpenAI ──
     const messages = [{ role: "system", content: systemPrompt }];
@@ -778,15 +780,34 @@ REGLAS DEL JSON:
             if (!citaAMover) {
               mensajeAccion = "No encontré citas confirmadas a tu nombre para reagendar. ¿Quieres que agende una nueva? 💫";
             } else {
+              // MANTENER SIEMPRE el servicio y especialista de la cita ORIGINAL
               const servicioActual = servicios?.find(s => s.id === citaAMover.servicio_id) ||
-                { nombre: citaAMover.servicio_aux || "Servicio", duracion: citaAMover.duracion_aux || 60, precio: 0 };
+                { id: null, nombre: citaAMover.servicio_aux || "Servicio", precio: 0, duracion: citaAMover.duracion_aux || 60 };
 
-              const especialistaReagendar = datosExtraidos.cita_especialista || citaAMover.especialista_nombre;
+              // El especialista DEBE ser el de la cita original, a menos que el cliente haya pedido cambiarlo explícitamente
+              const especialistaOriginal = citaAMover.especialista_nombre;
+              const especialistaIdOriginal = citaAMover.especialista_id;
+
+              // Solo cambiar especialista si el cliente pidió uno específico Y existe en la lista
+              let especialistaFinal = especialistaOriginal;
+              let especialistaIdFinal = especialistaIdOriginal;
+
+              if (datosExtraidos.cita_especialista) {
+                const espSolicitado = especialistas?.find(e => 
+                  e.nombre.toLowerCase() === datosExtraidos.cita_especialista.toLowerCase()
+                );
+                if (espSolicitado) {
+                  especialistaFinal = espSolicitado.nombre;
+                  especialistaIdFinal = espSolicitado.id;
+                } else {
+                  console.log('⚠️ Especialista solicitado no encontrado, manteniendo original:', especialistaOriginal);
+                }
+              }
 
               const disponible = await verificarDisponibilidad(
                 fechaFinal,
                 datosExtraidos.cita_hora,
-                especialistaReagendar,
+                especialistaFinal,
                 servicioActual.duracion
               );
 
@@ -794,22 +815,23 @@ REGLAS DEL JSON:
                 const alternativa = await buscarAlternativa(
                   fechaFinal,
                   datosExtraidos.cita_hora,
-                  especialistaReagendar,
+                  especialistaFinal,
                   servicioActual.duracion
                 );
                 mensajeAccion = `${disponible.mensaje} ${alternativa.mensaje}`;
               } else {
-                const especialistaFinal = disponible.especialista || especialistaReagendar || "Asignar";
-                const especialistaIdFinal = especialistas?.find(e => e.nombre === especialistaFinal)?.id || citaAMover.especialista_id || null;
                 const fechaAnterior = citaAMover.fecha_hora ? citaAMover.fecha_hora.split('T')[0] : '';
                 const horaAnterior = citaAMover.fecha_hora ? citaAMover.fecha_hora.substring(11, 16) : '';
 
                 console.log('🔄 Reagendando cita Supabase ID:', citaAMover.id);
+                console.log('   Servicio original:', servicioActual.nombre);
+                console.log('   Especialista original:', especialistaOriginal);
+                console.log('   Especialista final:', especialistaFinal);
                 console.log('   De:', fechaAnterior, horaAnterior);
                 console.log('   A:', fechaFinal, datosExtraidos.cita_hora);
 
-                // Actualizar en Supabase
-                const { error: updateError } = await supabase
+                // Actualizar en Supabase con verificación de filas afectadas
+                const { data: updateData, error: updateError } = await supabase
                   .from('citas')
                   .update({
                     fecha_hora: `${fechaFinal}T${datosExtraidos.cita_hora}:00-05:00`,
@@ -817,13 +839,17 @@ REGLAS DEL JSON:
                     especialista_id: especialistaIdFinal,
                     nombre_cliente_aux: `${clienteNombre} ${clienteApellido}`.trim()
                   })
-                  .eq('id', citaAMover.id);
+                  .eq('id', citaAMover.id)
+                  .select();
 
                 if (updateError) {
                   console.error('❌ Error update Supabase:', updateError);
                   mensajeAccion = "Tuvimos un problema moviendo tu cita. ¿Lo intentamos de nuevo? 🙏";
+                } else if (!updateData || updateData.length === 0) {
+                  console.error('❌ Supabase update retornó 0 filas afectadas. Posible problema de RLS o ID no encontrado.');
+                  mensajeAccion = "No pude encontrar la cita para actualizarla. ¿Me confirmas los datos por favor? 🙏";
                 } else {
-                  console.log('✅ Supabase actualizado');
+                  console.log('✅ Supabase actualizado, filas:', updateData.length);
 
                   // Actualizar en Airtable con fallback robusto
                   const airtableRes = await actualizarCitaAirtable(citaAMover.id, {
@@ -834,14 +860,14 @@ REGLAS DEL JSON:
                     telefono: userPhone,
                     fechaAnterior: fechaAnterior,
                     horaAnterior: horaAnterior,
-                    especialistaAnterior: citaAMover.especialista_nombre
+                    especialistaAnterior: especialistaOriginal
                   });
 
                   if (airtableRes.ok) {
-                    mensajeAccion = `✨ ¡Cita movida con éxito!\n\nDe: ${formatearFecha(fechaAnterior)} ${formatearHora(horaAnterior)}\nA: 📅 ${formatearFecha(fechaFinal)} a las ${formatearHora(datosExtraidos.cita_hora)}\n💇‍♀️ Con ${especialistaFinal}\n\n¡Nos vemos pronto! 🌸`;
+                    mensajeAccion = `✨ ¡Cita movida con éxito!\n\nDe: ${formatearFecha(fechaAnterior)} ${formatearHora(horaAnterior)}\nA: 📅 ${formatearFecha(fechaFinal)} a las ${formatearHora(datosExtraidos.cita_hora)}\n💇‍♀️ ${servicioActual.nombre} con ${especialistaFinal}\n\n¡Nos vemos pronto! 🌸`;
                   } else {
                     console.error('⚠️ Airtable falló pero Supabase sí se actualizó');
-                    mensajeAccion = `✅ Tu cita fue movida en nuestro sistema principal a ${formatearFecha(fechaFinal)} a las ${formatearHora(datosExtraidos.cita_hora)}.\n\nNota: Estamos sincronizando con nuestro calendario secundario, pero tu lugar está asegurado. 💫`;
+                    mensajeAccion = `✅ Tu cita de ${servicioActual.nombre} fue movida a ${formatearFecha(fechaFinal)} a las ${formatearHora(datosExtraidos.cita_hora)} con ${especialistaFinal}.\n\nNota: Estamos sincronizando con nuestro calendario secundario. 💫`;
                   }
                 }
               }
