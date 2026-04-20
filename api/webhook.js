@@ -249,31 +249,22 @@ async function cancelarCitaAirtable(supabaseId, motivo, datosFallback) {
 
 async function obtenerCitasDelDia(fecha) {
   try {
-    const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-    const filter = encodeURIComponent(`AND(IS_SAME({Fecha}, '${fecha}', 'days'), {Estado} = 'Confirmada')`);
+    // FUENTE DE VERDAD: Supabase (Airtable es solo calendario visual)
+    // Usar rango exacto del día en timezone local
+    const inicioDia = `${fecha}T00:00:00`;
+    const finDia = `${fecha}T23:59:59`;
 
-    const response = await axios.get(`${url}?filterByFormula=${filter}`, {
-      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
-    });
-
-    const citasAirtable = (response.data.records || []).map(c => ({
-      hora: c.fields.Hora,
-      duracion: c.fields['Duración estimada (minutos)'] || 60,
-      especialista: c.fields.Especialista,
-      servicio: c.fields.Servicio,
-      idSupabase: c.fields.ID_Supabase,
-      telefono: c.fields.Teléfono
-    }));
-
-    const inicioDia = `${fecha}T00:00:00-05:00`;
-    const finDia = `${fecha}T23:59:59-05:00`;
-
-    const { data: citasSupabase } = await supabase
+    const { data: citasSupabase, error: supaError } = await supabase
       .from('citas')
       .select('id, fecha_hora, especialista_id, duracion_aux, servicio_aux, estado, nombre_cliente_aux')
       .eq('estado', 'Confirmada')
       .gte('fecha_hora', inicioDia)
       .lte('fecha_hora', finDia);
+
+    if (supaError) {
+      console.error('Error Supabase citas:', supaError);
+      return [];
+    }
 
     const { data: especialistasData } = await supabase
       .from('especialistas')
@@ -282,31 +273,22 @@ async function obtenerCitasDelDia(fecha) {
     const mapaEspecialistas = {};
     (especialistasData || []).forEach(e => { mapaEspecialistas[e.id] = e.nombre; });
 
-    const mapa = new Map();
-
-    citasAirtable.forEach(c => {
-      const key = `${c.hora}|${c.especialista}`;
-      mapa.set(key, c);
-    });
-
-    (citasSupabase || []).forEach(c => {
+    const citas = (citasSupabase || []).map(c => {
       const hora = c.fecha_hora ? c.fecha_hora.substring(11, 16) : null;
       const nombreEsp = mapaEspecialistas[c.especialista_id] || 'Asignar';
-      if (hora) {
-        const key = `${hora}|${nombreEsp}`;
-        if (!mapa.has(key)) {
-          mapa.set(key, {
-            hora,
-            duracion: c.duracion_aux || 60,
-            especialista: nombreEsp,
-            servicio: c.servicio_aux,
-            idSupabase: c.id
-          });
-        }
-      }
-    });
+      return {
+        hora,
+        duracion: c.duracion_aux || 60,
+        especialista: nombreEsp,
+        servicio: c.servicio_aux,
+        idSupabase: c.id
+      };
+    }).filter(c => c.hora); // Solo citas con hora válida
 
-    return Array.from(mapa.values());
+    console.log(`📅 Citas encontradas para ${fecha}:`, citas.length);
+    citas.forEach(c => console.log(`   ${c.hora} - ${c.especialista} - ${c.servicio}`));
+
+    return citas;
   } catch (error) {
     console.error('Error obteniendo citas del día:', error.message);
     return [];
