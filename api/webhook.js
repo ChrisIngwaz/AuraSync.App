@@ -542,7 +542,7 @@ REGLAS DEL JSON:
 - "accion": "reagendar" SOLO cuando el cliente CONFIRME explícitamente la nueva fecha/hora.
 - "accion": "cancelar" SOLO cuando el cliente CONFIRME explícitamente que quiere cancelar.
 - "cita_servicio": debe coincidir EXACTAMENTE con un nombre de la lista de servicios.
-- "cita_especialista": debe coincidir EXACTAMENTE con un nombre de la lista de especialistas, o vacío si no importa.`;`;
+- "cita_especialista": debe coincidir EXACTAMENTE con un nombre de la lista de especialistas, o vacío si no importa.`;
 
     // ── Construir mensajes para OpenAI ──
     const messages = [{ role: "system", content: systemPrompt }];
