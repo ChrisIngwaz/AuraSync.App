@@ -275,7 +275,6 @@ async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSoli
 }
 
 // --- HANDLER PRINCIPAL ---
-
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(200).send('<Response></Response>');
@@ -314,6 +313,219 @@ export default async function handler(req, res) {
       if (mensajes) historialFiltrado = mensajes.reverse();
     }
 
+    const textoLower = (textoUsuario || '').toLowerCase();
+    
+    // ============================================================
+    // DETECCIÓN DIRECTA: ¿El usuario está eligiendo especialista de una sugerencia previa?
+    // ============================================================
+    
+    const { data: pendienteRaw } = await supabase
+      .from('conversaciones')
+      .select('contenido, created_at')
+      .eq('telefono', userPhone)
+      .eq('rol', 'system')
+      .ilike('contenido', 'PENDIENTE_ELECCION:%')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    let hayPendienteActivo = false;
+    let candidatosPendientes = [];
+    let datosPendiente = null;
+
+    if (pendienteRaw?.contenido) {
+      const pendienteTime = new Date(pendienteRaw.created_at);
+      const ahora = new Date();
+      const diffMinutos = (ahora - pendienteTime) / 1000 / 60;
+      
+      if (diffMinutos < 15) {
+        hayPendienteActivo = true;
+        datosPendiente = JSON.parse(pendienteRaw.contenido.replace('PENDIENTE_ELECCION:', ''));
+        candidatosPendientes = datosPendiente.candidatos || [];
+        
+        // ¿El usuario está respondiendo con una elección?
+        let especialistaElegido = null;
+        
+        for (const cand of candidatosPendientes) {
+          const nombreLower = cand.nombre.toLowerCase();
+          const primerNombre = nombreLower.split(' ')[0];
+          
+          if (textoLower.includes(nombreLower) || 
+              textoLower.includes(primerNombre) ||
+              ((textoLower.includes('primero') || textoLower.includes('primera') || textoLower.includes('1')) && candidatosPendientes[0]?.id === cand.id) ||
+              ((textoLower.includes('segundo') || textoLower.includes('segunda') || textoLower.includes('2')) && candidatosPendientes[1]?.id === cand.id)) {
+            especialistaElegido = cand.nombre;
+            break;
+          }
+        }
+        
+        if (!especialistaElegido && (textoLower.includes('cualquiera') || textoLower.includes('me da igual'))) {
+          especialistaElegido = candidatosPendientes[0]?.nombre;
+        }
+        
+        // Si eligió especialista, proceder directamente a agendar sin consultar LLM
+        if (especialistaElegido && datosPendiente.fecha && datosPendiente.hora) {
+          const servicioData = datosPendiente.servicio;
+          const disponible = await verificarDisponibilidadAirtable(datosPendiente.fecha, datosPendiente.hora, especialistaElegido, servicioData.duracion);
+
+          if (!disponible.ok) {
+            const alternativa = await buscarAlternativaAirtable(datosPendiente.fecha, datosPendiente.hora, especialistaElegido, servicioData.duracion);
+            const mensaje = `Ese horario ya no está disponible. ${alternativa.mensaje}`;
+            
+            await supabase.from('conversaciones').insert([
+              { telefono: userPhone, rol: 'user', contenido: textoUsuario },
+              { telefono: userPhone, rol: 'assistant', contenido: mensaje }
+            ]);
+            
+            res.setHeader('Content-Type', 'text/xml');
+            return res.status(200).send(`<Response><Message>${mensaje}</Message></Response>`);
+          }
+
+          // Crear cita
+          const { data: citaSupabase } = await supabase.from('citas').insert({
+            cliente_id: cliente?.id || null,
+            servicio_id: servicioData.id || null,
+            fecha_hora: `${datosPendiente.fecha}T${datosPendiente.hora}:00-05:00`,
+            estado: 'Confirmada',
+            nombre_cliente_aux: `${cliente?.nombre || ''} ${cliente?.apellido || ''}`.trim(),
+            servicio_aux: servicioData.nombre,
+            duracion_aux: servicioData.duracion
+          }).select().single();
+
+          await crearCitaAirtable({
+            telefono: userPhone,
+            nombre: cliente?.nombre || '',
+            apellido: cliente?.apellido || '',
+            fecha: datosPendiente.fecha,
+            hora: datosPendiente.hora,
+            servicio: servicioData.nombre,
+            especialista: especialistaElegido,
+            precio: servicioData.precio,
+            duracion: servicioData.duracion,
+            supabase_id: citaSupabase?.id || null
+          });
+
+          // Limpiar pendiente
+          await supabase.from('conversaciones')
+            .delete()
+            .eq('telefono', userPhone)
+            .eq('rol', 'system')
+            .ilike('contenido', 'PENDIENTE_ELECCION:%');
+
+          const mensajeConfirm = mensajeConfirmacion(
+            { nombre: cliente?.nombre },
+            servicioData,
+            especialistaElegido,
+            datosPendiente.fecha,
+            datosPendiente.hora
+          );
+
+          await supabase.from('conversaciones').insert([
+            { telefono: userPhone, rol: 'user', contenido: textoUsuario },
+            { telefono: userPhone, rol: 'assistant', contenido: mensajeConfirm }
+          ]);
+
+          res.setHeader('Content-Type', 'text/xml');
+          return res.status(200).send(`<Response><Message>${mensajeConfirm}</Message></Response>`);
+        }
+      }
+    }
+
+    // ============================================================
+    // DETECCIÓN DIRECTA: ¿El usuario pidió cita nueva con servicio+fecha+hora?
+    // ============================================================
+    
+    let fechaDetectada = null;
+    let horaDetectada = null;
+    let servicioDetectado = null;
+    
+    // Detectar fecha
+    if (textoLower.includes('hoy')) fechaDetectada = getFechaEcuador(0);
+    else if (textoLower.includes('mañana')) fechaDetectada = getFechaEcuador(1);
+    else {
+      // Buscar patrón de fecha explícita
+      const fechaMatch = textoUsuario.match(/(\d{1,2})[\/\-\.](\d{1,2})/);
+      if (fechaMatch) {
+        const dia = fechaMatch[1].padStart(2, '0');
+        const mes = fechaMatch[2].padStart(2, '0');
+        fechaDetectada = `2026-${mes}-${dia}`; // Ajustar año según contexto
+      }
+    }
+    
+    // Detectar hora
+    const horaMatch = textoUsuario.match(/(\d{1,2}):?(\d{2})?\s*(am|pm|AM|PM|a\.m\.|p\.m\.)?/i);
+    if (horaMatch) {
+      let h = parseInt(horaMatch[1]);
+      const m = horaMatch[2] || '00';
+      const periodo = horaMatch[3]?.toLowerCase();
+      if (periodo && (periodo.includes('p') && h !== 12)) h += 12;
+      if (periodo && periodo.includes('a') && h === 12) h = 0;
+      horaDetectada = `${h.toString().padStart(2,'0')}:${m}`;
+    }
+    
+    // Detectar servicio
+    for (const serv of servicios || []) {
+      if (textoLower.includes(serv.nombre.toLowerCase())) {
+        servicioDetectado = serv;
+        break;
+      }
+    }
+    
+    // Si tenemos los 3 datos y NO hay pendiente activo, FORZAR sugerencia de 2 especialistas
+    // sin consultar al LLM
+    if (servicioDetectado && fechaDetectada && horaDetectada && !hayPendienteActivo) {
+      let candidatos = especialistas.filter(e => puedeHacerServicio(e, servicioDetectado.nombre));
+      
+      if (candidatos.length === 0) {
+        candidatos = especialistas.slice(0, 2);
+      } else if (candidatos.length === 1) {
+        const usados = new Set(candidatos.map(c => c.id));
+        const extras = especialistas.filter(e => !usados.has(e.id));
+        if (extras.length > 0) candidatos.push(extras[0]);
+      } else if (candidatos.length > 2) {
+        candidatos = candidatos.sort(() => Math.random() - 0.5).slice(0, 2);
+      }
+      
+      const sugerencia = generarSugerenciaEspecialistas(
+        candidatos,
+        servicioDetectado,
+        fechaDetectada,
+        horaDetectada,
+        { nombre: cliente?.nombre || '' }
+      );
+      
+      // Guardar pendiente
+      await supabase.from('conversaciones')
+        .delete()
+        .eq('telefono', userPhone)
+        .eq('rol', 'system')
+        .ilike('contenido', 'PENDIENTE_ELECCION:%');
+      
+      await supabase.from('conversaciones').insert({
+        telefono: userPhone,
+        rol: 'system',
+        contenido: `PENDIENTE_ELECCION:${JSON.stringify({
+          fecha: fechaDetectada,
+          hora: horaDetectada,
+          servicio: servicioDetectado,
+          candidatos: candidatos.map(c => ({ id: c.id, nombre: c.nombre }))
+        })}`,
+        created_at: new Date().toISOString()
+      });
+      
+      await supabase.from('conversaciones').insert([
+        { telefono: userPhone, rol: 'user', contenido: textoUsuario },
+        { telefono: userPhone, rol: 'assistant', contenido: sugerencia.mensaje }
+      ]);
+      
+      res.setHeader('Content-Type', 'text/xml');
+      return res.status(200).send(`<Response><Message>${sugerencia.mensaje}</Message></Response>`);
+    }
+
+    // ============================================================
+    // FLUJO NORMAL CON LLM (solo para casos no cubiertos arriba)
+    // ============================================================
+    
     const listaEsp = especialistas?.map(e => `${e.nombre} (Experto en: ${e.expertise})`).join(', ') || "nuestro equipo";
     const catalogo = servicios?.map(s => `${s.nombre} ($${s.precio})`).join(', ') || "servicios";
 
@@ -390,12 +602,12 @@ DATA_JSON:{
     let datosExtraidos = {};
     let accionEjecutada = false;
     let mensajeAccion = '';
+    
     const jsonMatch = fullReply.match(/(?:DATA_JSON\s*:?\s*)?(?:```json\s*)?(\{[\s\S]*?"accion"[\s\S]*?\})(?:\s*```)?/i);
 
     if (jsonMatch) {
       try {
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
-        const textoLower = (textoUsuario || '').toLowerCase();
         
         let fechaFinal = getFechaEcuador(1); 
         if (textoLower.includes('hoy')) fechaFinal = getFechaEcuador(0);
@@ -436,134 +648,10 @@ DATA_JSON:{
             let servicioData = (servicios?.find(s => (datosExtraidos.cita_servicio || '').toLowerCase().includes(s.nombre.toLowerCase())) || { id: null, nombre: "Servicio", precio: 0, duracion: 60 });
             
             let especialistaFinal = datosExtraidos.cita_especialista;
-            let candidatosPendientes = [];
-            let hayPendienteActivo = false;
             
-            // Verificar si el especialista del LLM existe realmente en nuestra base
+            // Si el LLM no dio especialista, no debería llegar aquí porque ya interceptamos arriba
+            // pero por seguridad, verificar disponibilidad y agendar si existe
             if (especialistaFinal) {
-              const existeEspecialista = especialistas.find(e => 
-                e.nombre.toLowerCase() === especialistaFinal.toLowerCase() ||
-                especialistaFinal.toLowerCase().includes(e.nombre.toLowerCase())
-              );
-              if (!existeEspecialista) {
-                especialistaFinal = null;
-              }
-            }
-            
-            // Buscar si hay elección pendiente reciente (últimos 10 minutos)
-            const { data: pendienteRaw } = await supabase
-              .from('conversaciones')
-              .select('contenido, created_at')
-              .eq('telefono', userPhone)
-              .eq('rol', 'system')
-              .ilike('contenido', 'PENDIENTE_ELECCION:%')
-              .order('created_at', { ascending: false })
-              .limit(1)
-              .single();
-
-            if (pendienteRaw?.contenido) {
-              const pendienteTime = new Date(pendienteRaw.created_at);
-              const ahora = new Date();
-              const diffMinutos = (ahora - pendienteTime) / 1000 / 60;
-              
-              if (diffMinutos < 10) {
-                hayPendienteActivo = true;
-                const pendiente = JSON.parse(pendienteRaw.contenido.replace('PENDIENTE_ELECCION:', ''));
-                candidatosPendientes = pendiente.candidatos || [];
-                
-                // Detectar elección del usuario en el mensaje ACTUAL
-                for (const cand of candidatosPendientes) {
-                  const nombreLower = cand.nombre.toLowerCase();
-                  const primerNombre = nombreLower.split(' ')[0];
-                  
-                  if (textoLower.includes(nombreLower) || 
-                      textoLower.includes(primerNombre) ||
-                      ((textoLower.includes('primero') || 
-                        textoLower.includes('primera') || 
-                        textoLower.includes('1') ||
-                        textoLower.includes('opción 1') ||
-                        textoLower.includes('option 1')) && 
-                       candidatosPendientes[0]?.id === cand.id) ||
-                      ((textoLower.includes('segundo') || 
-                        textoLower.includes('segunda') || 
-                        textoLower.includes('2') ||
-                        textoLower.includes('opción 2') ||
-                        textoLower.includes('option 2')) && 
-                       candidatosPendientes[1]?.id === cand.id)) {
-                    especialistaFinal = cand.nombre;
-                    break;
-                  }
-                }
-                
-                if (!especialistaFinal && 
-                    (textoLower.includes('cualquiera') || 
-                     textoLower.includes('me da igual') ||
-                     textoLower.includes('quien sea'))) {
-                  especialistaFinal = candidatosPendientes[0]?.nombre;
-                }
-              }
-            }
-
-            // ============================================================
-            // SI NO HAY ESPECIALISTA CONFIRMADO, SUGERIR 2 OBLIGATORIAMENTE
-            // ============================================================
-            
-            if (!especialistaFinal) {
-              // Obtener candidatos según expertise
-              let candidatos = especialistas.filter(e => puedeHacerServicio(e, servicioData.nombre));
-              
-              // Si no hay suficientes por expertise, completar con cualquier especialista
-              if (candidatos.length === 0) {
-                candidatos = especialistas.slice(0, 2);
-              } else if (candidatos.length === 1) {
-                const usados = new Set(candidatos.map(c => c.id));
-                const extras = especialistas.filter(e => !usados.has(e.id));
-                if (extras.length > 0) candidatos.push(extras[0]);
-              } else if (candidatos.length > 2) {
-                candidatos = candidatos.sort(() => Math.random() - 0.5).slice(0, 2);
-              }
-              
-              // Generar sugerencia que REEMPLAZA la respuesta del LLM
-              const sugerencia = generarSugerenciaEspecialistas(
-                candidatos, 
-                servicioData, 
-                fechaFinal, 
-                datosExtraidos.cita_hora, 
-                { nombre: cliente?.nombre || datosExtraidos.nombre }
-              );
-              
-              // REEMPLAZAR completamente la respuesta del LLM
-              mensajeAccion = sugerencia.mensaje;
-              fullReply = sugerencia.mensaje;
-              
-              // Limpiar pendiente anterior si existe
-              if (hayPendienteActivo) {
-                await supabase.from('conversaciones')
-                  .delete()
-                  .eq('telefono', userPhone)
-                  .eq('rol', 'system')
-                  .ilike('contenido', 'PENDIENTE_ELECCION:%');
-              }
-              
-              // Guardar nuevo pendiente
-              await supabase.from('conversaciones').insert({
-                telefono: userPhone,
-                rol: 'system',
-                contenido: `PENDIENTE_ELECCION:${JSON.stringify({
-                  fecha: fechaFinal,
-                  hora: datosExtraidos.cita_hora,
-                  servicio: servicioData,
-                  candidatos: candidatos.map(c => ({ id: c.id, nombre: c.nombre }))
-                })}`,
-                created_at: new Date().toISOString()
-              });
-              
-              accionEjecutada = true;
-            } else {
-              // ============================================================
-              // TENEMOS ESPECIALISTA: PROCEDER A AGENDAR
-              // ============================================================
-              
               const disponible = await verificarDisponibilidadAirtable(fechaFinal, datosExtraidos.cita_hora, especialistaFinal, servicioData.duracion);
 
               if (!disponible.ok) {
@@ -594,12 +682,6 @@ DATA_JSON:{
                 });
 
                 if (citaAirtable) {
-                  await supabase.from('conversaciones')
-                    .delete()
-                    .eq('telefono', userPhone)
-                    .eq('rol', 'system')
-                    .ilike('contenido', 'PENDIENTE_ELECCION:%');
-                    
                   mensajeAccion = mensajeConfirmacion(
                     { nombre: datosExtraidos.nombre || cliente?.nombre },
                     servicioData,
