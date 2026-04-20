@@ -80,10 +80,8 @@ async function crearCitaAirtable(datos) {
   }
 }
 
-// === INICIO: FUNCIÓN NUEVA PARA ACTUALIZAR CITA EN AIRTABLE ===
 async function actualizarCitaAirtable(supabaseId, nuevosDatos) {
   try {
-    // Buscar el registro en Airtable por ID_Supabase
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     const filter = encodeURIComponent(`{ID_Supabase} = '${supabaseId}'`);
     const searchRes = await axios.get(`${url}?filterByFormula=${filter}`, {
@@ -121,16 +119,21 @@ async function actualizarCitaAirtable(supabaseId, nuevosDatos) {
     return false;
   }
 }
-// === FIN: FUNCIÓN NUEVA ===
 
+// === CORRECCIÓN 1: Verificación de disponibilidad robusta ===
 async function verificarDisponibilidadAirtable(fecha, hora, especialistaSolicitado, duracionMinutos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-    const filter = encodeURIComponent(`AND({Fecha} = '${fecha}', {Estado} = 'Confirmada')`);
+    
+    // CORRECCIÓN: Usar IS_SAME para comparar fechas correctamente, considerando zona horaria
+    // Airtable almacena la fecha como UTC, pero IS_SAME compara componentes de fecha
+    const filter = encodeURIComponent(`AND(IS_SAME({Fecha}, '${fecha}', 'days'), {Estado} = 'Confirmada')`);
+    
     const response = await axios.get(`${url}?filterByFormula=${filter}`, {
       headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
     });
-    const citas = response.data.records;
+    
+    const citas = response.data.records || [];
     const [h, m] = hora.split(':').map(Number);
     const inicioNuevo = h * 60 + m;
     const finNuevo = inicioNuevo + (duracionMinutos || 60);
@@ -143,33 +146,45 @@ async function verificarDisponibilidadAirtable(fecha, hora, especialistaSolicita
       const [he, me] = cita.fields.Hora.split(':').map(Number);
       const inicioExistente = he * 60 + me;
       const finExistente = inicioExistente + (cita.fields['Duración estimada (minutos)'] || 60);
+      
+      // Hay solapamiento de horarios?
       if (inicioNuevo < finExistente && finNuevo > inicioExistente) {
+        // Si no se solicitó especialista específico, CUALQUIER cita en ese horario bloquea
+        // Si se solicitó especialista específico, solo bloquea si coincide el especialista
         if (!especialistaSolicitado || cita.fields.Especialista === especialistaSolicitado) {
-          return { ok: false, mensaje: `${cita.fields.Especialista} no está disponible.` };
+          return { 
+            ok: false, 
+            mensaje: `${cita.fields.Especialista || 'Ese horario'} no está disponible.` 
+          };
         }
       }
     }
     return { ok: true, especialista: especialistaSolicitado || 'Asignar' };
   } catch (error) {
     console.error('Error Airtable Check:', error.response?.data || error.message);
-    return { ok: true, especialista: especialistaSolicitado };
+    // CORRECCIÓN: Si hay error en Airtable, NO asumir disponible. Ser pesimista.
+    return { ok: false, mensaje: "Error verificando disponibilidad. Intenta de nuevo." };
   }
 }
 
 async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSolicitado, duracion) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-    const filter = encodeURIComponent(`AND({Fecha} = '${fecha}', {Estado} = 'Confirmada')`);
+    const filter = encodeURIComponent(`AND(IS_SAME({Fecha}, '${fecha}', 'days'), {Estado} = 'Confirmada')`);
+    
     const response = await axios.get(`${url}?filterByFormula=${filter}`, {
       headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
     });
-    const ocupados = response.data.records.map(c => ({
+    
+    const ocupados = (response.data.records || []).map(c => ({
       hora: c.fields.Hora,
       duracion: c.fields['Duración estimada (minutos)'] || 60,
       especialista: c.fields.Especialista
     }));
+    
     const [h, m] = horaSolicitada.split(':').map(Number);
     let horaPropuesta = h * 60 + m;
+    
     while (horaPropuesta <= 1080 - duracion) {
       let conflicto = false;
       for (const ocup of ocupados) {
@@ -177,7 +192,8 @@ async function buscarAlternativaAirtable(fecha, horaSolicitada, especialistaSoli
         const [ho, mo] = ocup.hora.split(':').map(Number);
         if (horaPropuesta < (ho * 60 + mo + ocup.duracion) && (horaPropuesta + duracion) > (ho * 60 + mo)) {
           if (!especialistaSolicitado || ocup.especialista === especialistaSolicitado) {
-            conflicto = true; break;
+            conflicto = true; 
+            break;
           }
         }
       }
@@ -349,46 +365,85 @@ DATA_JSON:{
           }
         }
 
-        // === INICIO: BLOQUE NUEVO PARA REAGENDAR ===
+        // === CORRECCIÓN 2: Reagendar robusto ===
         else if (accion === 'reagendar') {
           const tieneHora = datosExtraidos.cita_hora?.match(/^\d{2}:\d{2}$/);
           if (fechaFinal && tieneHora) {
-            // Buscar cita existente del cliente (la más reciente confirmada)
-            const { data: citasExistentes } = await supabase
-              .from('citas')
-              .select('id, servicio_id, servicio_aux, duracion_aux, fecha_hora, especialista')
-              .eq('cliente_id', cliente?.id)
-              .eq('estado', 'Confirmada')
-              .order('fecha_hora', { ascending: true })
-              .limit(5);
             
-            // Buscar la cita que el usuario quiere mover (por servicio o la más próxima)
+            // CORRECCIÓN: Buscar cliente actualizado (por si se acaba de crear)
+            let { data: clienteActual } = await supabase
+              .from('clientes')
+              .select('id, nombre, apellido')
+              .eq('telefono', userPhone)
+              .maybeSingle();
+            
+            const clienteId = clienteActual?.id || cliente?.id;
+            const clienteNombre = clienteActual?.nombre || cliente?.nombre || datosExtraidos.nombre;
+            const clienteApellido = clienteActual?.apellido || cliente?.apellido || datosExtraidos.apellido;
+            
+            // Buscar citas confirmadas del cliente
             let citaAMover = null;
-            if (citasExistentes && citasExistentes.length > 0) {
-              // Intentar match por servicio si se especificó
-              if (datosExtraidos.cita_servicio) {
-                citaAMover = citasExistentes.find(c => 
-                  c.servicio_aux?.toLowerCase().includes(datosExtraidos.cita_servicio.toLowerCase())
-                );
+            
+            if (clienteId) {
+              const { data: citasExistentes } = await supabase
+                .from('citas')
+                .select('id, servicio_id, servicio_aux, duracion_aux, fecha_hora, especialista')
+                .eq('cliente_id', clienteId)
+                .eq('estado', 'Confirmada')
+                .order('fecha_hora', { ascending: true })
+                .limit(10);
+              
+              if (citasExistentes && citasExistentes.length > 0) {
+                // Intentar match por servicio si se especificó
+                if (datosExtraidos.cita_servicio) {
+                  citaAMover = citasExistentes.find(c => 
+                    c.servicio_aux?.toLowerCase().includes(datosExtraidos.cita_servicio.toLowerCase())
+                  );
+                }
+                // Si no hay match por servicio, tomar la más próxima
+                if (!citaAMover) {
+                  citaAMover = citasExistentes[0];
+                }
               }
-              // Si no hay match por servicio, tomar la primera (más próxima)
-              if (!citaAMover) {
-                citaAMover = citasExistentes[0];
+            }
+            
+            // Fallback: si no encontramos por cliente_id, buscar por nombre_aux (para citas antiguas sin cliente_id)
+            if (!citaAMover && (clienteNombre || datosExtraidos.nombre)) {
+              const nombreBusqueda = `${datosExtraidos.nombre || clienteNombre} ${datosExtraidos.apellido || clienteApellido}`.trim();
+              const { data: citasPorNombre } = await supabase
+                .from('citas')
+                .select('id, servicio_id, servicio_aux, duracion_aux, fecha_hora, especialista')
+                .ilike('nombre_cliente_aux', `%${nombreBusqueda}%`)
+                .eq('estado', 'Confirmada')
+                .order('fecha_hora', { ascending: true })
+                .limit(5);
+              
+              if (citasPorNombre && citasPorNombre.length > 0) {
+                if (datosExtraidos.cita_servicio) {
+                  citaAMover = citasPorNombre.find(c => 
+                    c.servicio_aux?.toLowerCase().includes(datosExtraidos.cita_servicio.toLowerCase())
+                  );
+                }
+                if (!citaAMover) {
+                  citaAMover = citasPorNombre[0];
+                }
               }
             }
 
             if (!citaAMover) {
               mensajeAccion = "No encontré una cita confirmada tuya para reagendar. ¿Quieres agendar una nueva?";
             } else {
-              // Obtener datos del servicio
+              // Obtener datos del servicio (de la cita existente o del catálogo)
               let servicioData = servicios?.find(s => s.id === citaAMover.servicio_id) || 
                 { id: null, nombre: citaAMover.servicio_aux || "Servicio", precio: 0, duracion: citaAMover.duracion_aux || 60 };
               
-              // Verificar disponibilidad en nueva fecha/hora
+              // Verificar disponibilidad en nueva fecha/hora (usando especialista original si no se especificó nuevo)
+              const especialistaReagendar = datosExtraidos.cita_especialista || citaAMover.especialista;
+              
               const disponible = await verificarDisponibilidadAirtable(
                 fechaFinal, 
                 datosExtraidos.cita_hora, 
-                datosExtraidos.cita_especialista || citaAMover.especialista, 
+                especialistaReagendar, 
                 servicioData.duracion
               );
 
@@ -396,24 +451,27 @@ DATA_JSON:{
                 const alternativa = await buscarAlternativaAirtable(
                   fechaFinal, 
                   datosExtraidos.cita_hora, 
-                  datosExtraidos.cita_especialista || citaAMover.especialista, 
+                  especialistaReagendar, 
                   servicioData.duracion
                 );
                 mensajeAccion = `Ese horario no está disponible. ${alternativa.mensaje}`;
               } else {
-                const especialistaFinal = disponible.especialista || datosExtraidos.cita_especialista || citaAMover.especialista || "Asignar";
+                const especialistaFinal = disponible.especialista || especialistaReagendar || "Asignar";
                 
-                // Actualizar en Supabase
+                // CORRECCIÓN: Actualizar la cita existente en Supabase (NO insertar nueva)
                 const { error: updateError } = await supabase
                   .from('citas')
                   .update({
                     fecha_hora: `${fechaFinal}T${datosExtraidos.cita_hora}:00-05:00`,
                     estado: 'Confirmada',
-                    especialista: especialistaFinal
+                    especialista: especialistaFinal,
+                    // Actualizar nombre por si cambió
+                    nombre_cliente_aux: `${datosExtraidos.nombre || clienteNombre} ${datosExtraidos.apellido || clienteApellido}`.trim()
                   })
                   .eq('id', citaAMover.id);
 
                 if (updateError) {
+                  console.error('Error update Supabase:', updateError);
                   mensajeAccion = "Error actualizando la cita. Inténtalo de nuevo.";
                 } else {
                   // Actualizar en Airtable
@@ -423,11 +481,12 @@ DATA_JSON:{
                     especialista: especialistaFinal
                   });
 
+                  const fechaAnterior = citaAMover.fecha_hora ? citaAMover.fecha_hora.split('T')[0] : 'fecha anterior';
+                  
                   if (airtableUpdated) {
-                    const fechaAnterior = citaAMover.fecha_hora ? citaAMover.fecha_hora.split('T')[0] : 'anterior';
                     mensajeAccion = `✅ Cita reagendada: de ${formatearFecha(fechaAnterior)} a ${formatearFecha(fechaFinal)} a las ${datosExtraidos.cita_hora} con ${especialistaFinal}.`;
                   } else {
-                    mensajeAccion = "Cita actualizada en nuestro sistema principal, pero hubo un error sincronizando con Airtable.";
+                    mensajeAccion = `✅ Cita actualizada en nuestro sistema. Nota: Hubo un pequeño retraso sincronizando con Airtable pero tu cita está confirmada para ${formatearFecha(fechaFinal)} a las ${datosExtraidos.cita_hora}.`;
                   }
                 }
               }
@@ -435,7 +494,6 @@ DATA_JSON:{
             accionEjecutada = true;
           }
         }
-        // === FIN: BLOQUE NUEVO PARA REAGENDAR ===
 
       } catch (e) { 
         console.error('Error JSON:', e.message); 
