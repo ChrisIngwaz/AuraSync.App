@@ -534,7 +534,9 @@ DATA_JSON:{
   "cita_fecha": "YYYY-MM-DD",
   "cita_hora": "HH:MM",
   "cita_servicio": "nombre exacto del servicio",
-  "cita_especialista": "nombre exacto del especialista o vacío"
+  "cita_especialista": "nombre exacto del especialista o vacío",
+  "cita_fecha_original": "YYYY-MM-DD (solo para reagendar: fecha de la cita que se va a mover)",
+  "cita_hora_original": "HH:MM (solo para reagendar: hora de la cita que se va a mover)"
 }
 
 REGLAS DEL JSON:
@@ -542,7 +544,8 @@ REGLAS DEL JSON:
 - "accion": "reagendar" SOLO cuando el cliente CONFIRME explícitamente la nueva fecha/hora.
 - "accion": "cancelar" SOLO cuando el cliente CONFIRME explícitamente que quiere cancelar.
 - "cita_servicio": debe coincidir EXACTAMENTE con un nombre de la lista de servicios.
-- "cita_especialista": debe coincidir EXACTAMENTE con un nombre de la lista de especialistas, o vacío si no importa.`;
+- "cita_especialista": debe coincidir EXACTAMENTE con un nombre de la lista de especialistas, o vacío si no importa.
+- "cita_fecha_original" y "cita_hora_original": SOLO para reagendar. Deben contener la fecha y hora EXACTAS de la cita que el cliente confirmó que quiere mover. Esto evita mover la cita equivocada.`;
 
     // ── Construir mensajes para OpenAI ──
     const messages = [{ role: "system", content: systemPrompt }];
@@ -741,13 +744,35 @@ REGLAS DEL JSON:
               especialista_nombre: mapaEsp[c.especialista_id] || 'Asignar'
             }));
 
+            // Seleccionar cita a mover — PRIORIDAD: fecha+hora exacta > servicio > primera
             if (todasLasCitas.length > 0) {
-              if (datosExtraidos.cita_servicio) {
+              // Intento 1: Match exacto por fecha y hora original (más preciso)
+              if (datosExtraidos.cita_fecha_original && datosExtraidos.cita_hora_original) {
+                const fechaHoraOriginal = `${datosExtraidos.cita_fecha_original}T${datosExtraidos.cita_hora_original}:00-05:00`;
+                citaAMover = todasLasCitas.find(c =>
+                  c.fecha_hora === fechaHoraOriginal ||
+                  c.fecha_hora?.startsWith(`${datosExtraidos.cita_fecha_original}T${datosExtraidos.cita_hora_original}`)
+                );
+                if (citaAMover) {
+                  console.log('✅ Cita encontrada por fecha+hora exacta:', citaAMover.fecha_hora);
+                }
+              }
+
+              // Intento 2: Match por servicio
+              if (!citaAMover && datosExtraidos.cita_servicio) {
                 citaAMover = todasLasCitas.find(c =>
                   c.servicio_aux?.toLowerCase().includes(datosExtraidos.cita_servicio.toLowerCase())
                 );
+                if (citaAMover) {
+                  console.log('✅ Cita encontrada por servicio:', citaAMover.servicio_aux);
+                }
               }
-              if (!citaAMover) citaAMover = todasLasCitas[0];
+
+              // Intento 3: Fallback a la primera (más próxima)
+              if (!citaAMover) {
+                citaAMover = todasLasCitas[0];
+                console.log('⚠️ Fallback a primera cita:', citaAMover.fecha_hora, citaAMover.servicio_aux);
+              }
             }
 
             if (!citaAMover) {
