@@ -22,14 +22,11 @@ function getFechaEcuador(offsetDias = 0) {
   const opciones = { timeZone: TIMEZONE, year: 'numeric', month: 'numeric', day: 'numeric' };
   const formatter = new Intl.DateTimeFormat('en-US', opciones);
   const parts = formatter.formatToParts(ahora);
-
   const year = parts.find(p => p.type === 'year')?.value || '2026';
   const month = parts.find(p => p.type === 'month')?.value || '1';
   const day = parts.find(p => p.type === 'day')?.value || '1';
-
   const fecha = new Date(Date.UTC(parseInt(year), parseInt(month) - 1, parseInt(day)));
   fecha.setUTCDate(fecha.getUTCDate() + offsetDias);
-
   return fecha.toISOString().split('T')[0];
 }
 
@@ -53,8 +50,64 @@ function formatearHora(horaStr) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// AIRTABLE: CRUD DE CITAS (con campos reales de tu base)
+// AIRTABLE: BÚSQUEDA ROBUSTA POR MÚLTIPLES CRITERIOS
 // ═══════════════════════════════════════════════════════════════
+
+async function buscarCitaAirtable({ supabaseId, telefono, fecha, hora, especialista }) {
+  try {
+    const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
+
+    // Intento 1: Por ID_Supabase (más confiable si existe)
+    if (supabaseId) {
+      const filter1 = encodeURIComponent(`{ID_Supabase} = '${supabaseId}'`);
+      const res1 = await axios.get(`${url}?filterByFormula=${filter1}`, {
+        headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
+      });
+      if (res1.data.records?.length) {
+        console.log('✅ Airtable encontrado por ID_Supabase:', supabaseId);
+        return { ok: true, record: res1.data.records[0] };
+      }
+      console.log('⚠️ No encontrado por ID_Supabase:', supabaseId, '- intentando fallback...');
+    }
+
+    // Intento 2: Por Teléfono + Fecha + Hora + Especialista
+    if (telefono && fecha && hora) {
+      const condiciones = [
+        `{Teléfono} = '${telefono}'`,
+        `IS_SAME({Fecha}, '${fecha}', 'days')`,
+        `{Hora} = '${hora}'`
+      ];
+      if (especialista) condiciones.push(`{Especialista} = '${especialista}'`);
+
+      const filter2 = encodeURIComponent(`AND(${condiciones.join(', ')})`);
+      const res2 = await axios.get(`${url}?filterByFormula=${filter2}`, {
+        headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
+      });
+      if (res2.data.records?.length) {
+        console.log('✅ Airtable encontrado por fallback teléfono+fecha+hora');
+        return { ok: true, record: res2.data.records[0] };
+      }
+    }
+
+    // Intento 3: Por Teléfono + Fecha (más amplio, por si la hora cambió en el registro)
+    if (telefono && fecha) {
+      const filter3 = encodeURIComponent(`AND({Teléfono} = '${telefono}', IS_SAME({Fecha}, '${fecha}', 'days'))`);
+      const res3 = await axios.get(`${url}?filterByFormula=${filter3}`, {
+        headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
+      });
+      if (res3.data.records?.length) {
+        console.log('✅ Airtable encontrado por fallback teléfono+fecha');
+        return { ok: true, record: res3.data.records[0] };
+      }
+    }
+
+    console.log('❌ Cita no encontrada en Airtable con ningún criterio');
+    return { ok: false, error: 'No encontrado' };
+  } catch (error) {
+    console.error('Error buscando en Airtable:', error.response?.data || error.message);
+    return { ok: false, error: error.message };
+  }
+}
 
 async function crearCitaAirtable(datos) {
   try {
@@ -62,6 +115,8 @@ async function crearCitaAirtable(datos) {
     const [h, min] = datos.hora.split(':').map(Number);
     const [anio, mes, dia] = datos.fecha.split('-').map(Number);
     const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
+
+    console.log('📝 Creando en Airtable - ID_Supabase:', datos.supabase_id);
 
     const payload = {
       records: [{
@@ -83,10 +138,12 @@ async function crearCitaAirtable(datos) {
       }]
     };
 
-    await axios.post(url, payload, {
+    const response = await axios.post(url, payload, {
       headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
     });
-    return { ok: true };
+
+    console.log('✅ Airtable creado, record ID:', response.data.records?.[0]?.id);
+    return { ok: true, recordId: response.data.records?.[0]?.id };
   } catch (error) {
     console.error('Error Airtable Create:', error.response?.data || error.message);
     return { ok: false, error: error.message };
@@ -96,18 +153,22 @@ async function crearCitaAirtable(datos) {
 async function actualizarCitaAirtable(supabaseId, nuevosDatos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-    const filter = encodeURIComponent(`{ID_Supabase} = '${supabaseId}'`);
 
-    const searchRes = await axios.get(`${url}?filterByFormula=${filter}`, {
-      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
+    // Buscar con fallback robusto
+    const busqueda = await buscarCitaAirtable({
+      supabaseId,
+      telefono: nuevosDatos.telefono,
+      fecha: nuevosDatos.fechaAnterior,
+      hora: nuevosDatos.horaAnterior,
+      especialista: nuevosDatos.especialistaAnterior
     });
 
-    if (!searchRes.data.records?.length) {
-      console.error('No se encontró cita en Airtable con ID_Supabase:', supabaseId);
-      return { ok: false };
+    if (!busqueda.ok) {
+      console.error('❌ No se pudo encontrar la cita en Airtable para actualizar');
+      return { ok: false, error: 'Cita no encontrada en Airtable' };
     }
 
-    const recordId = searchRes.data.records[0].id;
+    const recordId = busqueda.record.id;
     const [h, min] = nuevosDatos.hora.split(':').map(Number);
     const [anio, mes, dia] = nuevosDatos.fecha.split('-').map(Number);
     const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
@@ -125,30 +186,42 @@ async function actualizarCitaAirtable(supabaseId, nuevosDatos) {
       }]
     };
 
+    // Si tenemos el ID_Supabase correcto, actualizarlo también
+    if (supabaseId && !busqueda.record.fields.ID_Supabase) {
+      payload.records[0].fields["ID_Supabase"] = supabaseId;
+    }
+
     await axios.patch(url, payload, {
       headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
     });
-    return { ok: true };
+
+    console.log('✅ Airtable actualizado, record ID:', recordId);
+    return { ok: true, recordId };
   } catch (error) {
     console.error('Error Airtable Update:', error.response?.data || error.message);
     return { ok: false, error: error.message };
   }
 }
 
-async function cancelarCitaAirtable(supabaseId, motivo) {
+async function cancelarCitaAirtable(supabaseId, motivo, datosFallback) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
-    const filter = encodeURIComponent(`{ID_Supabase} = '${supabaseId}'`);
 
-    const searchRes = await axios.get(`${url}?filterByFormula=${filter}`, {
-      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
+    // Buscar con fallback robusto
+    const busqueda = await buscarCitaAirtable({
+      supabaseId,
+      telefono: datosFallback?.telefono,
+      fecha: datosFallback?.fecha,
+      hora: datosFallback?.hora,
+      especialista: datosFallback?.especialista
     });
 
-    if (!searchRes.data.records?.length) {
-      return { ok: false, error: 'No encontrada en Airtable' };
+    if (!busqueda.ok) {
+      console.error('❌ No se pudo encontrar la cita en Airtable para cancelar');
+      return { ok: false, error: 'Cita no encontrada en Airtable' };
     }
 
-    const recordId = searchRes.data.records[0].id;
+    const recordId = busqueda.record.id;
 
     await axios.patch(url, {
       records: [{
@@ -162,7 +235,8 @@ async function cancelarCitaAirtable(supabaseId, motivo) {
       headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
     });
 
-    return { ok: true };
+    console.log('✅ Airtable cancelado, record ID:', recordId);
+    return { ok: true, recordId };
   } catch (error) {
     console.error('Error Airtable Cancel:', error.response?.data || error.message);
     return { ok: false, error: error.message };
@@ -175,7 +249,6 @@ async function cancelarCitaAirtable(supabaseId, motivo) {
 
 async function obtenerCitasDelDia(fecha) {
   try {
-    // Consulta Airtable
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     const filter = encodeURIComponent(`AND(IS_SAME({Fecha}, '${fecha}', 'days'), {Estado} = 'Confirmada')`);
 
@@ -188,10 +261,10 @@ async function obtenerCitasDelDia(fecha) {
       duracion: c.fields['Duración estimada (minutos)'] || 60,
       especialista: c.fields.Especialista,
       servicio: c.fields.Servicio,
-      idSupabase: c.fields.ID_Supabase
+      idSupabase: c.fields.ID_Supabase,
+      telefono: c.fields.Teléfono
     }));
 
-    // Consulta Supabase como respaldo/fuente de verdad
     const inicioDia = `${fecha}T00:00:00-05:00`;
     const finDia = `${fecha}T23:59:59-05:00`;
 
@@ -202,7 +275,6 @@ async function obtenerCitasDelDia(fecha) {
       .gte('fecha_hora', inicioDia)
       .lte('fecha_hora', finDia);
 
-    // Resolver nombres de especialistas desde Supabase
     const { data: especialistasData } = await supabase
       .from('especialistas')
       .select('id, nombre');
@@ -210,7 +282,6 @@ async function obtenerCitasDelDia(fecha) {
     const mapaEspecialistas = {};
     (especialistasData || []).forEach(e => { mapaEspecialistas[e.id] = e.nombre; });
 
-    // Combinar y deduplicar por hora+especialista
     const mapa = new Map();
 
     citasAirtable.forEach(c => {
@@ -220,7 +291,7 @@ async function obtenerCitasDelDia(fecha) {
 
     (citasSupabase || []).forEach(c => {
       const hora = c.fecha_hora ? c.fecha_hora.substring(11, 16) : null;
-      const nombreEsp = mapaEspecialistas[c.especialista_id] || c.nombre_cliente_aux || 'Asignar';
+      const nombreEsp = mapaEspecialistas[c.especialista_id] || 'Asignar';
       if (hora) {
         const key = `${hora}|${nombreEsp}`;
         if (!mapa.has(key)) {
@@ -249,7 +320,6 @@ async function verificarDisponibilidad(fecha, hora, especialistaSolicitado, dura
   const inicioNuevo = h * 60 + m;
   const finNuevo = inicioNuevo + (duracionMinutos || 60);
 
-  // Horario: 9:00 a 18:00 (540 a 1080 minutos)
   if (inicioNuevo < 540) {
     return { ok: false, mensaje: "Nuestro horario comienza a las 9:00 a.m. 🌅" };
   }
@@ -326,7 +396,6 @@ export default async function handler(req, res) {
   try {
     let textoUsuario = Body || "";
 
-    // ── Transcripción de audio ──
     if (MediaUrl0) {
       try {
         const deepgramRes = await axios.post(
@@ -360,7 +429,6 @@ export default async function handler(req, res) {
 
     const esNuevo = !cliente?.nombre;
 
-    // Historial de conversación
     let historialFiltrado = [];
     if (!esNuevo) {
       const { data: mensajes } = await supabase
@@ -372,7 +440,7 @@ export default async function handler(req, res) {
       if (mensajes) historialFiltrado = mensajes.reverse();
     }
 
-    // ── Construir catálogos reales (NUNCA inventar) ──
+    // ── Construir catálogos reales ──
     const catalogoEspecialistas = (especialistas || [])
       .map(e => `- ${e.nombre}${e.expertise ? ` (${e.expertise})` : ''}${e.rol ? ` — ${e.rol}` : ''}`)
       .join('\n');
@@ -415,7 +483,13 @@ REGLAS DE ORO — VIOLARLAS ES UN ERROR CRÍTICO:
 
 4. NUNCA saludes, sugieras especialista Y propongas horario en el mismo mensaje.
 
-5. Para REAGENDAR: primero pregunta qué cita quiere mover (si tiene varias), luego propón nueva fecha/hora.
+5. Para REAGENDAR:
+   - Cuando el cliente diga "quiero cambiar/mover/reagendar mi cita", PRIMERO busca en su historial y dile EXACTAMENTE qué citas tiene:
+     "Veo que tienes una cita de [SERVICIO] hoy a las [HORA] con [ESPECIALISTA]. ¿Es esa la que quieres mover?"
+   - Si tiene VARIAS citas, pregúntale cuál quiere mover.
+   - SOLO cuando confirme CUÁL cita, propón nueva fecha/hora.
+   - Espera confirmación de la nueva fecha/hora.
+   - SOLO entonces ejecuta reagendar.
 
 6. Para CANCELAR: confirma cuál cita quiere cancelar, luego ejecuta.
 
@@ -489,7 +563,6 @@ REGLAS DEL JSON:
         datosExtraidos = JSON.parse(jsonMatch[1].trim());
         const textoLower = (textoUsuario || '').toLowerCase();
 
-        // Determinar fecha final
         let fechaFinal = manana;
         if (textoLower.includes('hoy')) fechaFinal = hoy;
         else if (datosExtraidos.cita_fecha?.match(/^\d{4}-\d{2}-\d{2}$/)) fechaFinal = datosExtraidos.cita_fecha;
@@ -502,7 +575,6 @@ REGLAS DEL JSON:
             apellido: datosExtraidos.apellido || ""
           }, { onConflict: 'telefono' });
 
-          // Recargar cliente
           const { data: nuevoCliente } = await supabase
             .from('clientes')
             .select('id, telefono, nombre, apellido, email, especialista_pref_id')
@@ -513,7 +585,6 @@ REGLAS DEL JSON:
 
         const accion = datosExtraidos.accion || 'none';
 
-        // Resolver servicio y especialista desde datos reales
         const servicioData = servicios?.find(s =>
           s.nombre.toLowerCase().includes((datosExtraidos.cita_servicio || '').toLowerCase())
         ) || { id: null, nombre: datosExtraidos.cita_servicio || "Servicio", precio: 0, duracion: 60 };
@@ -548,7 +619,6 @@ REGLAS DEL JSON:
               const especialistaFinal = disponible.especialista || datosExtraidos.cita_especialista || "Asignar";
               const especialistaIdFinal = especialistaData?.id || null;
 
-              // Insertar en Supabase
               const { data: citaSupabase, error: insertError } = await supabase
                 .from('citas')
                 .insert({
@@ -565,10 +635,11 @@ REGLAS DEL JSON:
                 .single();
 
               if (insertError) {
-                console.error('Error insert Supabase:', insertError);
+                console.error('❌ Error insert Supabase:', insertError);
                 mensajeAccion = "Ups, tuve un problema guardando tu cita. ¿Me das un momento? 🙏";
               } else {
-                // Crear en Airtable
+                console.log('✅ Supabase creado, ID:', citaSupabase?.id);
+
                 const airtableRes = await crearCitaAirtable({
                   telefono: userPhone,
                   nombre: datosExtraidos.nombre || cliente?.nombre || '',
@@ -603,7 +674,6 @@ REGLAS DEL JSON:
           const tieneHora = datosExtraidos.cita_hora?.match(/^\d{2}:\d{2}$/);
 
           if (fechaFinal && tieneHora) {
-            // Recargar cliente por si acaba de crearse
             const { data: clienteActual } = await supabase
               .from('clientes')
               .select('id, nombre, apellido, email')
@@ -630,7 +700,6 @@ REGLAS DEL JSON:
               if (citasPorId?.length) todasLasCitas = citasPorId;
             }
 
-            // Fallback por nombre
             if (!todasLasCitas.length) {
               const nombreBusqueda = `${clienteNombre} ${clienteApellido}`.trim();
               if (nombreBusqueda) {
@@ -651,13 +720,11 @@ REGLAS DEL JSON:
             const mapaEsp = {};
             (espData || []).forEach(e => { mapaEsp[e.id] = e.nombre; });
 
-            // Enriquecer citas con nombre de especialista
             todasLasCitas = todasLasCitas.map(c => ({
               ...c,
               especialista_nombre: mapaEsp[c.especialista_id] || 'Asignar'
             }));
 
-            // Seleccionar cita a mover
             if (todasLasCitas.length > 0) {
               if (datosExtraidos.cita_servicio) {
                 citaAMover = todasLasCitas.find(c =>
@@ -694,6 +761,11 @@ REGLAS DEL JSON:
                 const especialistaFinal = disponible.especialista || especialistaReagendar || "Asignar";
                 const especialistaIdFinal = especialistas?.find(e => e.nombre === especialistaFinal)?.id || citaAMover.especialista_id || null;
                 const fechaAnterior = citaAMover.fecha_hora ? citaAMover.fecha_hora.split('T')[0] : '';
+                const horaAnterior = citaAMover.fecha_hora ? citaAMover.fecha_hora.substring(11, 16) : '';
+
+                console.log('🔄 Reagendando cita Supabase ID:', citaAMover.id);
+                console.log('   De:', fechaAnterior, horaAnterior);
+                console.log('   A:', fechaFinal, datosExtraidos.cita_hora);
 
                 // Actualizar en Supabase
                 const { error: updateError } = await supabase
@@ -707,20 +779,27 @@ REGLAS DEL JSON:
                   .eq('id', citaAMover.id);
 
                 if (updateError) {
-                  console.error('Error update Supabase:', updateError);
+                  console.error('❌ Error update Supabase:', updateError);
                   mensajeAccion = "Tuvimos un problema moviendo tu cita. ¿Lo intentamos de nuevo? 🙏";
                 } else {
-                  // Actualizar en Airtable
+                  console.log('✅ Supabase actualizado');
+
+                  // Actualizar en Airtable con fallback robusto
                   const airtableRes = await actualizarCitaAirtable(citaAMover.id, {
                     fecha: fechaFinal,
                     hora: datosExtraidos.cita_hora,
                     especialista: especialistaFinal,
-                    observaciones: `Reagendada de ${fechaAnterior}`
+                    observaciones: `Reagendada de ${fechaAnterior} ${horaAnterior}`,
+                    telefono: userPhone,
+                    fechaAnterior: fechaAnterior,
+                    horaAnterior: horaAnterior,
+                    especialistaAnterior: citaAMover.especialista_nombre
                   });
 
                   if (airtableRes.ok) {
-                    mensajeAccion = `✨ ¡Cita movida con éxito!\n\nDe: ${formatearFecha(fechaAnterior)} ${citaAMover.fecha_hora ? formatearHora(citaAMover.fecha_hora.substring(11, 16)) : ''}\nA: 📅 ${formatearFecha(fechaFinal)} a las ${formatearHora(datosExtraidos.cita_hora)}\n💇‍♀️ Con ${especialistaFinal}\n\n¡Nos vemos pronto! 🌸`;
+                    mensajeAccion = `✨ ¡Cita movida con éxito!\n\nDe: ${formatearFecha(fechaAnterior)} ${formatearHora(horaAnterior)}\nA: 📅 ${formatearFecha(fechaFinal)} a las ${formatearHora(datosExtraidos.cita_hora)}\n💇‍♀️ Con ${especialistaFinal}\n\n¡Nos vemos pronto! 🌸`;
                   } else {
+                    console.error('⚠️ Airtable falló pero Supabase sí se actualizó');
                     mensajeAccion = `✅ Tu cita fue movida en nuestro sistema principal a ${formatearFecha(fechaFinal)} a las ${formatearHora(datosExtraidos.cita_hora)}.\n\nNota: Estamos sincronizando con nuestro calendario secundario, pero tu lugar está asegurado. 💫`;
                   }
                 }
@@ -768,7 +847,6 @@ REGLAS DEL JSON:
             }
           }
 
-          // Resolver nombres de especialistas
           const { data: espDataCancel } = await supabase.from('especialistas').select('id, nombre');
           const mapaEspCancel = {};
           (espDataCancel || []).forEach(e => { mapaEspCancel[e.id] = e.nombre; });
@@ -791,8 +869,8 @@ REGLAS DEL JSON:
             mensajeAccion = "No encontré citas activas a tu nombre para cancelar. ¿Necesitas agendar una? 💫";
           } else {
             const fechaCita = citaACancelar.fecha_hora ? citaACancelar.fecha_hora.split('T')[0] : '';
+            const horaCita = citaACancelar.fecha_hora ? citaACancelar.fecha_hora.substring(11, 16) : '';
 
-            // Cancelar en Supabase
             const { error: cancelError } = await supabase
               .from('citas')
               .update({
@@ -802,11 +880,15 @@ REGLAS DEL JSON:
               .eq('id', citaACancelar.id);
 
             if (cancelError) {
-              console.error('Error cancel Supabase:', cancelError);
+              console.error('❌ Error cancel Supabase:', cancelError);
               mensajeAccion = "Tuvimos un problema cancelando tu cita. ¿Me das un momento? 🙏";
             } else {
-              // Cancelar en Airtable
-              await cancelarCitaAirtable(citaACancelar.id, datosExtraidos.motivo || 'Cancelada por cliente');
+              await cancelarCitaAirtable(citaACancelar.id, datosExtraidos.motivo || 'Cancelada por cliente', {
+                telefono: userPhone,
+                fecha: fechaCita,
+                hora: horaCita,
+                especialista: citaACancelar.especialista_nombre
+              });
 
               mensajeAccion = `✅ Tu cita de ${citaACancelar.servicio_aux || 'servicio'} del ${formatearFecha(fechaCita)} con ${citaACancelar.especialista_nombre} ha sido cancelada.\n\nLamentamos no verte esta vez, pero aquí estaremos cuando nos necesites. 🌸`;
             }
