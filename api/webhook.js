@@ -80,6 +80,49 @@ async function crearCitaAirtable(datos) {
   }
 }
 
+// === INICIO: FUNCIÓN NUEVA PARA ACTUALIZAR CITA EN AIRTABLE ===
+async function actualizarCitaAirtable(supabaseId, nuevosDatos) {
+  try {
+    // Buscar el registro en Airtable por ID_Supabase
+    const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
+    const filter = encodeURIComponent(`{ID_Supabase} = '${supabaseId}'`);
+    const searchRes = await axios.get(`${url}?filterByFormula=${filter}`, {
+      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}` }
+    });
+    
+    if (!searchRes.data.records || searchRes.data.records.length === 0) {
+      console.error('No se encontró cita en Airtable con ID_Supabase:', supabaseId);
+      return false;
+    }
+    
+    const recordId = searchRes.data.records[0].id;
+    const [h, min] = nuevosDatos.hora.split(':').map(Number);
+    const [anio, mes, dia] = nuevosDatos.fecha.split('-').map(Number);
+    const fechaUTC = new Date(Date.UTC(anio, mes - 1, dia, h + 5, min, 0)).toISOString();
+    
+    const payload = {
+      records: [{
+        id: recordId,
+        fields: {
+          "Fecha": fechaUTC,
+          "Hora": nuevosDatos.hora,
+          "Especialista": nuevosDatos.especialista,
+          "Estado": "Confirmada"
+        }
+      }]
+    };
+    
+    await axios.patch(url, payload, {
+      headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' }
+    });
+    return true;
+  } catch (error) {
+    console.error('Error Airtable Update:', error.response?.data || error.message);
+    return false;
+  }
+}
+// === FIN: FUNCIÓN NUEVA ===
+
 async function verificarDisponibilidadAirtable(fecha, hora, especialistaSolicitado, duracionMinutos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
@@ -305,6 +348,95 @@ DATA_JSON:{
             accionEjecutada = true;
           }
         }
+
+        // === INICIO: BLOQUE NUEVO PARA REAGENDAR ===
+        else if (accion === 'reagendar') {
+          const tieneHora = datosExtraidos.cita_hora?.match(/^\d{2}:\d{2}$/);
+          if (fechaFinal && tieneHora) {
+            // Buscar cita existente del cliente (la más reciente confirmada)
+            const { data: citasExistentes } = await supabase
+              .from('citas')
+              .select('id, servicio_id, servicio_aux, duracion_aux, fecha_hora, especialista')
+              .eq('cliente_id', cliente?.id)
+              .eq('estado', 'Confirmada')
+              .order('fecha_hora', { ascending: true })
+              .limit(5);
+            
+            // Buscar la cita que el usuario quiere mover (por servicio o la más próxima)
+            let citaAMover = null;
+            if (citasExistentes && citasExistentes.length > 0) {
+              // Intentar match por servicio si se especificó
+              if (datosExtraidos.cita_servicio) {
+                citaAMover = citasExistentes.find(c => 
+                  c.servicio_aux?.toLowerCase().includes(datosExtraidos.cita_servicio.toLowerCase())
+                );
+              }
+              // Si no hay match por servicio, tomar la primera (más próxima)
+              if (!citaAMover) {
+                citaAMover = citasExistentes[0];
+              }
+            }
+
+            if (!citaAMover) {
+              mensajeAccion = "No encontré una cita confirmada tuya para reagendar. ¿Quieres agendar una nueva?";
+            } else {
+              // Obtener datos del servicio
+              let servicioData = servicios?.find(s => s.id === citaAMover.servicio_id) || 
+                { id: null, nombre: citaAMover.servicio_aux || "Servicio", precio: 0, duracion: citaAMover.duracion_aux || 60 };
+              
+              // Verificar disponibilidad en nueva fecha/hora
+              const disponible = await verificarDisponibilidadAirtable(
+                fechaFinal, 
+                datosExtraidos.cita_hora, 
+                datosExtraidos.cita_especialista || citaAMover.especialista, 
+                servicioData.duracion
+              );
+
+              if (!disponible.ok) {
+                const alternativa = await buscarAlternativaAirtable(
+                  fechaFinal, 
+                  datosExtraidos.cita_hora, 
+                  datosExtraidos.cita_especialista || citaAMover.especialista, 
+                  servicioData.duracion
+                );
+                mensajeAccion = `Ese horario no está disponible. ${alternativa.mensaje}`;
+              } else {
+                const especialistaFinal = disponible.especialista || datosExtraidos.cita_especialista || citaAMover.especialista || "Asignar";
+                
+                // Actualizar en Supabase
+                const { error: updateError } = await supabase
+                  .from('citas')
+                  .update({
+                    fecha_hora: `${fechaFinal}T${datosExtraidos.cita_hora}:00-05:00`,
+                    estado: 'Confirmada',
+                    especialista: especialistaFinal
+                  })
+                  .eq('id', citaAMover.id);
+
+                if (updateError) {
+                  mensajeAccion = "Error actualizando la cita. Inténtalo de nuevo.";
+                } else {
+                  // Actualizar en Airtable
+                  const airtableUpdated = await actualizarCitaAirtable(citaAMover.id, {
+                    fecha: fechaFinal,
+                    hora: datosExtraidos.cita_hora,
+                    especialista: especialistaFinal
+                  });
+
+                  if (airtableUpdated) {
+                    const fechaAnterior = citaAMover.fecha_hora ? citaAMover.fecha_hora.split('T')[0] : 'anterior';
+                    mensajeAccion = `✅ Cita reagendada: de ${formatearFecha(fechaAnterior)} a ${formatearFecha(fechaFinal)} a las ${datosExtraidos.cita_hora} con ${especialistaFinal}.`;
+                  } else {
+                    mensajeAccion = "Cita actualizada en nuestro sistema principal, pero hubo un error sincronizando con Airtable.";
+                  }
+                }
+              }
+            }
+            accionEjecutada = true;
+          }
+        }
+        // === FIN: BLOQUE NUEVO PARA REAGENDAR ===
+
       } catch (e) { 
         console.error('Error JSON:', e.message); 
       }
