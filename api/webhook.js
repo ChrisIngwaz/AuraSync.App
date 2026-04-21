@@ -413,13 +413,18 @@ export default async function handler(req, res) {
     let clienteEsNuevoParaPrompt = esNuevo;
 
     let historialFiltrado = [];
-    const { data: mensajes } = await supabase
-      .from('conversaciones')
-      .select('rol, contenido')
-      .eq('telefono', userPhone)
-      .order('created_at', { ascending: false })
-      .limit(8);
-    if (mensajes) historialFiltrado = mensajes.reverse();
+    if (esNuevo) {
+      // Número no registrado: limpiar conversaciones sueltas para empezar desde cero
+      await supabase.from('conversaciones').delete().eq('telefono', userPhone);
+    } else {
+      const { data: mensajes } = await supabase
+        .from('conversaciones')
+        .select('rol, contenido')
+        .eq('telefono', userPhone)
+        .order('created_at', { ascending: false })
+        .limit(8);
+      if (mensajes) historialFiltrado = mensajes.reverse();
+    }
 
     // ── Construir catálogos reales ──
     const catalogoEspecialistas = (especialistas || [])
