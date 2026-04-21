@@ -410,17 +410,16 @@ export default async function handler(req, res) {
       .select('id, nombre, precio, duracion, categoria, descripcion_voda');
 
     const esNuevo = !cliente?.nombre;
+    let clienteEsNuevoParaPrompt = esNuevo;
 
     let historialFiltrado = [];
-    if (!esNuevo) {
-      const { data: mensajes } = await supabase
-        .from('conversaciones')
-        .select('rol, contenido')
-        .eq('telefono', userPhone)
-        .order('created_at', { ascending: false })
-        .limit(8);
-      if (mensajes) historialFiltrado = mensajes.reverse();
-    }
+    const { data: mensajes } = await supabase
+      .from('conversaciones')
+      .select('rol, contenido')
+      .eq('telefono', userPhone)
+      .order('created_at', { ascending: false })
+      .limit(8);
+    if (mensajes) historialFiltrado = mensajes.reverse();
 
     // ── Construir catálogos reales ──
     const catalogoEspecialistas = (especialistas || [])
@@ -451,7 +450,7 @@ ${catalogoServicios || "(Consultar con recepción)"}
 ═══════════════════════════════════════════════════════════════
 ESTADO DEL CLIENTE:
 ═══════════════════════════════════════════════════════════════
-${esNuevo ? `⚠️ CLIENTE NUEVO — No tenemos sus datos en el sistema.
+${clienteEsNuevoParaPrompt ? `⚠️ CLIENTE NUEVO — No tenemos sus datos en el sistema.
 FLUJO OBLIGATORIO PARA CLIENTE NUEVO:
 1. Salúdalo cálidamente, preséntate como Aura de AuraSync.
 2. Pide su NOMBRE Y APELLIDO en el primer mensaje.
@@ -583,7 +582,7 @@ REGLAS DEL JSON:
         if (textoLower.includes('hoy')) fechaFinal = hoy;
         else if (datosExtraidos.cita_fecha?.match(/^\d{4}-\d{2}-\d{2}$/)) fechaFinal = datosExtraidos.cita_fecha;
 
-        // ── CAMBIO 2 y 4: Guardar cliente nuevo con fecha_nacimiento ──
+        // ── Guardar cliente nuevo con fecha_nacimiento ──
         if (datosExtraidos.nombre && esNuevo) {
           // Convertir fecha_nacimiento de DD/MM/AAAA a YYYY-MM-DD para Supabase
           let fechaNacISO = null;
@@ -607,6 +606,7 @@ REGLAS DEL JSON:
             .eq('telefono', userPhone)
             .maybeSingle();
           cliente = nuevoCliente;
+          clienteEsNuevoParaPrompt = false; // Ya tiene nombre, no volver a pedir datos
         }
 
         const accion = datosExtraidos.accion || 'none';
