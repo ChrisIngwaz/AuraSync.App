@@ -358,7 +358,17 @@ export default async function handler(req, res) {
       .from('servicios')
       .select('id, nombre, precio, duracion, categoria, descripcion_voda');
 
-    const esNuevo = !cliente?.nombre;
+    // ═══════════════════════════════════════════════════════════════
+    // DETECCIÓN DE PASO DE ONBOARDING (0-4)
+    // 0 = sin nombre | 1 = falta apellido | 2 = falta ciudad | 3 = falta fecha_nac | 4 = completo
+    // ═══════════════════════════════════════════════════════════════
+    let pasoOnboarding = 4;
+    if (!cliente?.nombre) pasoOnboarding = 0;
+    else if (!cliente?.apellido) pasoOnboarding = 1;
+    else if (!cliente?.ciudad) pasoOnboarding = 2;
+    else if (!cliente?.fecha_nacimiento) pasoOnboarding = 3;
+
+    const esNuevo = pasoOnboarding < 4;
 
     let historialFiltrado = [];
     if (!esNuevo) {
@@ -383,9 +393,7 @@ export default async function handler(req, res) {
     const manana = getFechaEcuador(1);
     const pasadoManana = getFechaEcuador(2);
 
-    // ═══════════════════════════════════════════════════════════════
-    // SYSTEM PROMPT — ONBOARDING COMO REGLA #0 (PRIORIDAD ABSOLUTA)
-    // ═══════════════════════════════════════════════════════════════
+    // ── SYSTEM PROMPT ──
     const systemPrompt = `Eres Aura, asistente de AuraSync. Eres una coordinadora humana, cálida, elegante y eficiente. NUNCA eres robótica.
 
 ═══════════════════════════════════════════════════════════════
@@ -399,23 +407,6 @@ SERVICIOS DISPONIBLES (solo estos existen):
 ${catalogoServicios || "(Consultar con recepción)"}
 
 ═══════════════════════════════════════════════════════════════
-REGLA #0 — ONBOARDING (PRIORIDAD ABSOLUTA SI ES NUEVO):
-═══════════════════════════════════════════════════════════════
-
-SI el cliente NO tiene nombre registrado (esNuevo = true), DEBES seguir
-EXCLUSIVAMENTE este flujo. IGNORA completamente los Pasos 1-5, IGNORA
-servicios, especialistas y horarios hasta completar el registro.
-
-  1. "¡Hola! Soy Aura de AuraSync. Veo que es tu primera vez con nosotros. ¿Con qué nombre puedo registrarte?"
-  2. "¿Y tu apellido?"
-  3. "¿En qué ciudad te encuentras?"
-  4. "¿Cuál es tu fecha de nacimiento? (DD/MM/AAAA)"
-  5. "¡Listo [nombre]! Ya estás registrada. ¿Qué servicio necesitas hoy?"
-
-  → En el JSON, incluir: "nombre", "apellido", "ciudad", "fecha_nacimiento"
-  → "accion": "none" durante todo el onboarding (NO agendar todavía)
-
-═══════════════════════════════════════════════════════════════
 REGLAS DE ORO — VIOLARLAS ES UN ERROR CRÍTICO:
 ═══════════════════════════════════════════════════════════════
 
@@ -423,7 +414,7 @@ REGLAS DE ORO — VIOLARLAS ES UN ERROR CRÍTICO:
 
 2. NUNCA inventes servicios, precios ni duraciones. Usa EXACTAMENTE los datos de arriba.
 
-3. FLUJO CONVERSACIONAL para CLIENTES REGISTRADOS (una pregunta por mensaje):
+3. FLUJO CONVERSACIONAL (una pregunta por mensaje, NUNCA repetitivo):
 
    Paso 1: Saludo cálido + ¿qué servicio necesita? (SOLO si el cliente NO lo dijo ya)
 
@@ -496,7 +487,6 @@ REGLAS DEL JSON:
 - "accion": "agendar" SOLO cuando el cliente CONFIRME explícitamente el horario propuesto.
 - "accion": "reagendar" SOLO cuando el cliente CONFIRME explícitamente la nueva fecha/hora.
 - "accion": "cancelar" SOLO cuando el cliente CONFIRME explícitamente que quiere cancelar.
-- "accion": "none" durante el onboarding completo.
 - "cita_servicio": debe coincidir EXACTAMENTE con un nombre de la lista de servicios.
 - "cita_especialista": debe coincidir EXACTAMENTE con un nombre de la lista de especialistas, o vacío si no importa.
 - "cita_fecha_original" y "cita_hora_original": OBLIGATORIOS para reagendar. Deben contener la fecha y hora EXACTAS de la cita que el cliente confirmó que quiere mover. Si no los incluyes, se moverá la cita equivocada.`;
@@ -509,6 +499,39 @@ REGLAS DEL JSON:
         content: msg.contenido
       });
     });
+
+    // ═══════════════════════════════════════════════════════════════
+    // INYECCIÓN EXPLÍCITA DE ONBOARDING (fuerza a OpenAI a obedecer)
+    // ═══════════════════════════════════════════════════════════════
+    if (pasoOnboarding === 0) {
+      messages.push({
+        role: "system",
+        content: `INSTRUCCIÓN OBLIGATORIA: Este cliente es NUEVO. NO tiene nombre registrado. 
+DEBES preguntarle ÚNICAMENTE: "¡Hola! Soy Aura de AuraSync. Veo que es tu primera vez con nosotros. ¿Con qué nombre puedo registrarte?"
+NO menciones servicios. NO menciones especialistas. NO hables de horarios. SOLO pide el nombre.`
+      });
+    } else if (pasoOnboarding === 1) {
+      messages.push({
+        role: "system",
+        content: `INSTRUCCIÓN OBLIGATORIA: Este cliente ya dió su nombre (${cliente.nombre}) pero NO tiene apellido registrado.
+DEBES preguntarle ÚNICAMENTE: "¿Y tu apellido?"
+NO menciones servicios. NO menciones especialistas. NO hables de horarios. SOLO pide el apellido.`
+      });
+    } else if (pasoOnboarding === 2) {
+      messages.push({
+        role: "system",
+        content: `INSTRUCCIÓN OBLIGATORIA: Este cliente ya dió nombre y apellido (${cliente.nombre} ${cliente.apellido}) pero NO tiene ciudad registrada.
+DEBES preguntarle ÚNICAMENTE: "¿En qué ciudad te encuentras?"
+NO menciones servicios. NO menciones especialistas. NO hables de horarios. SOLO pide la ciudad.`
+      });
+    } else if (pasoOnboarding === 3) {
+      messages.push({
+        role: "system",
+        content: `INSTRUCCIÓN OBLIGATORIA: Este cliente ya dió nombre, apellido y ciudad (${cliente.nombre} ${cliente.apellido}, ${cliente.ciudad}) pero NO tiene fecha de nacimiento registrada.
+DEBES preguntarle ÚNICAMENTE: "¿Cuál es tu fecha de nacimiento? (DD/MM/AAAA)"
+NO menciones servicios. NO menciones especialistas. NO hables de horarios. SOLO pide la fecha de nacimiento.`
+      });
+    }
 
     messages.push({ role: "user", content: textoUsuario });
 
@@ -537,21 +560,44 @@ REGLAS DEL JSON:
         if (textoLower.includes('hoy')) fechaFinal = hoy;
         else if (datosExtraidos.cita_fecha?.match(/^\d{4}-\d{2}-\d{2}$/)) fechaFinal = datosExtraidos.cita_fecha;
 
-        if (datosExtraidos.nombre && esNuevo) {
-          const fechaNacimientoParseada = parsearFechaNacimiento(datosExtraidos.fecha_nacimiento);
+        // Guardar datos del onboarding paso a paso
+        if (pasoOnboarding === 0 && datosExtraidos.nombre) {
           await supabase.from('clientes').upsert({
             telefono: userPhone,
-            nombre: datosExtraidos.nombre.trim(),
-            apellido: datosExtraidos.apellido || "",
-            ciudad: datosExtraidos.ciudad || null,
-            fecha_nacimiento: fechaNacimientoParseada
+            nombre: datosExtraidos.nombre.trim()
           }, { onConflict: 'telefono' });
-          const { data: nuevoCliente } = await supabase
+          console.log('✅ Guardado nombre:', datosExtraidos.nombre);
+        } else if (pasoOnboarding === 1 && datosExtraidos.apellido) {
+          await supabase.from('clientes').upsert({
+            telefono: userPhone,
+            apellido: datosExtraidos.apellido.trim()
+          }, { onConflict: 'telefono' });
+          console.log('✅ Guardado apellido:', datosExtraidos.apellido);
+        } else if (pasoOnboarding === 2 && datosExtraidos.ciudad) {
+          await supabase.from('clientes').upsert({
+            telefono: userPhone,
+            ciudad: datosExtraidos.ciudad.trim()
+          }, { onConflict: 'telefono' });
+          console.log('✅ Guardado ciudad:', datosExtraidos.ciudad);
+        } else if (pasoOnboarding === 3 && datosExtraidos.fecha_nacimiento) {
+          const fechaNacimientoParseada = parsearFechaNacimiento(datosExtraidos.fecha_nacimiento);
+          if (fechaNacimientoParseada) {
+            await supabase.from('clientes').upsert({
+              telefono: userPhone,
+              fecha_nacimiento: fechaNacimientoParseada
+            }, { onConflict: 'telefono' });
+            console.log('✅ Guardado fecha_nacimiento:', fechaNacimientoParseada);
+          }
+        }
+
+        // Recargar cliente si se guardaron datos
+        if (pasoOnboarding < 4) {
+          const { data: clienteActualizado } = await supabase
             .from('clientes')
             .select('id, telefono, nombre, apellido, ciudad, fecha_nacimiento, especialista_pref_id')
             .eq('telefono', userPhone)
             .maybeSingle();
-          cliente = nuevoCliente;
+          cliente = clienteActualizado;
         }
 
         const accion = datosExtraidos.accion || 'none';
@@ -564,7 +610,8 @@ REGLAS DEL JSON:
           e.nombre.toLowerCase().includes((datosExtraidos.cita_especialista || '').toLowerCase())
         ) || null;
 
-        if (accion === 'agendar') {
+        // Solo procesar agendamiento si onboarding está completo (paso 4)
+        if (accion === 'agendar' && pasoOnboarding === 4) {
           const tieneHora = datosExtraidos.cita_hora?.match(/^\d{2}:\d{2}$/);
           if (fechaFinal && tieneHora) {
             const disponible = await verificarDisponibilidad(
@@ -629,7 +676,7 @@ REGLAS DEL JSON:
           }
         }
 
-        else if (accion === 'reagendar') {
+        else if (accion === 'reagendar' && pasoOnboarding === 4) {
           const tieneHora = datosExtraidos.cita_hora?.match(/^\d{2}:\d{2}$/);
           if (fechaFinal && tieneHora) {
             const { data: clienteActual } = await supabase
@@ -783,7 +830,7 @@ REGLAS DEL JSON:
           }
         }
 
-        else if (accion === 'cancelar') {
+        else if (accion === 'cancelar' && pasoOnboarding === 4) {
           const clienteId = cliente?.id;
           const clienteNombre = cliente?.nombre || datosExtraidos.nombre || '';
           const clienteApellido = cliente?.apellido || datosExtraidos.apellido || '';
