@@ -560,44 +560,55 @@ NO menciones servicios. NO menciones especialistas. NO hables de horarios. SOLO 
         if (textoLower.includes('hoy')) fechaFinal = hoy;
         else if (datosExtraidos.cita_fecha?.match(/^\d{4}-\d{2}-\d{2}$/)) fechaFinal = datosExtraidos.cita_fecha;
 
-        // Guardar datos del onboarding paso a paso
+        // ═══════════════════════════════════════════════════════════════
+        // GUARDADO PROGRESIVO DE ONBOARDING (ANTES de generar respuesta)
+        // ═══════════════════════════════════════════════════════════════
+        let datosAGuardar = { telefono: userPhone };
+        let seGuardoAlgo = false;
+
         if (pasoOnboarding === 0 && datosExtraidos.nombre) {
-          await supabase.from('clientes').upsert({
-            telefono: userPhone,
-            nombre: datosExtraidos.nombre.trim()
-          }, { onConflict: 'telefono' });
-          console.log('✅ Guardado nombre:', datosExtraidos.nombre);
-        } else if (pasoOnboarding === 1 && datosExtraidos.apellido) {
-          await supabase.from('clientes').upsert({
-            telefono: userPhone,
-            apellido: datosExtraidos.apellido.trim()
-          }, { onConflict: 'telefono' });
-          console.log('✅ Guardado apellido:', datosExtraidos.apellido);
-        } else if (pasoOnboarding === 2 && datosExtraidos.ciudad) {
-          await supabase.from('clientes').upsert({
-            telefono: userPhone,
-            ciudad: datosExtraidos.ciudad.trim()
-          }, { onConflict: 'telefono' });
-          console.log('✅ Guardado ciudad:', datosExtraidos.ciudad);
-        } else if (pasoOnboarding === 3 && datosExtraidos.fecha_nacimiento) {
+          datosAGuardar.nombre = datosExtraidos.nombre.trim();
+          seGuardoAlgo = true;
+          console.log('📝 Guardando nombre:', datosExtraidos.nombre);
+        }
+        if ((pasoOnboarding === 0 || pasoOnboarding === 1) && datosExtraidos.apellido) {
+          datosAGuardar.apellido = datosExtraidos.apellido.trim();
+          seGuardoAlgo = true;
+          console.log('📝 Guardando apellido:', datosExtraidos.apellido);
+        }
+        if ((pasoOnboarding <= 2) && datosExtraidos.ciudad) {
+          datosAGuardar.ciudad = datosExtraidos.ciudad.trim();
+          seGuardoAlgo = true;
+          console.log('📝 Guardando ciudad:', datosExtraidos.ciudad);
+        }
+        if ((pasoOnboarding <= 3) && datosExtraidos.fecha_nacimiento) {
           const fechaNacimientoParseada = parsearFechaNacimiento(datosExtraidos.fecha_nacimiento);
           if (fechaNacimientoParseada) {
-            await supabase.from('clientes').upsert({
-              telefono: userPhone,
-              fecha_nacimiento: fechaNacimientoParseada
-            }, { onConflict: 'telefono' });
-            console.log('✅ Guardado fecha_nacimiento:', fechaNacimientoParseada);
+            datosAGuardar.fecha_nacimiento = fechaNacimientoParseada;
+            seGuardoAlgo = true;
+            console.log('📝 Guardando fecha_nacimiento:', fechaNacimientoParseada);
           }
         }
 
-        // Recargar cliente si se guardaron datos
-        if (pasoOnboarding < 4) {
+        // Guardar en Supabase si hay datos nuevos
+        if (seGuardoAlgo) {
+          await supabase.from('clientes').upsert(datosAGuardar, { onConflict: 'telefono' });
+          // Recargar cliente inmediatamente
           const { data: clienteActualizado } = await supabase
             .from('clientes')
             .select('id, telefono, nombre, apellido, ciudad, fecha_nacimiento, especialista_pref_id')
             .eq('telefono', userPhone)
             .maybeSingle();
           cliente = clienteActualizado;
+          
+          // Recalcular paso de onboarding
+          if (!cliente?.nombre) pasoOnboarding = 0;
+          else if (!cliente?.apellido) pasoOnboarding = 1;
+          else if (!cliente?.ciudad) pasoOnboarding = 2;
+          else if (!cliente?.fecha_nacimiento) pasoOnboarding = 3;
+          else pasoOnboarding = 4;
+          
+          console.log('✅ Cliente actualizado. Nuevo pasoOnboarding:', pasoOnboarding);
         }
 
         const accion = datosExtraidos.accion || 'none';
