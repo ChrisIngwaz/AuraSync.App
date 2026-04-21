@@ -14,6 +14,11 @@ const CONFIG = {
 const TIMEZONE = 'America/Guayaquil';
 
 // ═══════════════════════════════════════════════════════════════
+// NÚMEROS DE ADMINISTRADOR (para modo admin)
+// ═══════════════════════════════════════════════════════════════
+const ADMIN_PHONES = ['+593995430859'];
+
+// ═══════════════════════════════════════════════════════════════
 // FUNCIONES DE FECHA/HORA
 // ═══════════════════════════════════════════════════════════════
 
@@ -47,6 +52,24 @@ function formatearHora(horaStr) {
   const periodo = h >= 12 ? 'p.m.' : 'a.m.';
   const h12 = h > 12 ? h - 12 : (h === 0 ? 12 : h);
   return `${h12}:${m.toString().padStart(2, '0')} ${periodo}`;
+}
+
+// ═══ CAMBIO NUEVO ═══ Función para parsear fecha de nacimiento
+function parsearFechaNacimiento(str) {
+  if (!str) return null;
+  // Formatos: DD/MM/AAAA, DD-MM-AAAA, D/M/AAAA
+  const limpio = str.trim().replace(/-/g, '/');
+  const partes = limpio.split('/');
+  if (partes.length !== 3) return null;
+  
+  const dia = parseInt(partes[0]);
+  const mes = parseInt(partes[1]);
+  const anio = parseInt(partes[2]);
+  
+  if (isNaN(dia) || isNaN(mes) || isNaN(anio)) return null;
+  if (anio < 1900 || anio > 2026) return null;
+  
+  return `${anio}-${mes.toString().padStart(2, '0')}-${dia.toString().padStart(2, '0')}`;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -363,6 +386,63 @@ async function buscarAlternativa(fecha, horaSolicitada, especialistaSolicitado, 
   return { mensaje: "Ese día ya no tenemos cupos disponibles. ¿Te parece otro día? 📅" };
 }
 
+// ═══ CAMBIO NUEVO ═══ Funciones para modo administrador
+async function obtenerCitasParaReporte(fecha) {
+  try {
+    const inicioDia = `${fecha}T00:00:00`;
+    const finDia = `${fecha}T23:59:59`;
+
+    const { data: citas, error } = await supabase
+      .from('citas')
+      .select(`
+        id,
+        fecha_hora,
+        estado,
+        servicio_aux,
+        duracion_aux,
+        nombre_cliente_aux,
+        especialistas:especialista_id ( nombre ),
+        servicios:servicio_id ( nombre, precio ),
+        clientes:cliente_id ( nombre, apellido, telefono )
+      `)
+      .in('estado', ['Confirmada', 'Completada', 'Bloqueado'])
+      .gte('fecha_hora', inicioDia)
+      .lte('fecha_hora', finDia)
+      .order('fecha_hora', { ascending: true });
+
+    if (error) throw error;
+    return citas || [];
+  } catch (error) {
+    console.error('Error obteniendo citas para reporte:', error.message);
+    return [];
+  }
+}
+
+async function bloquearHorarioSupabase(fecha, horaInicio, horaFin, motivo) {
+  try {
+    const { data, error } = await supabase
+      .from('citas')
+      .insert({
+        fecha_hora: `${fecha}T${horaInicio}:00-05:00`,
+        estado: 'Bloqueado',
+        servicio_aux: motivo || 'Bloqueado por admin',
+        duracion_aux: 60,
+        nombre_cliente_aux: 'ADMIN - Bloqueo',
+        especialista_id: null,
+        cliente_id: null,
+        servicio_id: null
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+    return { ok: true, data };
+  } catch (error) {
+    console.error('Error bloqueando horario:', error);
+    return { ok: false, error: error.message };
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════
 // HANDLER PRINCIPAL
 // ═══════════════════════════════════════════════════════════════
@@ -397,7 +477,7 @@ export default async function handler(req, res) {
     // ── Cargar datos reales de Supabase ──
     let { data: cliente } = await supabase
       .from('clientes')
-      .select('id, telefono, nombre, apellido, email, fecha_nacimiento, especialista_pref_id, notas_bienestar')
+      .select('id, telefono, nombre, apellido, email, fecha_nacimiento, ciudad, especialista_pref_id, notas_bienestar')
       .eq('telefono', userPhone)
       .maybeSingle();
 
@@ -410,6 +490,9 @@ export default async function handler(req, res) {
       .select('id, nombre, precio, duracion, categoria, descripcion_voda');
 
     const esNuevo = !cliente?.nombre;
+
+    // ═══ CAMBIO NUEVO ═══ Detectar si es admin
+    const esAdmin = ADMIN_PHONES.includes(userPhone);
 
     let historialFiltrado = [];
     if (!esNuevo) {
@@ -501,6 +584,58 @@ REGLAS DE ORO — VIOLARLAS ES UN ERROR CRÍTICO:
 
 10. Si el cliente menciona un servicio parecido pero no exacto, sugiere el más cercano de la lista real.
 
+${esAdmin ? `
+═══════════════════════════════════════════════════════════════
+MODO ADMINISTRADOR — ERES EL ADMIN, NO UN CLIENTE:
+═══════════════════════════════════════════════════════════════
+
+Eres el dueño/administrador. Responde de forma directa y profesional.
+
+Puedes usar estos comandos:
+
+• "Agenda a [nombre] [teléfono] [fecha YYYY-MM-DD] [hora HH:MM] [servicio] [especialista]"
+  → Ejecutar agendamiento directo. No hacer preguntas.
+
+• "Cancela cita de [nombre] [fecha YYYY-MM-DD] [hora HH:MM]"
+  → Buscar y cancelar directamente.
+
+• "Reagenda [nombre] de [fecha vieja YYYY-MM-DD] [hora vieja HH:MM] a [fecha nueva YYYY-MM-DD] [hora nueva HH:MM]"
+  → Reagendar directamente.
+
+• "Bloquea [fecha YYYY-MM-DD] [hora inicio HH:MM] [hora fin HH:MM] [motivo]"
+  → Marcar slot como no disponible.
+
+• "Reporte de hoy" / "Reporte de mañana"
+  → Enviar resumen de citas e ingresos.
+
+• "Ver citas de [fecha YYYY-MM-DD]"
+  → Listar todas las citas confirmadas de ese día.
+
+Si el admin envía un comando ambiguo, pide clarificación brevemente.
+` : `
+═══════════════════════════════════════════════════════════════
+ONBOARDING DE NUEVOS CLIENTES (solo si es primera vez):
+═══════════════════════════════════════════════════════════════
+
+Si el cliente NO está registrado (no tiene nombre en base de datos):
+
+  Paso 1: "¡Hola! Soy Aura de AuraSync. Veo que es tu primera vez con nosotros. ¿Con qué nombre puedo registrarte?"
+
+  Paso 2: Cuando responda el nombre: "¿Y tu apellido?"
+
+  Paso 3: Cuando responda apellido: "¿En qué ciudad te encuentras?"
+
+  Paso 4: Cuando responda ciudad: "¿Cuál es tu fecha de nacimiento? (Para enviarte una sorpresa en tu cumpleaños 🎂)"
+          Formatos aceptados: DD/MM/AAAA o DD-MM-AAAA
+
+  Paso 5: Cuando responda fecha: "¿Tienes un correo electrónico? (Opcional, para recordatorios importantes)"
+          Si dice "no", "paso", "no tengo": "Perfecto, no hay problema. 💫"
+
+  Paso 6: "¡Listo [nombre]! Ya estás registrada. ¿Qué servicio necesitas hoy?"
+
+  → En el JSON, incluir: "nombre", "apellido", "ciudad", "fecha_nacimiento", "email"
+`}
+
 ═══════════════════════════════════════════════════════════════
 FECHAS DE REFERENCIA:
 ═══════════════════════════════════════════════════════════════
@@ -512,9 +647,13 @@ FECHAS DE REFERENCIA:
 FORMATO DATA_JSON (obligatorio al final de CADA respuesta):
 ═══════════════════════════════════════════════════════════════
 DATA_JSON:{
-  "accion": "none" | "agendar" | "cancelar" | "reagendar",
+  "accion": "none" | "agendar" | "cancelar" | "reagendar" | "bloquear" | "reporte" | "ver_citas",
   "nombre": "${cliente?.nombre || ''}",
   "apellido": "${cliente?.apellido || ''}",
+  "ciudad": "${cliente?.ciudad || ''}",
+  "fecha_nacimiento": "YYYY-MM-DD",
+  "email": "${cliente?.email || ''}",
+  "es_admin": ${esAdmin},
   "cita_fecha": "YYYY-MM-DD",
   "cita_hora": "HH:MM",
   "cita_servicio": "nombre exacto del servicio",
@@ -527,6 +666,9 @@ REGLAS DEL JSON:
 - "accion": "agendar" SOLO cuando el cliente CONFIRME explícitamente el horario propuesto.
 - "accion": "reagendar" SOLO cuando el cliente CONFIRME explícitamente la nueva fecha/hora.
 - "accion": "cancelar" SOLO cuando el cliente CONFIRME explícitamente que quiere cancelar.
+- "accion": "bloquear" SOLO cuando el admin envíe comando de bloqueo con fecha/hora/motivo.
+- "accion": "reporte" SOLO cuando el admin pida reporte de hoy/mañana/fecha específica.
+- "accion": "ver_citas" SOLO cuando el admin pida ver citas de una fecha.
 - "cita_servicio": debe coincidir EXACTAMENTE con un nombre de la lista de servicios.
 - "cita_especialista": debe coincidir EXACTAMENTE con un nombre de la lista de especialistas, o vacío si no importa.
 - "cita_fecha_original" y "cita_hora_original": OBLIGATORIOS para reagendar. Deben contener la fecha y hora EXACTAS de la cita que el cliente confirmó que quiere mover. Si no los incluyes, se moverá la cita equivocada.`;
@@ -570,17 +712,23 @@ REGLAS DEL JSON:
         if (textoLower.includes('hoy')) fechaFinal = hoy;
         else if (datosExtraidos.cita_fecha?.match(/^\d{4}-\d{2}-\d{2}$/)) fechaFinal = datosExtraidos.cita_fecha;
 
-        // Guardar cliente nuevo si aplica
+        // Guardar cliente nuevo si aplica (CON CAMPOS AMPLIADOS)
+        // ═══ CAMBIO NUEVO ═══ Guardar ciudad, fecha_nacimiento, email
         if (datosExtraidos.nombre && esNuevo) {
+          const fechaNacimientoParseada = parsearFechaNacimiento(datosExtraidos.fecha_nacimiento);
+          
           await supabase.from('clientes').upsert({
             telefono: userPhone,
             nombre: datosExtraidos.nombre.trim(),
-            apellido: datosExtraidos.apellido || ""
+            apellido: datosExtraidos.apellido || "",
+            ciudad: datosExtraidos.ciudad || null,
+            fecha_nacimiento: fechaNacimientoParseada,
+            email: datosExtraidos.email || null
           }, { onConflict: 'telefono' });
 
           const { data: nuevoCliente } = await supabase
             .from('clientes')
-            .select('id, telefono, nombre, apellido, email, especialista_pref_id')
+            .select('id, telefono, nombre, apellido, email, ciudad, fecha_nacimiento, especialista_pref_id')
             .eq('telefono', userPhone)
             .maybeSingle();
           cliente = nuevoCliente;
@@ -959,6 +1107,89 @@ REGLAS DEL JSON:
 
               mensajeAccion = `✅ Tu cita de ${citaACancelar.servicio_aux || 'servicio'} del ${formatearFecha(fechaCita)} con ${citaACancelar.especialista_nombre} ha sido cancelada.\n\nLamentamos no verte esta vez, pero aquí estaremos cuando nos necesites. 🌸`;
             }
+          }
+          accionEjecutada = true;
+        }
+
+        // ═══ CAMBIO NUEVO ═══ ACCIÓN: BLOQUEAR (solo admin)
+        else if (accion === 'bloquear' && esAdmin) {
+          const tieneFecha = datosExtraidos.cita_fecha?.match(/^\d{4}-\d{2}-\d{2}$/);
+          const tieneHora = datosExtraidos.cita_hora?.match(/^\d{2}:\d{2}$/);
+          
+          if (tieneFecha && tieneHora) {
+            const bloqueoRes = await bloquearHorarioSupabase(
+              datosExtraidos.cita_fecha,
+              datosExtraidos.cita_hora,
+              datosExtraidos.cita_hora, // hora fin simplificada (misma hora, 60 min)
+              datosExtraidos.motivo || 'Bloqueado por administrador'
+            );
+            
+            if (bloqueoRes.ok) {
+              mensajeAccion = `✅ Horario bloqueado: ${formatearFecha(datosExtraidos.cita_fecha)} a las ${formatearHora(datosExtraidos.cita_hora)}.\nMotivo: ${datosExtraidos.motivo || 'Bloqueado por administrador'}`;
+            } else {
+              mensajeAccion = `❌ No se pudo bloquear el horario: ${bloqueoRes.error}`;
+            }
+          } else {
+            mensajeAccion = "Para bloquear necesito: Bloquea [fecha YYYY-MM-DD] [hora HH:MM] [motivo]";
+          }
+          accionEjecutada = true;
+        }
+
+        // ═══ CAMBIO NUEVO ═══ ACCIÓN: REPORTE (solo admin)
+        else if (accion === 'reporte' && esAdmin) {
+          let fechaReporte = hoy;
+          if (textoLower.includes('mañana')) fechaReporte = manana;
+          else if (datosExtraidos.cita_fecha?.match(/^\d{4}-\d{2}-\d{2}$/)) fechaReporte = datosExtraidos.cita_fecha;
+          
+          const citasReporte = await obtenerCitasParaReporte(fechaReporte);
+          
+          if (citasReporte.length === 0) {
+            mensajeAccion = `📊 Reporte ${formatearFecha(fechaReporte)}\n\nNo hay citas registradas para esta fecha.`;
+          } else {
+            let total = 0;
+            let mensaje = `📊 *Reporte ${formatearFecha(fechaReporte)}*\n━━━━━━━━━━━━━━━\n\n`;
+            
+            citasReporte.forEach((c, i) => {
+              const hora = c.fecha_hora ? c.fecha_hora.substring(11, 16) : '--:--';
+              const precio = c.servicios?.precio || 0;
+              total += precio;
+              const cliente = c.clientes ? `${c.clientes.nombre} ${c.clientes.apellido}` : (c.nombre_cliente_aux || 'Sin nombre');
+              const servicio = c.servicios?.nombre || c.servicio_aux || 'Servicio';
+              const esp = c.especialistas?.nombre || 'Asignar';
+              const estado = c.estado === 'Bloqueado' ? '🚫 BLOQUEADO' : '✅ Confirmada';
+              
+              mensaje += `${i+1}. ${hora} — ${cliente}\n   ${servicio} con ${esp} | $${precio}\n   ${estado}\n\n`;
+            });
+            
+            mensaje += `━━━━━━━━━━━━━━━\n*Total citas:* ${citasReporte.length}\n*Total ingresos:* $${total.toFixed(2)}`;
+            mensajeAccion = mensaje;
+          }
+          accionEjecutada = true;
+        }
+
+        // ═══ CAMBIO NUEVO ═══ ACCIÓN: VER CITAS (solo admin)
+        else if (accion === 'ver_citas' && esAdmin) {
+          let fechaVer = hoy;
+          if (datosExtraidos.cita_fecha?.match(/^\d{4}-\d{2}-\d{2}$/)) fechaVer = datosExtraidos.cita_fecha;
+          
+          const citasVer = await obtenerCitasParaReporte(fechaVer);
+          
+          if (citasVer.length === 0) {
+            mensajeAccion = `📅 Citas de ${formatearFecha(fechaVer)}\n\nNo hay citas para esta fecha.`;
+          } else {
+            let mensaje = `📅 *Citas de ${formatearFecha(fechaVer)}*\n━━━━━━━━━━━━━━━\n\n`;
+            
+            citasVer.forEach((c, i) => {
+              const hora = c.fecha_hora ? c.fecha_hora.substring(11, 16) : '--:--';
+              const cliente = c.clientes ? `${c.clientes.nombre} ${c.clientes.apellido}` : (c.nombre_cliente_aux || 'Sin nombre');
+              const servicio = c.servicios?.nombre || c.servicio_aux || 'Servicio';
+              const esp = c.especialistas?.nombre || 'Asignar';
+              const tel = c.clientes?.telefono || '';
+              
+              mensaje += `${i+1}. ${hora} — ${cliente} ${tel ? `(${tel})` : ''}\n   ${servicio} con ${esp}\n\n`;
+            });
+            
+            mensajeAccion = mensaje;
           }
           accionEjecutada = true;
         }
