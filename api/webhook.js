@@ -364,6 +364,39 @@ async function buscarAlternativa(fecha, horaSolicitada, especialistaSolicitado, 
 }
 
 // ═══════════════════════════════════════════════════════════════
+// VALIDACIÓN DE FECHA DE NACIMIENTO
+// ═══════════════════════════════════════════════════════════════
+
+function validarFechaNacimiento(fechaStr) {
+  if (!fechaStr) return null;
+  
+  // Soporta DD/MM/AAAA o DD-MM-AAAA
+  const partes = fechaStr.split(/[\/-]/);
+  if (partes.length !== 3) return null;
+  
+  const dia = parseInt(partes[0], 10);
+  const mes = parseInt(partes[1], 10);
+  const anio = parseInt(partes[2], 10);
+  
+  // Validaciones básicas
+  if (isNaN(dia) || isNaN(mes) || isNaN(anio)) return null;
+  if (mes < 1 || mes > 12) return null;
+  if (dia < 1 || dia > 31) return null;
+  if (anio < 1900 || anio > new Date().getFullYear()) return null;
+  
+  // Validar días por mes
+  const diasPorMes = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  // Año bisiesto
+  if ((anio % 4 === 0 && anio % 100 !== 0) || (anio % 400 === 0)) {
+    diasPorMes[1] = 29;
+  }
+  if (dia > diasPorMes[mes - 1]) return null;
+  
+  // Formatear como ISO
+  return `${anio}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`;
+}
+
+// ═══════════════════════════════════════════════════════════════
 // HANDLER PRINCIPAL
 // ═══════════════════════════════════════════════════════════════
 
@@ -409,25 +442,35 @@ export default async function handler(req, res) {
       .from('servicios')
       .select('id, nombre, precio, duracion, categoria, descripcion_voda');
 
-    // ── Detectar si el número está registrado ──
-    // Un cliente está registrado SOLO si existe en la tabla 'clientes' con nombre
-    const esNuevo = !cliente?.nombre;
+    // ═══════════════════════════════════════════════════════════════
+    // CORRECCIÓN 1: Detectar si el número está registrado de forma robusta
+    // Un cliente está registrado SOLO si existe en 'clientes' CON nombre completo
+    // ═══════════════════════════════════════════════════════════════
+    const esNuevo = !cliente || !cliente.nombre || cliente.nombre.trim() === '';
 
+    // ═══════════════════════════════════════════════════════════════
+    // CORRECCIÓN 2: NO borrar historial. Cargar historial completo para
+    // mantener contexto conversacional, incluso para clientes nuevos.
+    // ═══════════════════════════════════════════════════════════════
     let historialFiltrado = [];
-    if (esNuevo) {
-      // Número NO registrado: borrar cualquier conversación suelta y empezar desde cero
-      await supabase.from('conversaciones').delete().eq('telefono', userPhone);
-      // historialFiltrado queda vacío — la IA no tiene contexto previo
-    } else {
-      // Número registrado: cargar historial normal
-      const { data: mensajes } = await supabase
-        .from('conversaciones')
-        .select('rol, contenido')
-        .eq('telefono', userPhone)
-        .order('created_at', { ascending: false })
-        .limit(8);
-      if (mensajes) historialFiltrado = mensajes.reverse();
-    }
+    const { data: mensajes } = await supabase
+      .from('conversaciones')
+      .select('rol, contenido')
+      .eq('telefono', userPhone)
+      .order('created_at', { ascending: false })
+      .limit(12); // Aumentado a 12 para mejor contexto
+    
+    if (mensajes) historialFiltrado = mensajes.reverse();
+
+    // ═══════════════════════════════════════════════════════════════
+    // CORRECCIÓN 3: Detectar si estamos en medio de un registro
+    // Si es nuevo y ya hay historial, verificar si ya pedimos datos
+    // ═══════════════════════════════════════════════════════════════
+    const yaSePidieronDatos = esNuevo && historialFiltrado.some(
+      m => m.rol === 'assistant' && 
+          (m.contenido.toLowerCase().includes('nombre') || 
+           m.contenido.toLowerCase().includes('registr'))
+    );
 
     // ── Construir catálogos reales ──
     const catalogoEspecialistas = (especialistas || [])
@@ -468,7 +511,8 @@ FLUJO OBLIGATORIO — SIN EXCEPCIONES:
 3. Cuando el cliente responda con sus datos, extráelos en el JSON con accion "registrar".
 4. Después confirma el registro y pregunta en qué puedes ayudarle.
 CRÍTICO: NUNCA pidas un dato por mensaje. SIEMPRE los 3 datos en UN SOLO mensaje.
-CRÍTICO: NUNCA uses datos de conversaciones anteriores. Este cliente es completamente nuevo.`
+CRÍTICO: NUNCA uses datos de conversaciones anteriores. Este cliente es completamente nuevo.
+${yaSePidieronDatos ? '\nNOTA: Ya se pidieron los datos anteriormente. Si el usuario responde ahora, extrae los datos de su mensaje y usa accion "registrar".' : ''}`
 : `✅ CLIENTE REGISTRADO — Nombre: ${cliente.nombre} ${cliente.apellido || ''}. No pidas datos que ya tenemos.`}
 
 ═══════════════════════════════════════════════════════════════
@@ -598,43 +642,71 @@ REGLAS DEL JSON:
         const accion = datosExtraidos.accion || 'none';
 
         // ═══════════════════════════════════════════════════════
-        // ACCIÓN: REGISTRAR CLIENTE NUEVO
+        // CORRECCIÓN 4: ACCIÓN REGISTRAR — Validación robusta
         // ═══════════════════════════════════════════════════════
         if (accion === 'registrar' && esNuevo) {
           const nombreJSON = (datosExtraidos.nombre || '').trim();
           const apellidoJSON = (datosExtraidos.apellido || '').trim();
           const fechaNacJSON = (datosExtraidos.fecha_nacimiento || '').trim();
 
-          if (nombreJSON) {
-            let fechaNacISO = null;
-            if (fechaNacJSON) {
-              const partes = fechaNacJSON.split('/');
-              if (partes.length === 3) {
-                fechaNacISO = `${partes[2]}-${partes[1].padStart(2, '0')}-${partes[0].padStart(2, '0')}`;
-              }
-            }
-
-            const { error: upsertError } = await supabase.from('clientes').upsert({
-              telefono: userPhone,
-              nombre: nombreJSON,
-              apellido: apellidoJSON,
-              fecha_nacimiento: fechaNacISO || null
-            }, { onConflict: 'telefono' });
-
-            if (upsertError) {
-              console.error('❌ Error registrando cliente:', upsertError);
-              mensajeAccion = "Tuve un problema registrando tus datos. ¿Lo intentamos de nuevo? 🙏";
-            } else {
-              const { data: nuevoCliente } = await supabase
-                .from('clientes')
-                .select('id, telefono, nombre, apellido, email, especialista_pref_id')
-                .eq('telefono', userPhone)
-                .maybeSingle();
-              cliente = nuevoCliente;
-              console.log('✅ Cliente registrado:', nombreJSON, apellidoJSON);
-              mensajeAccion = `¡Listo, ${nombreJSON}! 🌸 Ya estás registrado/a en AuraSync. ¿En qué puedo ayudarte hoy?`;
-            }
+          // Validar que tengamos nombre y apellido
+          if (!nombreJSON || !apellidoJSON) {
+            console.log('⚠️ Datos incompletos para registro. Nombre o apellido faltante.');
+            mensajeAccion = "Necesito que me compartas tu *nombre y apellido* completos, por favor. 🌸";
             accionEjecutada = true;
+          } else {
+            // Validar fecha de nacimiento
+            const fechaNacISO = validarFechaNacimiento(fechaNacJSON);
+            
+            if (!fechaNacISO) {
+              console.log('⚠️ Fecha de nacimiento inválida:', fechaNacJSON);
+              mensajeAccion = "La fecha de nacimiento no parece correcta. ¿Me la compartes en formato *dd/mm/aaaa*? Por ejemplo: 15/03/1990 🌸";
+              accionEjecutada = true;
+            } else {
+              // Insertar en Supabase (insert, no upsert, porque es nuevo)
+              const { data: nuevoCliente, error: insertError } = await supabase
+                .from('clientes')
+                .insert({
+                  telefono: userPhone,
+                  nombre: nombreJSON,
+                  apellido: apellidoJSON,
+                  fecha_nacimiento: fechaNacISO
+                })
+                .select()
+                .single();
+
+              if (insertError) {
+                console.error('❌ Error registrando cliente:', insertError);
+                // Si es error de teléfono duplicado, intentar update
+                if (insertError.code === '23505') {
+                  const { data: updatedCliente, error: updateError } = await supabase
+                    .from('clientes')
+                    .update({
+                      nombre: nombreJSON,
+                      apellido: apellidoJSON,
+                      fecha_nacimiento: fechaNacISO
+                    })
+                    .eq('telefono', userPhone)
+                    .select()
+                    .single();
+                    
+                  if (updateError) {
+                    mensajeAccion = "Tuve un problema registrando tus datos. ¿Lo intentamos de nuevo? 🙏";
+                  } else {
+                    cliente = updatedCliente;
+                    console.log('✅ Cliente actualizado (teléfono existente):', nombreJSON, apellidoJSON);
+                    mensajeAccion = `¡Listo, ${nombreJSON}! 🌸 Ya estás registrado/a en AuraSync. ¿En qué puedo ayudarte hoy?`;
+                  }
+                } else {
+                  mensajeAccion = "Tuve un problema registrando tus datos. ¿Lo intentamos de nuevo? 🙏";
+                }
+              } else {
+                cliente = nuevoCliente;
+                console.log('✅ Cliente registrado:', nombreJSON, apellidoJSON);
+                mensajeAccion = `¡Listo, ${nombreJSON}! 🌸 Ya estás registrado/a en AuraSync. ¿En qué puedo ayudarte hoy?`;
+              }
+              accionEjecutada = true;
+            }
           }
         }
 
@@ -650,73 +722,79 @@ REGLAS DEL JSON:
         // ACCIÓN: AGENDAR
         // ═══════════════════════════════════════════════════════
         if (accion === 'agendar') {
-          const tieneHora = datosExtraidos.cita_hora?.match(/^\d{2}:\d{2}$/);
+          // CORRECCIÓN 5: Verificar que el cliente esté registrado antes de agendar
+          if (esNuevo && !cliente?.id) {
+            mensajeAccion = "Primero necesito registrarte. ¿Me compartes tu *nombre, apellido* y *fecha de nacimiento* (dd/mm/aaaa)? 🌸";
+            accionEjecutada = true;
+          } else {
+            const tieneHora = datosExtraidos.cita_hora?.match(/^\d{2}:\d{2}$/);
 
-          if (fechaFinal && tieneHora) {
-            const disponible = await verificarDisponibilidad(
-              fechaFinal,
-              datosExtraidos.cita_hora,
-              datosExtraidos.cita_especialista,
-              servicioData.duracion
-            );
-
-            if (!disponible.ok) {
-              const alternativa = await buscarAlternativa(
+            if (fechaFinal && tieneHora) {
+              const disponible = await verificarDisponibilidad(
                 fechaFinal,
                 datosExtraidos.cita_hora,
                 datosExtraidos.cita_especialista,
                 servicioData.duracion
               );
-              mensajeAccion = `${disponible.mensaje} ${alternativa.mensaje}`;
-            } else {
-              const especialistaFinal = disponible.especialista || datosExtraidos.cita_especialista || "Asignar";
-              const especialistaIdFinal = especialistaData?.id || null;
 
-              const { data: citaSupabase, error: insertError } = await supabase
-                .from('citas')
-                .insert({
-                  cliente_id: cliente?.id || null,
-                  servicio_id: servicioData.id || null,
-                  especialista_id: especialistaIdFinal,
-                  fecha_hora: `${fechaFinal}T${datosExtraidos.cita_hora}:00-05:00`,
-                  estado: 'Confirmada',
-                  nombre_cliente_aux: `${datosExtraidos.nombre || cliente?.nombre || ''} ${datosExtraidos.apellido || cliente?.apellido || ''}`.trim(),
-                  servicio_aux: servicioData.nombre,
-                  duracion_aux: servicioData.duracion
-                })
-                .select()
-                .single();
-
-              if (insertError) {
-                console.error('❌ Error insert Supabase:', insertError);
-                mensajeAccion = "Ups, tuve un problema guardando tu cita. ¿Me das un momento? 🙏";
+              if (!disponible.ok) {
+                const alternativa = await buscarAlternativa(
+                  fechaFinal,
+                  datosExtraidos.cita_hora,
+                  datosExtraidos.cita_especialista,
+                  servicioData.duracion
+                );
+                mensajeAccion = `${disponible.mensaje} ${alternativa.mensaje}`;
               } else {
-                console.log('✅ Supabase creado, ID:', citaSupabase?.id);
+                const especialistaFinal = disponible.especialista || datosExtraidos.cita_especialista || "Asignar";
+                const especialistaIdFinal = especialistaData?.id || null;
 
-                const airtableRes = await crearCitaAirtable({
-                  telefono: userPhone,
-                  nombre: datosExtraidos.nombre || cliente?.nombre || '',
-                  apellido: datosExtraidos.apellido || cliente?.apellido || '',
-                  fecha: fechaFinal,
-                  hora: datosExtraidos.cita_hora,
-                  servicio: servicioData.nombre,
-                  especialista: especialistaFinal,
-                  precio: servicioData.precio,
-                  duracion: servicioData.duracion,
-                  supabase_id: citaSupabase?.id || null,
-                  email: cliente?.email || null,
-                  notas: cliente?.notas_bienestar || null,
-                  observaciones: `Agendada por AuraSync`
-                });
+                const { data: citaSupabase, error: insertError } = await supabase
+                  .from('citas')
+                  .insert({
+                    cliente_id: cliente?.id || null,
+                    servicio_id: servicioData.id || null,
+                    especialista_id: especialistaIdFinal,
+                    fecha_hora: `${fechaFinal}T${datosExtraidos.cita_hora}:00-05:00`,
+                    estado: 'Confirmada',
+                    nombre_cliente_aux: `${datosExtraidos.nombre || cliente?.nombre || ''} ${datosExtraidos.apellido || cliente?.apellido || ''}`.trim(),
+                    servicio_aux: servicioData.nombre,
+                    duracion_aux: servicioData.duracion
+                  })
+                  .select()
+                  .single();
 
-                if (airtableRes.ok) {
-                  mensajeAccion = `✨ ¡Listo! Tu cita para ${servicioData.nombre} está confirmada:\n📅 ${formatearFecha(fechaFinal)}\n⏰ ${formatearHora(datosExtraidos.cita_hora)}\n💇‍♀️ Con ${especialistaFinal}\n💰 $${servicioData.precio}\n\nTe esperamos con mucho cariño. 🌸`;
+                if (insertError) {
+                  console.error('❌ Error insert Supabase:', insertError);
+                  mensajeAccion = "Ups, tuve un problema guardando tu cita. ¿Me das un momento? 🙏";
                 } else {
-                  mensajeAccion = `✅ Tu cita está guardada en nuestro sistema principal. Te confirmo los detalles:\n📅 ${formatearFecha(fechaFinal)} a las ${formatearHora(datosExtraidos.cita_hora)}\n💇‍♀️ ${servicioData.nombre} con ${especialistaFinal}`;
+                  console.log('✅ Supabase creado, ID:', citaSupabase?.id);
+
+                  const airtableRes = await crearCitaAirtable({
+                    telefono: userPhone,
+                    nombre: datosExtraidos.nombre || cliente?.nombre || '',
+                    apellido: datosExtraidos.apellido || cliente?.apellido || '',
+                    fecha: fechaFinal,
+                    hora: datosExtraidos.cita_hora,
+                    servicio: servicioData.nombre,
+                    especialista: especialistaFinal,
+                    precio: servicioData.precio,
+                    duracion: servicioData.duracion,
+                    supabase_id: citaSupabase?.id || null,
+                    email: cliente?.email || null,
+                    notas: cliente?.notas_bienestar || null,
+                    observaciones: `Agendada por AuraSync`
+                  });
+
+                  if (airtableRes.ok) {
+                    mensajeAccion = `✨ ¡Listo! Tu cita para ${servicioData.nombre} está confirmada:\n📅 ${formatearFecha(fechaFinal)}\n⏰ ${formatearHora(datosExtraidos.cita_hora)}\n💇‍♀️ Con ${especialistaFinal}\n💰 $${servicioData.precio}\n\nTe esperamos con mucho cariño. 🌸`;
+                  } else {
+                    mensajeAccion = `✅ Tu cita está guardada en nuestro sistema principal. Te confirmo los detalles:\n📅 ${formatearFecha(fechaFinal)} a las ${formatearHora(datosExtraidos.cita_hora)}\n💇‍♀️ ${servicioData.nombre} con ${especialistaFinal}`;
+                  }
                 }
               }
+              accionEjecutada = true;
             }
-            accionEjecutada = true;
           }
         }
 
@@ -987,6 +1065,9 @@ REGLAS DEL JSON:
       cleanReply = mensajeAccion;
     }
 
+    // ═══════════════════════════════════════════════════════════════
+    // CORRECCIÓN 6: Guardar SIEMPRE la conversación, incluso para nuevos
+    // ═══════════════════════════════════════════════════════════════
     await supabase.from('conversaciones').insert([
       { telefono: userPhone, rol: 'user', contenido: textoUsuario },
       { telefono: userPhone, rol: 'assistant', contenido: cleanReply }
