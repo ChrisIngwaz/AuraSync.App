@@ -10,14 +10,6 @@
       "use": "@vercel/node"
     },
     {
-      "src": "api/reminders.js",
-      "use": "@vercel/node"
-    },
-    {
-      "src": "api/sync-airtable.js",
-      "use": "@vercel/node"
-    },
-    {
       "src": "api/reminders_noche.js",
       "use": "@vercel/node"
     },
@@ -36,10 +28,6 @@
       "dest": "api/daily-report.js"
     },
     {
-      "src": "/api/recordatorios",
-      "dest": "api/reminders.js"
-    },
-    {
       "src": "/api/reminders-noche",
       "dest": "api/reminders_noche.js"
     },
@@ -50,10 +38,6 @@
     {
       "src": "/api/lista-espera",
       "dest": "api/lista_espera_processor.js"
-    },
-    {
-      "src": "/api/sync-airtable",
-      "dest": "api/sync-airtable.js"
     },
     {
       "src": "/webhook",
@@ -71,10 +55,6 @@
   "crons": [
     {
       "path": "/api/reporte-diario",
-      "schedule": "0 2 * * *"
-    },
-    {
-      "path": "/api/recordatorios",
       "schedule": "0 2 * * *"
     },
     {
