@@ -17,6 +17,31 @@ const CONFIG = {
 const TIMEZONE = 'America/Guayaquil';
 
 // ═══════════════════════════════════════════════════════════════
+// SYSTEM PROMPT DE AURA
+// ═══════════════════════════════════════════════════════════════
+
+const SYSTEM_PROMPT = `Eres Aura, la coordinadora de AuraSync. No eres un robot. Eres la recepcionista perfecta de una cadena de spas de belleza: cálida, eficiente, con memoria de elefante y un toque de humor suave.
+
+REGLAS DE ORO:
+1. HABLA COMO UNA AMIGA: "¿Qué te hago hoy, amor?" NO "Seleccione servicio"
+2. UN SOLO PASO POR MENSAJE: Nunca combines saludo + servicio + hora + especialista
+3. USA LOS DATOS REALES DEL CONTEXTO: Nunca inventes nombres, precios ni horarios
+4. SIEMPRE USA NOMBRE DEL CLIENTE cuando lo sepas
+5. EMOJIS CON MODERACIÓN: 🌸 ✨ 💫 (nunca más de 2 por mensaje)
+6. SI HAY CONFLICTO DE HORARIO: "Uy, María ya está ocupada a esa hora con un tinte. ¿Qué tal a las 4:30? Ella es una genia con el corte."
+7. SI EL CLIENTE DICE "CUALQUIERA": Asigna por rotación sin preguntar más
+8. NUNCA PIDAS DATOS QUE YA TENGAS
+9. SI ES CLIENTE NUEVO: Pide nombre, apellido y fecha de nacimiento (dd/mm/aaaa)
+10. SI ES CLIENTE REGISTRADO: Saluda por nombre y pregunta qué servicio quiere
+
+TONO POR ESTADO:
+- Registro: Cálido, paciente, bienvenida
+- Agendando: Eficiente, una pregunta a la vez
+- Confirmando: Entusiasta, celebratorio
+- Error: "Ups, déjame revisar un segundito 🌸" (nunca técnico)
+- Lista de espera: Esperanzado, "te aviso al toque"`;
+
+// ═══════════════════════════════════════════════════════════════
 // UTILIDADES DE FECHA/HORA
 // ═══════════════════════════════════════════════════════════════
 
@@ -88,6 +113,46 @@ function validarFechaNacimiento(fechaStr) {
   if ((anio % 4 === 0 && anio % 100 !== 0) || (anio % 400 === 0)) diasPorMes[1] = 29;
   if (dia > diasPorMes[mes - 1]) return null;
   return `${anio}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// OPENAI - GENERADOR DE RESPUESTAS HUMANAS
+// ═══════════════════════════════════════════════════════════════
+
+async function generarRespuestaAura(contexto, historial) {
+  try {
+    const messages = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      ...historial.slice(-10).map(m => ({
+        role: m.rol === 'assistant' ? 'assistant' : 'user',
+        content: m.contenido
+      })),
+      {
+        role: 'user',
+        content: `CONTEXTO DEL SISTEMA (usar estos datos exactos, nunca inventar):\n${JSON.stringify(contexto, null, 2)}\n\nGenera la respuesta de Aura. Un solo paso. Máximo 2-3 oraciones.`
+      }
+    ];
+
+    const aiRes = await axios.post(
+      'https://api.openai.com/v1/chat/completions',
+      {
+        model: 'gpt-4o-mini',
+        messages,
+        temperature: 0.5,
+        max_tokens: 200
+      },
+      {
+        headers: { 'Authorization': `Bearer ${CONFIG.OPENAI_API_KEY}` },
+        timeout: 10000
+      }
+    );
+
+    return aiRes.data.choices[0].message.content.trim();
+  } catch (error) {
+    console.error('❌ Error OpenAI:', error.message);
+    // Fallback: respuesta genérica pero humana
+    return 'Ups, déjame revisar un segundito 🌸';
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -172,6 +237,7 @@ async function crearCitaAirtable(datos) {
           "Hora": datos.hora,
           "Especialista": datos.especialista,
           "Teléfono": datos.telefono,
+          "Local": datos.local || '',
           "Estado": "Confirmada",
           "Importe estimado": datos.precio,
           "Duración estimada (minutos)": datos.duracion,
@@ -227,7 +293,7 @@ async function actualizarCitaAirtable(supabaseId, nuevosDatos) {
   }
 }
 
-async function cancelarCitaAirtable(supabaseId, motivo, datosFallback) {
+async function cancelarCitaAirtable(supabaseId, datosFallback) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     const busqueda = await buscarCitaAirtable({
@@ -240,7 +306,7 @@ async function cancelarCitaAirtable(supabaseId, motivo, datosFallback) {
         id: busqueda.record.id,
         fields: {
           "Estado": "Cancelada",
-          "Observaciones de confirmación": motivo ? `Cancelada: ${motivo}` : "Cancelada por cliente"
+          "Observaciones de confirmación": "Cancelada por cliente vía WhatsApp"
         }
       }]
     }, { headers: { 'Authorization': `Bearer ${CONFIG.AIRTABLE_TOKEN}`, 'Content-Type': 'application/json' } });
@@ -255,7 +321,7 @@ async function cancelarCitaAirtable(supabaseId, motivo, datosFallback) {
 // MOTOR DE DISPONIBILIDAD REAL
 // ═══════════════════════════════════════════════════════════════
 
-async function obtenerCitasDelDia(fecha, excluirCitaId = null) {
+async function obtenerCitasDelDia(fecha, localId, excluirCitaId = null) {
   try {
     const inicioDia = `${fecha}T00:00:00`;
     const finDia = `${fecha}T23:59:59`;
@@ -263,14 +329,14 @@ async function obtenerCitasDelDia(fecha, excluirCitaId = null) {
       .from('citas')
       .select('id, fecha_hora, especialista_id, duracion_aux, servicio_aux, estado, nombre_cliente_aux, cliente_id')
       .eq('estado', 'Confirmada')
+      .eq('local_id', localId)
       .gte('fecha_hora', inicioDia)
       .lte('fecha_hora', finDia);
     if (excluirCitaId) query = query.neq('id', excluirCitaId);
     const { data: citasSupabase, error: supaError } = await query;
     if (supaError) { console.error('Error Supabase citas:', supaError); return []; }
     
-    // <-- CORREGIDO: Manejo de error si falla la consulta de especialistas
-    const { data: especialistasData, error: espError } = await supabase.from('especialistas').select('id, nombre');
+    const { data: especialistasData, error: espError } = await supabase.from('especialistas').select('id, nombre').eq('local_id', localId);
     if (espError) { console.error('Error Supabase especialistas:', espError); return []; }
     
     const mapaEspecialistas = {};
@@ -290,12 +356,13 @@ async function obtenerCitasDelDia(fecha, excluirCitaId = null) {
   }
 }
 
-async function obtenerCargaEspecialistas(fechaInicio, fechaFin, especialistasIds) {
+async function obtenerCargaEspecialistas(fechaInicio, fechaFin, especialistasIds, localId) {
   try {
     const { data: citas } = await supabase
       .from('citas')
       .select('especialista_id, estado')
       .eq('estado', 'Confirmada')
+      .eq('local_id', localId)
       .gte('fecha_hora', `${fechaInicio}T00:00:00`)
       .lte('fecha_hora', `${fechaFin}T23:59:59`)
       .in('especialista_id', especialistasIds);
@@ -324,8 +391,8 @@ function hayConflictoHorario(inicioNuevo, finNuevo, citasExistentes, especialist
   return { conflicto: false };
 }
 
-async function verificarDisponibilidad(fecha, hora, especialistaSolicitado, duracionMinutos, excluirCitaId = null) {
-  const citas = await obtenerCitasDelDia(fecha, excluirCitaId);
+async function verificarDisponibilidad(fecha, hora, especialistaSolicitado, duracionMinutos, localId, excluirCitaId = null) {
+  const citas = await obtenerCitasDelDia(fecha, localId, excluirCitaId);
   const [h, m] = hora.split(':').map(Number);
   const inicioNuevo = h * 60 + m;
   const finNuevo = inicioNuevo + (duracionMinutos || 60);
@@ -349,8 +416,8 @@ async function verificarDisponibilidad(fecha, hora, especialistaSolicitado, dura
   return { ok: true, especialista: especialistaSolicitado || 'Asignar' };
 }
 
-async function buscarAlternativa(fecha, horaSolicitada, especialistaSolicitado, duracion, excluirCitaId = null) {
-  const citas = await obtenerCitasDelDia(fecha, excluirCitaId);
+async function buscarAlternativa(fecha, horaSolicitada, especialistaSolicitado, duracion, localId, excluirCitaId = null) {
+  const citas = await obtenerCitasDelDia(fecha, localId, excluirCitaId);
   const [h, m] = horaSolicitada.split(':').map(Number);
   let horaPropuesta = h * 60 + m;
   while (horaPropuesta <= 1080 - duracion) {
@@ -364,17 +431,17 @@ async function buscarAlternativa(fecha, horaSolicitada, especialistaSolicitado, 
   return { mensaje: "Ese día ya no tenemos cupos disponibles. ¿Te parece otro día? 📅" };
 }
 
-async function obtenerEspecialistasDisponibles(fecha, hora, duracion, servicioCategoria = null) {
+async function obtenerEspecialistasDisponibles(fecha, hora, duracion, localId, servicioCategoria = null) {
   try {
-    // <-- CORREGIDO: Manejo de error si falla la consulta
     const { data: todosEspecialistas, error: espError } = await supabase
       .from('especialistas')
       .select('id, nombre, rol, expertise, local_id, activo')
-      .eq('activo', true);
+      .eq('activo', true)
+      .eq('local_id', localId);
 
     if (espError || !todosEspecialistas?.length) return [];
 
-    const citas = await obtenerCitasDelDia(fecha);
+    const citas = await obtenerCitasDelDia(fecha, localId);
     const [h, m] = hora.split(':').map(Number);
     const inicioNuevo = h * 60 + m;
     const finNuevo = inicioNuevo + (duracion || 60);
@@ -388,7 +455,7 @@ async function obtenerEspecialistasDisponibles(fecha, hora, duracion, servicioCa
 
     const hoy = getFechaEcuador(0);
     const hace30Dias = getFechaEcuador(-30);
-    const carga = await obtenerCargaEspecialistas(hace30Dias, hoy, disponibles.map(e => e.id));
+    const carga = await obtenerCargaEspecialistas(hace30Dias, hoy, disponibles.map(e => e.id), localId);
     disponibles.sort((a, b) => (carga[a.id] || 0) - (carga[b.id] || 0));
 
     return disponibles;
@@ -410,6 +477,7 @@ async function agregarAListaEspera(datos) {
         cliente_id: datos.cliente_id,
         telefono: datos.telefono,
         nombre_cliente: datos.nombre,
+        local_id: datos.local_id,
         fecha_solicitada: datos.fecha,
         hora_solicitada: datos.hora,
         servicio_id: datos.servicio_id,
@@ -430,12 +498,13 @@ async function agregarAListaEspera(datos) {
   }
 }
 
-async function buscarYNotificarListaEspera(fecha, hora, duracion, servicioId) {
+async function buscarYNotificarListaEspera(fecha, hora, duracion, localId, servicioId) {
   try {
     const { data: candidatos } = await supabase
       .from('lista_espera')
       .select('*')
       .eq('estado', 'Pendiente')
+      .eq('local_id', localId)
       .eq('fecha_solicitada', fecha)
       .lte('hora_solicitada', hora)
       .gte('expira_en', new Date().toISOString())
@@ -447,13 +516,10 @@ async function buscarYNotificarListaEspera(fecha, hora, duracion, servicioId) {
 
     let notificados = 0;
     for (const candidato of candidatos) {
-      const disponible = await verificarDisponibilidad(fecha, hora, candidato.especialista_preferido_nombre, duracion);
+      const disponible = await verificarDisponibilidad(fecha, hora, candidato.especialista_preferido_nombre, duracion, localId);
       if (!disponible.ok) continue;
 
-      const mensaje = `✨ *¡Buenas noticias, ${candidato.nombre_cliente || ''}!* ✨\n\n` +
-        `Se liberó un cupo para *${candidato.servicio_nombre}* el *${formatearFecha(fecha)}* a las *${formatearHora(hora)}*.\n\n` +
-        `¿Lo quieres? Responde *SÍ* en los próximos 15 minutos y te lo agendo. 🌸\n\n` +
-        `_Si no respondes, pasaremos al siguiente de la lista._`;
+      const mensaje = `✨ *¡Buenas noticias, ${candidato.nombre_cliente || ''}!* ✨\n\nSe liberó un cupo para *${candidato.servicio_nombre}* el *${formatearFecha(fecha)}* a las *${formatearHora(hora)}*.\n\n¿Lo quieres? Responde *SÍ* en los próximos 15 minutos y te lo agendo. 🌸\n\n_Si no respondes, pasaremos al siguiente de la lista._`;
 
       const envio = await enviarWhatsApp(candidato.telefono, mensaje);
       if (envio.ok) {
@@ -472,7 +538,7 @@ async function buscarYNotificarListaEspera(fecha, hora, duracion, servicioId) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// MÁQUINA DE ESTADOS (CORREGIDA - ahora recibe servicios y especialistas)
+// MÁQUINA DE ESTADOS (CORREGIDA - recibe servicios y especialistas)
 // ═══════════════════════════════════════════════════════════════
 
 async function detectarEstado(historial, cliente, textoUsuario, hoy, manana, pasado, servicios = [], especialistas = []) {
@@ -485,6 +551,7 @@ async function detectarEstado(historial, cliente, textoUsuario, hoy, manana, pas
 
   if (!cliente?.nombre) return { estado: 'inicio', intencion: 'registro' };
 
+  // Detectar respuesta a notificación de lista de espera
   const ultimoSystem = historial.filter(m => m.rol === 'system').pop()?.contenido || '';
   if (ultimoSystem.includes('NOTIFICACION_LISTA_ESPERA')) {
     if (/^s[ií]|dale|ok|perfecto|súper|agéndalo|confirmo|va|bueno/.test(t)) {
@@ -493,6 +560,7 @@ async function detectarEstado(historial, cliente, textoUsuario, hoy, manana, pas
     return { estado: 'rechazar_lista_espera', intencion: 'none' };
   }
 
+  // Detectar respuesta a recordatorio de confirmación
   if (ultimoAssistant.includes('¿todo en orden') || ultimoAssistant.includes('¿confirmas')) {
     if (/^s[ií]|dale|ok|perfecto|confirmo|todo bien|súper/.test(t)) {
       return { estado: 'confirmar_recordatorio', intencion: 'confirmar' };
@@ -557,14 +625,16 @@ export default async function handler(req, res) {
       } catch (error) { console.error('Error Deepgram:', error.message); }
     }
 
+    // ── Cargar datos ──
     let { data: cliente } = await supabase
       .from('clientes')
-      .select('id, telefono, nombre, apellido, email, fecha_nacimiento, especialista_pref_id, notas_bienestar')
+      .select('id, telefono, nombre, apellido, email, fecha_nacimiento, especialista_pref_id, local_pref_id, notas_bienestar')
       .eq('telefono', userPhone)
       .maybeSingle();
 
+    const { data: locales } = await supabase.from('locales').select('id, nombre, direccion, hora_apertura, hora_cierre').eq('activo', true);
     const { data: especialistas } = await supabase.from('especialistas').select('id, nombre, rol, expertise, local_id, activo').eq('activo', true);
-    const { data: servicios } = await supabase.from('servicios').select('id, nombre, precio, duracion, categoria, descripcion_voda');
+    const { data: servicios } = await supabase.from('servicios').select('id, nombre, precio, duracion, categoria, descripcion_voda, local_id');
 
     const esNuevo = !cliente || !cliente.nombre || cliente.nombre.trim() === '';
 
@@ -582,7 +652,12 @@ export default async function handler(req, res) {
 
     let respuesta = '';
     let accionBackend = 'none';
+    let localId = null;
+    let contexto = {};
 
+    // ═══════════════════════════════════════════════════════
+    // FLUJO: REGISTRO DE CLIENTE NUEVO
+    // ═══════════════════════════════════════════════════════
     if (esNuevo) {
       const yaPidioDatos = historial.some(m => m.rol === 'assistant' && /nombre.*apellido.*fecha/i.test(m.contenido));
 
@@ -596,14 +671,23 @@ export default async function handler(req, res) {
           const fechaNac = validarFechaNacimiento(`${fechaMatch[1]}/${fechaMatch[2]}/${fechaMatch[3]}`);
 
           if (nombre && fechaNac) {
+            // Detectar si eligió local en el historial
+            const localGuardado = historial.filter(m => m.rol === 'system' && m.contenido.startsWith('LOCAL_SELECCIONADO:')).pop()?.contenido?.replace('LOCAL_SELECCIONADO:', '');
+            
             const { data: nuevoCliente, error: insertError } = await supabase
               .from('clientes')
-              .insert({ telefono: userPhone, nombre, apellido, fecha_nacimiento: fechaNac })
+              .insert({ 
+                telefono: userPhone, 
+                nombre, 
+                apellido, 
+                fecha_nacimiento: fechaNac,
+                local_pref_id: localGuardado || null
+              })
               .select().single();
 
             if (insertError && insertError.code === '23505') {
               const { data: updated } = await supabase.from('clientes')
-                .update({ nombre, apellido, fecha_nacimiento: fechaNac })
+                .update({ nombre, apellido, fecha_nacimiento: fechaNac, local_pref_id: localGuardado || null })
                 .eq('telefono', userPhone).select().single();
               cliente = updated;
             } else {
@@ -619,18 +703,67 @@ export default async function handler(req, res) {
           respuesta = "Para completar tu registro necesito: tu *nombre y apellido* y tu *fecha de nacimiento* (dd/mm/aaaa). ¿Me los compartes? 🌸";
         }
       } else {
-        respuesta = `¡Hola! 🌸 Soy Aura de AuraSync, encantada de conocerte. Para registrarte en nuestro sistema necesito: tu *nombre y apellido* y tu *fecha de nacimiento* (dd/mm/aaaa). ¿Me los compartes?`;
+        // Primero preguntar local, luego datos personales
+        if (locales?.length > 1 && !historial.some(m => m.rol === 'system' && m.contenido.startsWith('LOCAL_SELECCIONADO:'))) {
+          const listaLocales = locales.map((l, i) => `${i + 1}. *${l.nombre}* — ${l.direccion}`).join('\n');
+          respuesta = `¡Hola! 🌸 Soy Aura de AuraSync. ¿En qué local te gustaría agendar?\n\n${listaLocales}\n\nResponde con el número. ✨`;
+        } else {
+          respuesta = `¡Hola! 🌸 Soy Aura de AuraSync, encantada de conocerte. Para registrarte en nuestro sistema necesito: tu *nombre y apellido* y tu *fecha de nacimiento* (dd/mm/aaaa). ¿Me los compartes?`;
+        }
       }
     } else {
-      // <-- CORREGIDO: Ahora pasamos servicios y especialistas a detectarEstado
-      const estadoDetectado = await detectarEstado(historial, cliente, textoUsuario, hoy, manana, pasadoManana, servicios, especialistas);
-      console.log('🎯 Estado detectado:', estadoDetectado.estado, '| Intención:', estadoDetectado.intencion);
+      // ═══════════════════════════════════════════════════════
+      // FLUJO PRINCIPAL: MÁQUINA DE ESTADOS
+      // ═══════════════════════════════════════════════════════
+      
+      // Detectar local activo
+      const localGuardado = historial.filter(m => m.rol === 'system' && m.contenido.startsWith('LOCAL_SELECCIONADO:')).pop()?.contenido?.replace('LOCAL_SELECCIONADO:', '');
+      localId = cliente?.local_pref_id || localGuardado || null;
 
+      // Si no hay local seleccionado y hay múltiples locales, preguntar primero
+      if (!localId && locales?.length > 1) {
+        // Verificar si el mensaje actual es selección de local
+        const seleccionLocal = parseInt(textoUsuario.trim());
+        if (!isNaN(seleccionLocal) && seleccionLocal > 0 && seleccionLocal <= locales.length) {
+          localId = locales[seleccionLocal - 1].id;
+          await supabase.from('conversaciones').insert([
+            { telefono: userPhone, rol: 'system', contenido: `LOCAL_SELECCIONADO:${localId}` }
+          ]);
+          // Actualizar preferencia del cliente
+          await supabase.from('clientes').update({ local_pref_id: localId }).eq('id', cliente.id);
+          respuesta = `Perfecto, *${locales[seleccionLocal - 1].nombre}*. ¿Qué servicio te gustaría agendar hoy? 🌸`;
+        } else {
+          const listaLocales = locales.map((l, i) => `${i + 1}. *${l.nombre}* — ${l.direccion}`).join('\n');
+          respuesta = `¡Hola ${cliente.nombre}! 🌸 ¿En qué local te atiendo hoy?\n\n${listaLocales}\n\nResponde con el número. ✨`;
+        }
+        
+        // Guardar y salir
+        await supabase.from('conversaciones').insert([
+          { telefono: userPhone, rol: 'user', contenido: textoUsuario },
+          { telefono: userPhone, rol: 'assistant', contenido: respuesta }
+        ]);
+        res.setHeader('Content-Type', 'text/xml');
+        return res.status(200).send(`<Response><Message>${respuesta}</Message></Response>`);
+      }
+
+      // Si solo hay un local, usar ese por defecto
+      if (!localId && locales?.length === 1) {
+        localId = locales[0].id;
+      }
+
+      const estadoDetectado = await detectarEstado(historial, cliente, textoUsuario, hoy, manana, pasadoManana, servicios, especialistas);
+      console.log('🎯 Estado detectado:', estadoDetectado.estado, '| Intención:', estadoDetectado.intencion, '| Local:', localId);
+
+      // Filtrar servicios y especialistas por local
+      const serviciosLocal = servicios?.filter(s => !s.local_id || s.local_id === localId) || [];
+      const especialistasLocal = especialistas?.filter(e => e.local_id === localId) || [];
+
+      // ── CONFIRMAR DESDE LISTA DE ESPERA ──
       if (estadoDetectado.estado === 'confirmar_lista_espera') {
         const notifMatch = historial.filter(m => m.rol === 'system' && m.contenido.startsWith('NOTIFICACION_LISTA_ESPERA:')).pop()?.contenido;
         if (notifMatch) {
           const datosNotif = JSON.parse(notifMatch.replace('NOTIFICACION_LISTA_ESPERA:', ''));
-          const disponible = await verificarDisponibilidad(datosNotif.fecha, datosNotif.hora, datosNotif.especialista, datosNotif.duracion);
+          const disponible = await verificarDisponibilidad(datosNotif.fecha, datosNotif.hora, datosNotif.especialista, datosNotif.duracion, localId);
           if (!disponible.ok) {
             respuesta = "Lo siento, ese cupo ya fue tomado por otro cliente. Te mantengo en lista de espera por si se libera otro. 🌸";
           } else {
@@ -640,6 +773,7 @@ export default async function handler(req, res) {
                 cliente_id: cliente.id,
                 servicio_id: datosNotif.servicio_id,
                 especialista_id: datosNotif.especialista_id,
+                local_id: localId,
                 fecha_hora: `${datosNotif.fecha}T${datosNotif.hora}:00-05:00`,
                 estado: 'Confirmada',
                 nombre_cliente_aux: `${cliente.nombre} ${cliente.apellido || ''}`.trim(),
@@ -653,6 +787,7 @@ export default async function handler(req, res) {
                 telefono: userPhone, nombre: cliente.nombre, apellido: cliente.apellido || '',
                 fecha: datosNotif.fecha, hora: datosNotif.hora,
                 servicio: datosNotif.servicio, especialista: datosNotif.especialista,
+                local: locales?.find(l => l.id === localId)?.nombre || '',
                 precio: datosNotif.precio, duracion: datosNotif.duracion,
                 supabase_id: citaSupabase.id, email: cliente.email || null,
                 notas: cliente.notas_bienestar || null, observaciones: 'Agendada desde lista de espera'
@@ -660,17 +795,29 @@ export default async function handler(req, res) {
 
               await supabase.from('lista_espera').update({ estado: 'Confirmado', cita_resultante_id: citaSupabase.id }).eq('id', datosNotif.lista_espera_id);
 
-              respuesta = `✨ ¡Listo! Tu cita para *${datosNotif.servicio}* está confirmada:\n📅 ${formatearFecha(datosNotif.fecha)}\n⏰ ${formatearHora(datosNotif.hora)}\n💇‍♀️ Con ${datosNotif.especialista}\n💰 $${datosNotif.precio}\n\nTe esperamos con mucho cariño. 🌸`;
+              contexto = {
+                accion: 'confirmar_lista_espera',
+                servicio: datosNotif.servicio,
+                fecha: formatearFecha(datosNotif.fecha),
+                hora: formatearHora(datosNotif.hora),
+                especialista: datosNotif.especialista,
+                precio: datosNotif.precio,
+                local: locales?.find(l => l.id === localId)?.nombre
+              };
+              respuesta = await generarRespuestaAura(contexto, historial);
               accionBackend = 'agendar';
             }
           }
         }
       }
 
+      // ── RECHAZAR LISTA DE ESPERA ──
       else if (estadoDetectado.estado === 'rechazar_lista_espera') {
-        respuesta = "Entendido. Te mantengo en lista de espera por si se libera otro cupo. 🌸";
+        contexto = { accion: 'rechazar_lista_espera' };
+        respuesta = await generarRespuestaAura(contexto, historial);
       }
 
+      // ── CONFIRMAR RECORDATORIO ──
       else if (estadoDetectado.estado === 'confirmar_recordatorio') {
         const citaIdMatch = historial.filter(m => m.rol === 'system' && m.contenido.startsWith('RECORDATORIO_CITA_ID:')).pop()?.contenido;
         if (citaIdMatch) {
@@ -678,96 +825,129 @@ export default async function handler(req, res) {
           await supabase.from('citas')
             .update({ confirmacion_cliente: 'Confirmada', cliente_confirmo_en: new Date().toISOString() })
             .eq('id', citaId);
-          respuesta = `¡Gracias por confirmar, ${cliente.nombre}! 🌸 Nos vemos en tu cita. Si algo cambia, solo avísame.`;
+          contexto = { accion: 'confirmar_recordatorio', nombre: cliente.nombre };
+          respuesta = await generarRespuestaAura(contexto, historial);
         }
       }
 
+      // ── REAGENDAR ──
       else if (estadoDetectado.intencion === 'reagendar' || estadoDetectado.estado === 'reagendar_listar') {
         const { data: citasConfirmadas } = await supabase
           .from('citas')
           .select('id, servicio_aux, duracion_aux, fecha_hora, especialista_id')
           .eq('cliente_id', cliente.id)
+          .eq('local_id', localId)
           .eq('estado', 'Confirmada')
           .order('fecha_hora', { ascending: true })
           .limit(10);
 
         if (!citasConfirmadas?.length) {
-          respuesta = "No encontré citas activas a tu nombre. ¿Quieres que agende una nueva? 💫";
+          contexto = { accion: 'reagendar', citas: 0 };
+          respuesta = await generarRespuestaAura(contexto, historial);
         } else {
           const espMap = {};
-          (especialistas || []).forEach(e => espMap[e.id] = e.nombre);
+          especialistasLocal.forEach(e => espMap[e.id] = e.nombre);
 
           if (citasConfirmadas.length === 1) {
             const c = citasConfirmadas[0];
             const fecha = c.fecha_hora.split('T')[0];
             const hora = c.fecha_hora.substring(11, 16);
-            respuesta = `Veo que tienes una cita de *${c.servicio_aux}* el *${formatearFecha(fecha)}* a las *${formatearHora(hora)}* con *${espMap[c.especialista_id] || 'Asignar'}*.\n\n¿Para qué fecha y hora la quieres mover? 📅`;
+            contexto = {
+              accion: 'reagendar',
+              citas: 1,
+              servicio: c.servicio_aux,
+              fecha: formatearFecha(fecha),
+              hora: formatearHora(hora),
+              especialista: espMap[c.especialista_id] || 'Asignar'
+            };
+            respuesta = await generarRespuestaAura(contexto, historial);
             await supabase.from('conversaciones').insert([
               { telefono: userPhone, rol: 'system', contenido: `REAGENDAR_CITA_ID:${c.id}` }
             ]);
           } else {
-            const lista = citasConfirmadas.map((c, i) => {
+            const listaCitas = citasConfirmadas.map((c, i) => {
               const f = c.fecha_hora.split('T')[0];
               const h = c.fecha_hora.substring(11, 16);
-              return `${i + 1}. *${c.servicio_aux}* el ${formatearFecha(f)} a las ${formatearHora(h)}`;
-            }).join('\n');
-            respuesta = `Tienes ${citasConfirmadas.length} citas confirmadas:\n${lista}\n\n¿Cuál quieres mover? Responde con el número. 💫`;
+              return { index: i + 1, servicio: c.servicio_aux, fecha: formatearFecha(f), hora: formatearHora(h) };
+            });
+            contexto = { accion: 'reagendar', citas: citasConfirmadas.length, lista: listaCitas };
+            respuesta = await generarRespuestaAura(contexto, historial);
           }
         }
         accionBackend = 'reagendar';
       }
 
+      // ── CANCELAR ──
       else if (estadoDetectado.intencion === 'cancelar' || estadoDetectado.estado === 'cancelar_listar') {
         const { data: citasConfirmadas } = await supabase
           .from('citas')
           .select('id, servicio_aux, fecha_hora, especialista_id')
           .eq('cliente_id', cliente.id)
+          .eq('local_id', localId)
           .eq('estado', 'Confirmada')
           .order('fecha_hora', { ascending: true })
           .limit(10);
 
         if (!citasConfirmadas?.length) {
-          respuesta = "No encontré citas activas a tu nombre para cancelar. 🌸";
+          contexto = { accion: 'cancelar', citas: 0 };
+          respuesta = await generarRespuestaAura(contexto, historial);
         } else {
           const espMap = {};
-          (especialistas || []).forEach(e => espMap[e.id] = e.nombre);
+          especialistasLocal.forEach(e => espMap[e.id] = e.nombre);
           if (citasConfirmadas.length === 1) {
             const c = citasConfirmadas[0];
             const f = c.fecha_hora.split('T')[0];
             const h = c.fecha_hora.substring(11, 16);
-            respuesta = `¿Quieres cancelar tu cita de *${c.servicio_aux}* del *${formatearFecha(f)}* a las *${formatearHora(h)}*? Responde *sí* para confirmar. 🌸`;
+            contexto = {
+              accion: 'cancelar',
+              citas: 1,
+              servicio: c.servicio_aux,
+              fecha: formatearFecha(f),
+              hora: formatearHora(h),
+              especialista: espMap[c.especialista_id] || 'Asignar'
+            };
+            respuesta = await generarRespuestaAura(contexto, historial);
             await supabase.from('conversaciones').insert([
               { telefono: userPhone, rol: 'system', contenido: `CANCELAR_CITA_ID:${c.id}` }
             ]);
           } else {
-            const lista = citasConfirmadas.map((c, i) => {
+            const listaCitas = citasConfirmadas.map((c, i) => {
               const f = c.fecha_hora.split('T')[0];
               const h = c.fecha_hora.substring(11, 16);
-              return `${i + 1}. *${c.servicio_aux}* el ${formatearFecha(f)} a las ${formatearHora(h)}`;
-            }).join('\n');
-            respuesta = `¿Cuál cita quieres cancelar?\n${lista}\n\nResponde con el número. 🌸`;
+              return { index: i + 1, servicio: c.servicio_aux, fecha: formatearFecha(f), hora: formatearHora(h) };
+            });
+            contexto = { accion: 'cancelar', citas: citasConfirmadas.length, lista: listaCitas };
+            respuesta = await generarRespuestaAura(contexto, historial);
           }
         }
         accionBackend = 'cancelar';
       }
 
+      // ── CONFIRMAR CITA ──
       else if (estadoDetectado.estado === 'confirmar_cita') {
         const propuestaMatch = historial.filter(m => m.rol === 'system' && m.contenido.startsWith('PROPUESTA_CITA:')).pop()?.contenido;
 
         if (!propuestaMatch) {
-          respuesta = "Disculpa, no recordé los detalles de la cita que estábamos agendando. ¿Me los repites? 🌸";
+          contexto = { accion: 'error', mensaje: 'No recordé los detalles de la cita' };
+          respuesta = await generarRespuestaAura(contexto, historial);
         } else {
           const datosPropuesta = JSON.parse(propuestaMatch.replace('PROPUESTA_CITA:', ''));
 
           const disponible = await verificarDisponibilidad(
-            datosPropuesta.fecha, datosPropuesta.hora, datosPropuesta.especialista, datosPropuesta.duracion
+            datosPropuesta.fecha, datosPropuesta.hora, datosPropuesta.especialista, datosPropuesta.duracion, localId
           );
 
           if (!disponible.ok) {
             const alternativa = await buscarAlternativa(
-              datosPropuesta.fecha, datosPropuesta.hora, datosPropuesta.especialista, datosPropuesta.duracion
+              datosPropuesta.fecha, datosPropuesta.hora, datosPropuesta.especialista, datosPropuesta.duracion, localId
             );
-            respuesta = `${disponible.mensaje} ${alternativa.mensaje}`;
+            contexto = {
+              accion: 'conflicto_horario',
+              mensaje: disponible.mensaje,
+              alternativa: alternativa.mensaje,
+              nuevaHora: alternativa.hora ? formatearHora(alternativa.hora) : null
+            };
+            respuesta = await generarRespuestaAura(contexto, historial);
 
             if (alternativa.hora) {
               datosPropuesta.hora = alternativa.hora;
@@ -782,6 +962,7 @@ export default async function handler(req, res) {
                 cliente_id: cliente.id,
                 servicio_id: datosPropuesta.servicio_id,
                 especialista_id: datosPropuesta.especialista_id,
+                local_id: localId,
                 fecha_hora: `${datosPropuesta.fecha}T${datosPropuesta.hora}:00-05:00`,
                 estado: 'Confirmada',
                 nombre_cliente_aux: `${cliente.nombre} ${cliente.apellido || ''}`.trim(),
@@ -792,28 +973,37 @@ export default async function handler(req, res) {
 
             if (insertError) {
               console.error('❌ Error insert Supabase:', insertError);
-              respuesta = "Ups, tuve un problema guardando tu cita. ¿Me das un momento? 🙏";
+              contexto = { accion: 'error', mensaje: 'Problema guardando la cita' };
+              respuesta = await generarRespuestaAura(contexto, historial);
             } else {
               const airtableRes = await crearCitaAirtable({
                 telefono: userPhone, nombre: cliente.nombre, apellido: cliente.apellido || '',
                 fecha: datosPropuesta.fecha, hora: datosPropuesta.hora,
                 servicio: datosPropuesta.servicio, especialista: datosPropuesta.especialista,
+                local: locales?.find(l => l.id === localId)?.nombre || '',
                 precio: datosPropuesta.precio, duracion: datosPropuesta.duracion,
                 supabase_id: citaSupabase.id, email: cliente.email || null,
                 notas: cliente.notas_bienestar || null, observaciones: 'Agendada por AuraSync'
               });
 
-              if (airtableRes.ok) {
-                respuesta = `✨ ¡Listo! Tu cita para *${datosPropuesta.servicio}* está confirmada:\n📅 ${formatearFecha(datosPropuesta.fecha)}\n⏰ ${formatearHora(datosPropuesta.hora)}\n💇‍♀️ Con ${datosPropuesta.especialista}\n💰 $${datosPropuesta.precio}\n\nTe esperamos con mucho cariño. 🌸`;
-              } else {
-                respuesta = `✅ Tu cita está guardada. Te confirmo:\n📅 ${formatearFecha(datosPropuesta.fecha)} a las ${formatearHora(datosPropuesta.hora)}\n💇‍♀️ ${datosPropuesta.servicio} con ${datosPropuesta.especialista}`;
-              }
+              contexto = {
+                accion: 'confirmar_cita',
+                servicio: datosPropuesta.servicio,
+                fecha: formatearFecha(datosPropuesta.fecha),
+                hora: formatearHora(datosPropuesta.hora),
+                especialista: datosPropuesta.especialista,
+                precio: datosPropuesta.precio,
+                local: locales?.find(l => l.id === localId)?.nombre,
+                airtableOk: airtableRes.ok
+              };
+              respuesta = await generarRespuestaAura(contexto, historial);
               accionBackend = 'agendar';
             }
           }
         }
       }
 
+      // ── PROCESAR FECHA/HORA ──
       else if (estadoDetectado.estado === 'procesar_fecha_hora' || estadoDetectado.estado === 'esperando_fecha_hora') {
         let fecha = parsearFechaRelativa(textoUsuario, hoy, manana, pasadoManana);
         let hora = parsearHora(textoUsuario);
@@ -825,18 +1015,24 @@ export default async function handler(req, res) {
         }
 
         if (!hora) {
-          respuesta = `¿A qué hora te funciona para el ${formatearFecha(fecha)}? Te sugiero entre 9:00 a.m. y 6:00 p.m. 🌸`;
+          contexto = {
+            accion: 'pedir_hora',
+            fecha: formatearFecha(fecha),
+            horarioInicio: '9:00 a.m.',
+            horarioFin: '6:00 p.m.'
+          };
+          respuesta = await generarRespuestaAura(contexto, historial);
           await supabase.from('conversaciones').insert([
             { telefono: userPhone, rol: 'system', contenido: `FECHA_PROPUESTA:${fecha}` }
           ]);
         } else {
           const servicioMencionado = historial.filter(m => m.rol === 'system' && m.contenido.startsWith('SERVICIO_SELECCIONADO:')).pop()?.contenido?.replace('SERVICIO_SELECCIONADO:', '');
-          const servicioData = servicios?.find(s => s.nombre.toLowerCase() === (servicioMencionado || '').toLowerCase()) || servicios?.[0];
+          const servicioData = serviciosLocal?.find(s => s.nombre.toLowerCase() === (servicioMencionado || '').toLowerCase()) || serviciosLocal?.[0];
 
           let especialistaNombre = null;
           let especialistaId = null;
 
-          for (const esp of (especialistas || [])) {
+          for (const esp of especialistasLocal) {
             if (textoUsuario.toLowerCase().includes(esp.nombre.toLowerCase())) {
               especialistaNombre = esp.nombre;
               especialistaId = esp.id;
@@ -847,30 +1043,43 @@ export default async function handler(req, res) {
           if (!especialistaNombre) {
             const ultimaEsp = historial.filter(m => m.rol === 'system' && m.contenido.startsWith('ESPECIALISTA_PROPUESTO:')).pop()?.contenido?.replace('ESPECIALISTA_PROPUESTO:', '');
             if (ultimaEsp) {
-              const espData = especialistas?.find(e => e.nombre === ultimaEsp);
+              const espData = especialistasLocal?.find(e => e.nombre === ultimaEsp);
               if (espData) { especialistaNombre = espData.nombre; especialistaId = espData.id; }
             }
           }
 
           if (!especialistaNombre) {
-            const disponibles = await obtenerEspecialistasDisponibles(fecha, hora, servicioData?.duracion || 60);
+            const disponibles = await obtenerEspecialistasDisponibles(fecha, hora, servicioData?.duracion || 60, localId);
             if (disponibles.length === 0) {
-              const alternativa = await buscarAlternativa(fecha, hora, null, servicioData?.duracion || 60);
+              const alternativa = await buscarAlternativa(fecha, hora, null, servicioData?.duracion || 60, localId);
+              contexto = {
+                accion: 'sin_disponibilidad',
+                servicio: servicioData?.nombre,
+                fecha: formatearFecha(fecha),
+                hora: formatearHora(hora),
+                alternativa: alternativa.mensaje,
+                ofrecerListaEspera: true
+              };
+              respuesta = await generarRespuestaAura(contexto, historial);
+
               if (alternativa.hora) {
-                respuesta = `Ese horario está completo. ${alternativa.mensaje}\n\nO si prefieres, te puedo poner en *lista de espera* por si alguien cancela. ¿Te interesa? 🌸`;
                 await supabase.from('conversaciones').insert([
                   { telefono: userPhone, rol: 'system', contenido: `LISTA_ESPERA_PROPUESTA:${JSON.stringify({
                     fecha, hora, servicio: servicioData?.nombre, servicio_id: servicioData?.id,
-                    precio: servicioData?.precio, duracion: servicioData?.duracion
+                    precio: servicioData?.precio, duracion: servicioData?.duracion, local_id: localId
                   })}` }
                 ]);
-              } else {
-                respuesta = `Ese día ya no tenemos cupos disponibles. ¿Te parece otro día? 📅\n\nO te puedo poner en lista de espera por si se libera algo.`;
               }
             } else {
               const topEspecialistas = disponibles.slice(0, 3);
-              const lista = topEspecialistas.map(e => `• *${e.nombre}* — ${e.expertise || e.rol || 'Especialista'}`).join('\n');
-              respuesta = `Para ${servicioData?.nombre || 'tu servicio'} a las ${formatearHora(hora)} del ${formatearFecha(fecha)} tengo disponible a:\n${lista}\n\n¿Con quién te gustaría? ✨`;
+              contexto = {
+                accion: 'mostrar_especialistas',
+                servicio: servicioData?.nombre,
+                fecha: formatearFecha(fecha),
+                hora: formatearHora(hora),
+                especialistas: topEspecialistas.map(e => ({ nombre: e.nombre, expertise: e.expertise || e.rol }))
+              };
+              respuesta = await generarRespuestaAura(contexto, historial);
 
               await supabase.from('conversaciones').insert([
                 { telefono: userPhone, rol: 'system', contenido: `SERVICIO_SELECCIONADO:${servicioData?.nombre}` },
@@ -879,11 +1088,18 @@ export default async function handler(req, res) {
               ]);
             }
           } else {
-            const disponible = await verificarDisponibilidad(fecha, hora, especialistaNombre, servicioData?.duracion || 60);
+            const disponible = await verificarDisponibilidad(fecha, hora, especialistaNombre, servicioData?.duracion || 60, localId);
 
             if (!disponible.ok) {
-              const alternativa = await buscarAlternativa(fecha, hora, especialistaNombre, servicioData?.duracion || 60);
-              respuesta = `${disponible.mensaje} ${alternativa.mensaje}`;
+              const alternativa = await buscarAlternativa(fecha, hora, especialistaNombre, servicioData?.duracion || 60, localId);
+              contexto = {
+                accion: 'conflicto_horario',
+                especialista: especialistaNombre,
+                mensaje: disponible.mensaje,
+                alternativa: alternativa.mensaje
+              };
+              respuesta = await generarRespuestaAura(contexto, historial);
+              
               if (alternativa.hora) {
                 await supabase.from('conversaciones').insert([
                   { telefono: userPhone, rol: 'system', contenido: `PROPUESTA_CITA:${JSON.stringify({
@@ -893,10 +1109,17 @@ export default async function handler(req, res) {
                     duracion: servicioData?.duracion
                   })}` }
                 ]);
-                respuesta += `\n\n¿Te lo agendo a las ${formatearHora(alternativa.hora)}? 🌸`;
               }
             } else {
-              respuesta = `Perfecto, te confirmo *${servicioData?.nombre}* con *${especialistaNombre}* el *${formatearFecha(fecha)}* a las *${formatearHora(hora)}*.\n\n¿Te lo agendo? ✨`;
+              contexto = {
+                accion: 'proponer_confirmacion',
+                servicio: servicioData?.nombre,
+                especialista: especialistaNombre,
+                fecha: formatearFecha(fecha),
+                hora: formatearHora(hora),
+                precio: servicioData?.precio
+              };
+              respuesta = await generarRespuestaAura(contexto, historial);
 
               await supabase.from('conversaciones').insert([
                 { telefono: userPhone, rol: 'system', contenido: `PROPUESTA_CITA:${JSON.stringify({
@@ -911,9 +1134,10 @@ export default async function handler(req, res) {
         }
       }
 
+      // ── MOSTRAR ESPECIALISTAS / SELECCIONAR SERVICIO ──
       else if (estadoDetectado.estado === 'esperando_especialista') {
         let servicioData = null;
-        for (const s of (servicios || [])) {
+        for (const s of serviciosLocal) {
           if (textoUsuario.toLowerCase().includes(s.nombre.toLowerCase()) || 
               textoUsuario.toLowerCase().includes(s.categoria?.toLowerCase() || '')) {
             servicioData = s;
@@ -923,20 +1147,30 @@ export default async function handler(req, res) {
 
         if (!servicioData) {
           const servicioGuardado = historial.filter(m => m.rol === 'system' && m.contenido.startsWith('SERVICIO_SELECCIONADO:')).pop()?.contenido?.replace('SERVICIO_SELECCIONADO:', '');
-          servicioData = servicios?.find(s => s.nombre === servicioGuardado);
+          servicioData = serviciosLocal?.find(s => s.nombre === servicioGuardado);
         }
 
         if (!servicioData) {
-          const listaServicios = (servicios || []).map(s => `• *${s.nombre}* — $${s.precio}, ${s.duracion} min`).join('\n');
-          respuesta = `Estos son nuestros servicios disponibles:\n${listaServicios}\n\n¿Cuál te gustaría agendar? 🌸`;
+          contexto = {
+            accion: 'mostrar_servicios',
+            servicios: serviciosLocal.map(s => ({ nombre: s.nombre, precio: s.precio, duracion: s.duracion }))
+          };
+          respuesta = await generarRespuestaAura(contexto, historial);
         } else {
           await supabase.from('conversaciones').insert([
             { telefono: userPhone, rol: 'system', contenido: `SERVICIO_SELECCIONADO:${servicioData.nombre}` }
           ]);
-          respuesta = `Excelente elección. *${servicioData.nombre}* — $${servicioData.precio}, ${servicioData.duracion} minutos.\n\n¿Para qué día y hora te funciona? 📅`;
+          contexto = {
+            accion: 'servicio_seleccionado',
+            servicio: servicioData.nombre,
+            precio: servicioData.precio,
+            duracion: servicioData.duracion
+          };
+          respuesta = await generarRespuestaAura(contexto, historial);
         }
       }
 
+      // ── LISTA DE ESPERA: USUARIO DICE "SÍ" ──
       else if (historial.some(m => m.rol === 'system' && m.contenido.startsWith('LISTA_ESPERA_PROPUESTA:'))) {
         const propuestaLE = historial.filter(m => m.rol === 'system' && m.contenido.startsWith('LISTA_ESPERA_PROPUESTA:')).pop()?.contenido;
         if (propuestaLE && /^s[ií]|dale|ok|perfecto|súper|agéndalo|confirmo|va|bueno/.test(textoUsuario.toLowerCase())) {
@@ -945,6 +1179,7 @@ export default async function handler(req, res) {
             cliente_id: cliente.id,
             telefono: userPhone,
             nombre: `${cliente.nombre} ${cliente.apellido || ''}`.trim(),
+            local_id: localId,
             fecha: datosLE.fecha,
             hora: datosLE.hora,
             servicio_id: datosLE.servicio_id,
@@ -953,24 +1188,34 @@ export default async function handler(req, res) {
             especialista: null
           });
           if (resultado.ok) {
-            respuesta = `✨ ¡Listo! Te agregué a la lista de espera para *${datosLE.servicio}* el *${formatearFecha(datosLE.fecha)}* a las *${formatearHora(datosLE.hora)}*.\n\nSi alguien cancela, te aviso al instante. 🌸`;
+            contexto = {
+              accion: 'lista_espera_confirmada',
+              servicio: datosLE.servicio,
+              fecha: formatearFecha(datosLE.fecha),
+              hora: formatearHora(datosLE.hora)
+            };
           } else {
-            respuesta = "Tuve un problema agregándote a la lista de espera. ¿Lo intentamos de nuevo? 🙏";
+            contexto = { accion: 'error', mensaje: 'Problema agregando a lista de espera' };
           }
+          respuesta = await generarRespuestaAura(contexto, historial);
         } else {
-          respuesta = "Entendido. Si cambias de opinión, solo dime y te agrego a la lista de espera. 🌸";
+          contexto = { accion: 'lista_espera_rechazada' };
+          respuesta = await generarRespuestaAura(contexto, historial);
         }
       }
 
+      // ── ESTADO INICIAL / ESPERANDO SERVICIO ──
       else {
-        respuesta = `¡Hola ${cliente.nombre}! 🌸 Soy Aura. ¿Qué servicio te gustaría agendar hoy?`;
-        if (servicios?.length) {
-          const populares = servicios.slice(0, 3).map(s => `*${s.nombre}* ($${s.precio})`).join(', ');
-          respuesta += ` Tenemos ${populares}...`;
-        }
+        contexto = {
+          accion: 'saludo',
+          nombre: cliente.nombre,
+          serviciosPopulares: serviciosLocal.slice(0, 3).map(s => ({ nombre: s.nombre, precio: s.precio }))
+        };
+        respuesta = await generarRespuestaAura(contexto, historial);
       }
     }
 
+    // ── Guardar conversación ──
     await supabase.from('conversaciones').insert([
       { telefono: userPhone, rol: 'user', contenido: textoUsuario },
       { telefono: userPhone, rol: 'assistant', contenido: respuesta }
