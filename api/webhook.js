@@ -268,7 +268,11 @@ async function obtenerCitasDelDia(fecha, excluirCitaId = null) {
     if (excluirCitaId) query = query.neq('id', excluirCitaId);
     const { data: citasSupabase, error: supaError } = await query;
     if (supaError) { console.error('Error Supabase citas:', supaError); return []; }
-    const { data: especialistasData } = await supabase.from('especialistas').select('id, nombre');
+    
+    // <-- CORREGIDO: Manejo de error si falla la consulta de especialistas
+    const { data: especialistasData, error: espError } = await supabase.from('especialistas').select('id, nombre');
+    if (espError) { console.error('Error Supabase especialistas:', espError); return []; }
+    
     const mapaEspecialistas = {};
     (especialistasData || []).forEach(e => { mapaEspecialistas[e.id] = e.nombre; });
     return (citasSupabase || []).map(c => {
@@ -361,31 +365,37 @@ async function buscarAlternativa(fecha, horaSolicitada, especialistaSolicitado, 
 }
 
 async function obtenerEspecialistasDisponibles(fecha, hora, duracion, servicioCategoria = null) {
-  const { data: todosEspecialistas } = await supabase
-    .from('especialistas')
-    .select('id, nombre, rol, expertise, local_id, activo')
-    .eq('activo', true);
+  try {
+    // <-- CORREGIDO: Manejo de error si falla la consulta
+    const { data: todosEspecialistas, error: espError } = await supabase
+      .from('especialistas')
+      .select('id, nombre, rol, expertise, local_id, activo')
+      .eq('activo', true);
 
-  if (!todosEspecialistas?.length) return [];
+    if (espError || !todosEspecialistas?.length) return [];
 
-  const citas = await obtenerCitasDelDia(fecha);
-  const [h, m] = hora.split(':').map(Number);
-  const inicioNuevo = h * 60 + m;
-  const finNuevo = inicioNuevo + (duracion || 60);
+    const citas = await obtenerCitasDelDia(fecha);
+    const [h, m] = hora.split(':').map(Number);
+    const inicioNuevo = h * 60 + m;
+    const finNuevo = inicioNuevo + (duracion || 60);
 
-  const disponibles = todosEspecialistas.filter(esp => {
-    const conflicto = hayConflictoHorario(inicioNuevo, finNuevo, citas, esp.nombre);
-    return !conflicto.conflicto;
-  });
+    const disponibles = todosEspecialistas.filter(esp => {
+      const conflicto = hayConflictoHorario(inicioNuevo, finNuevo, citas, esp.nombre);
+      return !conflicto.conflicto;
+    });
 
-  if (!disponibles.length) return [];
+    if (!disponibles.length) return [];
 
-  const hoy = getFechaEcuador(0);
-  const hace30Dias = getFechaEcuador(-30);
-  const carga = await obtenerCargaEspecialistas(hace30Dias, hoy, disponibles.map(e => e.id));
-  disponibles.sort((a, b) => (carga[a.id] || 0) - (carga[b.id] || 0));
+    const hoy = getFechaEcuador(0);
+    const hace30Dias = getFechaEcuador(-30);
+    const carga = await obtenerCargaEspecialistas(hace30Dias, hoy, disponibles.map(e => e.id));
+    disponibles.sort((a, b) => (carga[a.id] || 0) - (carga[b.id] || 0));
 
-  return disponibles;
+    return disponibles;
+  } catch (e) {
+    console.error('Error obteniendo especialistas disponibles:', e);
+    return [];
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -422,7 +432,6 @@ async function agregarAListaEspera(datos) {
 
 async function buscarYNotificarListaEspera(fecha, hora, duracion, servicioId) {
   try {
-    // Buscar candidatos en lista de espera para esta fecha/hora
     const { data: candidatos } = await supabase
       .from('lista_espera')
       .select('*')
@@ -438,19 +447,12 @@ async function buscarYNotificarListaEspera(fecha, hora, duracion, servicioId) {
 
     let notificados = 0;
     for (const candidato of candidatos) {
-      // Verificar que el hueco siga libre
       const disponible = await verificarDisponibilidad(fecha, hora, candidato.especialista_preferido_nombre, duracion);
       if (!disponible.ok) continue;
 
-      const mensaje = `✨ *¡Buenas noticias, ${candidato.nombre_cliente || ''}!* ✨
-
-` +
-        `Se liberó un cupo para *${candidato.servicio_nombre}* el *${formatearFecha(fecha)}* a las *${formatearHora(hora)}*.
-
-` +
-        `¿Lo quieres? Responde *SÍ* en los próximos 15 minutos y te lo agendo. 🌸
-
-` +
+      const mensaje = `✨ *¡Buenas noticias, ${candidato.nombre_cliente || ''}!* ✨\n\n` +
+        `Se liberó un cupo para *${candidato.servicio_nombre}* el *${formatearFecha(fecha)}* a las *${formatearHora(hora)}*.\n\n` +
+        `¿Lo quieres? Responde *SÍ* en los próximos 15 minutos y te lo agendo. 🌸\n\n` +
         `_Si no respondes, pasaremos al siguiente de la lista._`;
 
       const envio = await enviarWhatsApp(candidato.telefono, mensaje);
@@ -470,10 +472,10 @@ async function buscarYNotificarListaEspera(fecha, hora, duracion, servicioId) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// MÁQUINA DE ESTADOS
+// MÁQUINA DE ESTADOS (CORREGIDA - ahora recibe servicios y especialistas)
 // ═══════════════════════════════════════════════════════════════
 
-async function detectarEstado(historial, cliente, textoUsuario, hoy, manana, pasado) {
+async function detectarEstado(historial, cliente, textoUsuario, hoy, manana, pasado, servicios = [], especialistas = []) {
   const t = textoUsuario.toLowerCase().trim();
   const ultimoAssistant = historial.filter(m => m.rol === 'assistant').pop()?.contenido?.toLowerCase() || '';
 
@@ -483,7 +485,6 @@ async function detectarEstado(historial, cliente, textoUsuario, hoy, manana, pas
 
   if (!cliente?.nombre) return { estado: 'inicio', intencion: 'registro' };
 
-  // Detectar respuesta a notificación de lista de espera
   const ultimoSystem = historial.filter(m => m.rol === 'system').pop()?.contenido || '';
   if (ultimoSystem.includes('NOTIFICACION_LISTA_ESPERA')) {
     if (/^s[ií]|dale|ok|perfecto|súper|agéndalo|confirmo|va|bueno/.test(t)) {
@@ -492,7 +493,6 @@ async function detectarEstado(historial, cliente, textoUsuario, hoy, manana, pas
     return { estado: 'rechazar_lista_espera', intencion: 'none' };
   }
 
-  // Detectar respuesta a recordatorio de confirmación
   if (ultimoAssistant.includes('¿todo en orden') || ultimoAssistant.includes('¿confirmas')) {
     if (/^s[ií]|dale|ok|perfecto|confirmo|todo bien|súper/.test(t)) {
       return { estado: 'confirmar_recordatorio', intencion: 'confirmar' };
@@ -512,7 +512,7 @@ async function detectarEstado(historial, cliente, textoUsuario, hoy, manana, pas
   }
 
   if (ultimoAssistant.includes('¿con quién te gustaría') || ultimoAssistant.includes('te puedo ofrecer a')) {
-    const mencionaEspecialista = (especialistas || []).some(e => t.includes(e.nombre.toLowerCase()));
+    const mencionaEspecialista = especialistas.some(e => t.includes(e.nombre.toLowerCase()));
     if (mencionaEspecialista || t.length < 20) {
       return { estado: 'esperando_fecha_hora', intencion: 'agendar' };
     }
@@ -525,7 +525,7 @@ async function detectarEstado(historial, cliente, textoUsuario, hoy, manana, pas
   if (intencionReagendar) return { estado: 'reagendar_listar', intencion: 'reagendar' };
   if (intencionCancelar) return { estado: 'cancelar_listar', intencion: 'cancelar' };
 
-  const mencionaServicio = (servicios || []).some(s => t.includes(s.nombre.toLowerCase()) || t.includes(s.categoria?.toLowerCase() || ''));
+  const mencionaServicio = servicios.some(s => t.includes(s.nombre.toLowerCase()) || t.includes(s.categoria?.toLowerCase() || ''));
   if (mencionaServicio) return { estado: 'esperando_especialista', intencion: 'agendar' };
 
   return { estado: 'esperando_servicio', intencion: 'agendar' };
@@ -557,7 +557,6 @@ export default async function handler(req, res) {
       } catch (error) { console.error('Error Deepgram:', error.message); }
     }
 
-    // ── Cargar datos ──
     let { data: cliente } = await supabase
       .from('clientes')
       .select('id, telefono, nombre, apellido, email, fecha_nacimiento, especialista_pref_id, notas_bienestar')
@@ -584,9 +583,6 @@ export default async function handler(req, res) {
     let respuesta = '';
     let accionBackend = 'none';
 
-    // ═══════════════════════════════════════════════════════
-    // FLUJO: REGISTRO DE CLIENTE NUEVO
-    // ═══════════════════════════════════════════════════════
     if (esNuevo) {
       const yaPidioDatos = historial.some(m => m.rol === 'assistant' && /nombre.*apellido.*fecha/i.test(m.contenido));
 
@@ -626,23 +622,18 @@ export default async function handler(req, res) {
         respuesta = `¡Hola! 🌸 Soy Aura de AuraSync, encantada de conocerte. Para registrarte en nuestro sistema necesito: tu *nombre y apellido* y tu *fecha de nacimiento* (dd/mm/aaaa). ¿Me los compartes?`;
       }
     } else {
-      // ═══════════════════════════════════════════════════════
-      // FLUJO PRINCIPAL: MÁQUINA DE ESTADOS
-      // ═══════════════════════════════════════════════════════
-      const estadoDetectado = await detectarEstado(historial, cliente, textoUsuario, hoy, manana, pasadoManana);
+      // <-- CORREGIDO: Ahora pasamos servicios y especialistas a detectarEstado
+      const estadoDetectado = await detectarEstado(historial, cliente, textoUsuario, hoy, manana, pasadoManana, servicios, especialistas);
       console.log('🎯 Estado detectado:', estadoDetectado.estado, '| Intención:', estadoDetectado.intencion);
 
-      // ── CONFIRMAR DESDE LISTA DE ESPERA ──
       if (estadoDetectado.estado === 'confirmar_lista_espera') {
         const notifMatch = historial.filter(m => m.rol === 'system' && m.contenido.startsWith('NOTIFICACION_LISTA_ESPERA:')).pop()?.contenido;
         if (notifMatch) {
           const datosNotif = JSON.parse(notifMatch.replace('NOTIFICACION_LISTA_ESPERA:', ''));
-          // Verificar que siga libre
           const disponible = await verificarDisponibilidad(datosNotif.fecha, datosNotif.hora, datosNotif.especialista, datosNotif.duracion);
           if (!disponible.ok) {
             respuesta = "Lo siento, ese cupo ya fue tomado por otro cliente. Te mantengo en lista de espera por si se libera otro. 🌸";
           } else {
-            // Agendar directamente
             const { data: citaSupabase, error: insertError } = await supabase
               .from('citas')
               .insert({
@@ -676,12 +667,10 @@ export default async function handler(req, res) {
         }
       }
 
-      // ── RECHAZAR LISTA DE ESPERA ──
       else if (estadoDetectado.estado === 'rechazar_lista_espera') {
         respuesta = "Entendido. Te mantengo en lista de espera por si se libera otro cupo. 🌸";
       }
 
-      // ── CONFIRMAR RECORDATORIO ──
       else if (estadoDetectado.estado === 'confirmar_recordatorio') {
         const citaIdMatch = historial.filter(m => m.rol === 'system' && m.contenido.startsWith('RECORDATORIO_CITA_ID:')).pop()?.contenido;
         if (citaIdMatch) {
@@ -693,7 +682,6 @@ export default async function handler(req, res) {
         }
       }
 
-      // ── REAGENDAR ──
       else if (estadoDetectado.intencion === 'reagendar' || estadoDetectado.estado === 'reagendar_listar') {
         const { data: citasConfirmadas } = await supabase
           .from('citas')
@@ -729,7 +717,6 @@ export default async function handler(req, res) {
         accionBackend = 'reagendar';
       }
 
-      // ── CANCELAR ──
       else if (estadoDetectado.intencion === 'cancelar' || estadoDetectado.estado === 'cancelar_listar') {
         const { data: citasConfirmadas } = await supabase
           .from('citas')
@@ -764,7 +751,6 @@ export default async function handler(req, res) {
         accionBackend = 'cancelar';
       }
 
-      // ── CONFIRMAR CITA ──
       else if (estadoDetectado.estado === 'confirmar_cita') {
         const propuestaMatch = historial.filter(m => m.rol === 'system' && m.contenido.startsWith('PROPUESTA_CITA:')).pop()?.contenido;
 
@@ -828,7 +814,6 @@ export default async function handler(req, res) {
         }
       }
 
-      // ── PROCESAR FECHA/HORA ──
       else if (estadoDetectado.estado === 'procesar_fecha_hora' || estadoDetectado.estado === 'esperando_fecha_hora') {
         let fecha = parsearFechaRelativa(textoUsuario, hoy, manana, pasadoManana);
         let hora = parsearHora(textoUsuario);
@@ -870,7 +855,6 @@ export default async function handler(req, res) {
           if (!especialistaNombre) {
             const disponibles = await obtenerEspecialistasDisponibles(fecha, hora, servicioData?.duracion || 60);
             if (disponibles.length === 0) {
-              // NO HAY DISPONIBILIDAD → OFRECER LISTA DE ESPERA
               const alternativa = await buscarAlternativa(fecha, hora, null, servicioData?.duracion || 60);
               if (alternativa.hora) {
                 respuesta = `Ese horario está completo. ${alternativa.mensaje}\n\nO si prefieres, te puedo poner en *lista de espera* por si alguien cancela. ¿Te interesa? 🌸`;
@@ -927,7 +911,6 @@ export default async function handler(req, res) {
         }
       }
 
-      // ── MOSTRAR ESPECIALISTAS ──
       else if (estadoDetectado.estado === 'esperando_especialista') {
         let servicioData = null;
         for (const s of (servicios || [])) {
@@ -954,7 +937,6 @@ export default async function handler(req, res) {
         }
       }
 
-      // ── LISTA DE ESPERA: USUARIO DICE "SÍ" ──
       else if (historial.some(m => m.rol === 'system' && m.contenido.startsWith('LISTA_ESPERA_PROPUESTA:'))) {
         const propuestaLE = historial.filter(m => m.rol === 'system' && m.contenido.startsWith('LISTA_ESPERA_PROPUESTA:')).pop()?.contenido;
         if (propuestaLE && /^s[ií]|dale|ok|perfecto|súper|agéndalo|confirmo|va|bueno/.test(textoUsuario.toLowerCase())) {
@@ -980,7 +962,6 @@ export default async function handler(req, res) {
         }
       }
 
-      // ── ESTADO INICIAL ──
       else {
         respuesta = `¡Hola ${cliente.nombre}! 🌸 Soy Aura. ¿Qué servicio te gustaría agendar hoy?`;
         if (servicios?.length) {
@@ -990,7 +971,6 @@ export default async function handler(req, res) {
       }
     }
 
-    // ── Guardar conversación ──
     await supabase.from('conversaciones').insert([
       { telefono: userPhone, rol: 'user', contenido: textoUsuario },
       { telefono: userPhone, rol: 'assistant', contenido: respuesta }
