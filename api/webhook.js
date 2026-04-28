@@ -541,7 +541,10 @@ async function buscarYNotificarListaEspera(fecha, hora, duracion, localId, servi
 // MÁQUINA DE ESTADOS (CORREGIDA - recibe servicios y especialistas)
 // ═══════════════════════════════════════════════════════════════
 
-async function detectarEstado(historial, cliente, textoUsuario, hoy, manana, pasado, servicios = [], especialistas = []) {
+async function detectarEstado(historial, cliente, textoUsuario, hoy, manana, pasado, servicios, especialistas) {
+  // DEFENSA CRÍTICA: En serverless (Vercel), los default parameters fallan cuando llega null
+  const serviciosArray = Array.isArray(servicios) ? servicios : [];
+  const especialistasArray = Array.isArray(especialistas) ? especialistas : [];
   const t = textoUsuario.toLowerCase().trim();
   const ultimoAssistant = historial.filter(m => m.rol === 'assistant').pop()?.contenido?.toLowerCase() || '';
 
@@ -580,7 +583,7 @@ async function detectarEstado(historial, cliente, textoUsuario, hoy, manana, pas
   }
 
   if (ultimoAssistant.includes('¿con quién te gustaría') || ultimoAssistant.includes('te puedo ofrecer a')) {
-    const mencionaEspecialista = especialistas.some(e => t.includes(e.nombre.toLowerCase()));
+    const mencionaEspecialista = especialistasArray.some(e => t.includes(e.nombre.toLowerCase()));
     if (mencionaEspecialista || t.length < 20) {
       return { estado: 'esperando_fecha_hora', intencion: 'agendar' };
     }
@@ -593,7 +596,7 @@ async function detectarEstado(historial, cliente, textoUsuario, hoy, manana, pas
   if (intencionReagendar) return { estado: 'reagendar_listar', intencion: 'reagendar' };
   if (intencionCancelar) return { estado: 'cancelar_listar', intencion: 'cancelar' };
 
-  const mencionaServicio = servicios.some(s => t.includes(s.nombre.toLowerCase()) || t.includes(s.categoria?.toLowerCase() || ''));
+  const mencionaServicio = serviciosArray.some(s => t.includes(s.nombre.toLowerCase()) || t.includes((s.categoria || '').toLowerCase()));
   if (mencionaServicio) return { estado: 'esperando_especialista', intencion: 'agendar' };
 
   return { estado: 'esperando_servicio', intencion: 'agendar' };
@@ -632,9 +635,12 @@ export default async function handler(req, res) {
       .eq('telefono', userPhone)
       .maybeSingle();
 
-    const { data: locales } = await supabase.from('locales').select('id, nombre, direccion, hora_apertura, hora_cierre').eq('activo', true);
-    const { data: especialistas } = await supabase.from('especialistas').select('id, nombre, rol, expertise, local_id, activo').eq('activo', true);
-    const { data: servicios } = await supabase.from('servicios').select('id, nombre, precio, duracion, categoria, descripcion_voda, local_id');
+    const { data: localesData } = await supabase.from('locales').select('id, nombre, direccion, hora_apertura, hora_cierre').eq('activo', true);
+    const locales = Array.isArray(localesData) ? localesData : [];
+    const { data: especialistasData } = await supabase.from('especialistas').select('id, nombre, rol, expertise, local_id, activo').eq('activo', true);
+    const especialistas = Array.isArray(especialistasData) ? especialistasData : [];
+    const { data: serviciosData } = await supabase.from('servicios').select('id, nombre, precio, duracion, categoria, descripcion_voda, local_id');
+    const servicios = Array.isArray(serviciosData) ? serviciosData : [];
 
     const esNuevo = !cliente || !cliente.nombre || cliente.nombre.trim() === '';
 
