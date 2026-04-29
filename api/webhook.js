@@ -538,71 +538,64 @@ async function buscarYNotificarListaEspera(fecha, hora, duracion, localId, servi
 }
 
 // ═══════════════════════════════════════════════════════════════
-// MÁQUINA DE ESTADOS (CORREGIDA - motor lingüístico puro, sin dependencias externas)
+// MÁQUINA DE ESTADOS (CORREGIDA - recibe servicios y especialistas)
 // ═══════════════════════════════════════════════════════════════
 
-async function detectarEstado(historial, cliente, textoUsuario, hoy, manana, pasado) {
-  // MOTOR DE INTENCIONES PURAMENTE LINGÜÍSTICO
-  // No depende de arrays externos - solo texto + contexto conversacional
+async function detectarEstado(historial, cliente, textoUsuario, hoy, manana, pasado, servicios = [], especialistas = []) {
   const t = textoUsuario.toLowerCase().trim();
   const ultimoAssistant = historial.filter(m => m.rol === 'assistant').pop()?.contenido?.toLowerCase() || '';
-  const ultimoSystem = historial.filter(m => m.rol === 'system').pop()?.contenido || '';
 
-  // Patrones de intención
   const intencionReagendar = /reagendar|mover|cambiar|modificar/.test(t);
   const intencionCancelar = /cancelar|anular|eliminar/.test(t);
-  const intencionAgendar = /agendar|reservar|pedir|quiero|necesito|dame|pido/.test(t) && !intencionReagendar && !intencionCancelar;
-  const intencionConfirmar = /^s[ií]|dale|ok|perfecto|súper|agéndalo|confirmo|va|bueno|sí|si$/.test(t);
-  const intencionNegar = /^no|nope|paso|otro|diferente|cambiar/.test(t);
+  const intencionAgendar = /agendar|reservar|pedir|quiero/.test(t) && !intencionReagendar && !intencionCancelar;
 
-  // Cliente nuevo
   if (!cliente?.nombre) return { estado: 'inicio', intencion: 'registro' };
 
-  // Respuesta a notificación de lista de espera
+  // Detectar respuesta a notificación de lista de espera
+  const ultimoSystem = historial.filter(m => m.rol === 'system').pop()?.contenido || '';
   if (ultimoSystem.includes('NOTIFICACION_LISTA_ESPERA')) {
-    if (intencionConfirmar) return { estado: 'confirmar_lista_espera', intencion: 'agendar' };
+    if (/^s[ií]|dale|ok|perfecto|súper|agéndalo|confirmo|va|bueno/.test(t)) {
+      return { estado: 'confirmar_lista_espera', intencion: 'agendar' };
+    }
     return { estado: 'rechazar_lista_espera', intencion: 'none' };
   }
 
-  // Respuesta a recordatorio de confirmación
+  // Detectar respuesta a recordatorio de confirmación
   if (ultimoAssistant.includes('¿todo en orden') || ultimoAssistant.includes('¿confirmas')) {
-    if (intencionConfirmar) return { estado: 'confirmar_recordatorio', intencion: 'confirmar' };
-    if (intencionNegar || intencionReagendar) return { estado: 'reagendar_listar', intencion: 'reagendar' };
+    if (/^s[ií]|dale|ok|perfecto|confirmo|todo bien|súper/.test(t)) {
+      return { estado: 'confirmar_recordatorio', intencion: 'confirmar' };
+    }
+    if (/no|cancelar|mover|reagendar|cambiar/.test(t)) {
+      return { estado: 'reagendar_listar', intencion: 'reagendar' };
+    }
   }
 
-  // Respuesta a propuesta de cita
   if (ultimoAssistant.includes('¿te lo agendo') || ultimoAssistant.includes('¿confirmamos') || ultimoAssistant.includes('¿te parece')) {
-    if (intencionConfirmar) return { estado: 'confirmar_cita', intencion: 'agendar' };
-    if (intencionNegar) return { estado: 'esperando_fecha_hora', intencion: 'agendar' };
-  }
-
-  // Selección de especialista o "cualquiera"
-  if (ultimoAssistant.includes('¿con quién') || ultimoAssistant.includes('te puedo ofrecer') || ultimoAssistant.includes('especialista')) {
-    if (t.length < 25 || intencionConfirmar || /cualquiera|quien sea|el que tengas|la que tengas|me da igual|tú eliges/.test(t)) {
+    if (/^s[ií]|dale|ok|perfecto|súper|agéndalo|confirmo|va|bueno/.test(t)) {
+      return { estado: 'confirmar_cita', intencion: 'agendar' };
+    }
+    if (/no|otro|diferente|cambiar|más tarde|más temprano/.test(t)) {
       return { estado: 'esperando_fecha_hora', intencion: 'agendar' };
     }
   }
 
-  // Cuando pregunta día/hora
-  if (ultimoAssistant.includes('¿qué día') || ultimoAssistant.includes('¿qué hora') || ultimoAssistant.includes('tengo disponible') || ultimoAssistant.includes('¿a qué hora')) {
+  if (ultimoAssistant.includes('¿con quién te gustaría') || ultimoAssistant.includes('te puedo ofrecer a')) {
+    const mencionaEspecialista = especialistas.some(e => t.includes(e.nombre.toLowerCase()));
+    if (mencionaEspecialista || t.length < 20) {
+      return { estado: 'esperando_fecha_hora', intencion: 'agendar' };
+    }
+  }
+
+  if (ultimoAssistant.includes('¿qué día') || ultimoAssistant.includes('¿qué hora') || ultimoAssistant.includes('tengo disponible')) {
     return { estado: 'procesar_fecha_hora', intencion: 'agendar' };
   }
 
-  // Intenciones directas
   if (intencionReagendar) return { estado: 'reagendar_listar', intencion: 'reagendar' };
   if (intencionCancelar) return { estado: 'cancelar_listar', intencion: 'cancelar' };
 
-  // Si el usuario menciona un servicio específico (detectado por palabras clave comunes)
-  const palabrasServicio = /corte|cabello|pelo|tinte|color|manicure|pedicure|uñas|facial|masaje|depilación|cejas|pestañas|tratamiento|spa|botox|hidratación/.test(t);
-  if (palabrasServicio && intencionAgendar) return { estado: 'esperando_especialista', intencion: 'agendar' };
+  const mencionaServicio = servicios.some(s => t.includes(s.nombre.toLowerCase()) || t.includes(s.categoria?.toLowerCase() || ''));
+  if (mencionaServicio) return { estado: 'esperando_especialista', intencion: 'agendar' };
 
-  // Si menciona fecha u hora, probablemente está respondiendo sobre cuándo
-  const mencionaFechaHora = /mañana|hoy|pasado|lunes|martes|miércoles|jueves|viernes|sábado|domingo|\d{1,2}:\d{2}|a las \d|am|pm/.test(t);
-  if (mencionaFechaHora && (ultimoAssistant.includes('¿qué día') || ultimoAssistant.includes('¿a qué hora'))) {
-    return { estado: 'procesar_fecha_hora', intencion: 'agendar' };
-  }
-
-  // Default: esperando servicio
   return { estado: 'esperando_servicio', intencion: 'agendar' };
 }
 
@@ -639,12 +632,9 @@ export default async function handler(req, res) {
       .eq('telefono', userPhone)
       .maybeSingle();
 
-    const { data: localesData } = await supabase.from('locales').select('id, nombre, direccion, hora_apertura, hora_cierre').eq('activo', true);
-    const locales = Array.isArray(localesData) ? localesData : [];
-    const { data: especialistasData } = await supabase.from('especialistas').select('id, nombre, rol, expertise, local_id, activo').eq('activo', true);
-    const especialistas = Array.isArray(especialistasData) ? especialistasData : [];
-    const { data: serviciosData } = await supabase.from('servicios').select('id, nombre, precio, duracion, categoria, descripcion_voda, local_id');
-    const servicios = Array.isArray(serviciosData) ? serviciosData : [];
+    const locales = (await supabase.from('locales').select('id, nombre, direccion, hora_apertura, hora_cierre').eq('activo', true)).data || [];
+    const especialistas = (await supabase.from('especialistas').select('id, nombre, rol, expertise, local_id, activo').eq('activo', true)).data || [];
+    const servicios = (await supabase.from('servicios').select('id, nombre, precio, duracion, categoria, descripcion_voda, local_id')).data || [];
 
     const esNuevo = !cliente || !cliente.nombre || cliente.nombre.trim() === '';
 
@@ -761,7 +751,7 @@ export default async function handler(req, res) {
         localId = locales[0].id;
       }
 
-      const estadoDetectado = await detectarEstado(historial, cliente, textoUsuario, hoy, manana, pasadoManana);
+      const estadoDetectado = await detectarEstado(historial, cliente, textoUsuario, hoy, manana, pasadoManana, servicios, especialistas);
       console.log('🎯 Estado detectado:', estadoDetectado.estado, '| Intención:', estadoDetectado.intencion, '| Local:', localId);
 
       // Filtrar servicios y especialistas por local
