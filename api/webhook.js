@@ -32,6 +32,29 @@ function getFechaEcuador(offsetDias = 0) {
   return fecha.toISOString().split('T')[0];
 }
 
+// ✅ NUEVO: Resolver "lunes", "martes", etc. a fecha ISO
+function resolverDiaSemana(nombreDia) {
+  const dias = ['domingo', 'lunes', 'martes', 'miércoles', 'miercoles', 'jueves', 'viernes', 'sábado', 'sabado'];
+  const idx = dias.indexOf(nombreDia.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, ''));
+  if (idx === -1) return null;
+  
+  const hoy = new Date();
+  const opciones = { timeZone: TIMEZONE, weekday: 'long', year: 'numeric', month: 'numeric', day: 'numeric' };
+  const parts = new Intl.DateTimeFormat('es-EC', opciones).formatToParts(hoy);
+  const year  = parseInt(parts.find(p => p.type === 'year')?.value);
+  const month = parseInt(parts.find(p => p.type === 'month')?.value);
+  const day   = parseInt(parts.find(p => p.type === 'day')?.value);
+  
+  const fechaHoy = new Date(Date.UTC(year, month - 1, day));
+  const diaHoy = fechaHoy.getUTCDay(); // 0=dom, 1=lun...
+  
+  let offset = idx - diaHoy;
+  if (offset <= 0) offset += 7; // Si ya pasó o es hoy, ir a la próxima semana
+  
+  fechaHoy.setUTCDate(fechaHoy.getUTCDate() + offset);
+  return fechaHoy.toISOString().split('T')[0];
+}
+
 function formatearFecha(fechaISO) {
   if (!fechaISO || !fechaISO.match(/^\d{4}-\d{2}-\d{2}$/)) return fechaISO || 'fecha por confirmar';
   const [anio, mes, dia] = fechaISO.split('-').map(Number);
@@ -75,7 +98,51 @@ function minAHora(min) {
 function esDiaLaborable(fechaISO) {
   const [anio, mes, dia] = fechaISO.split('-').map(Number);
   const diaSemana = new Date(Date.UTC(anio, mes - 1, dia)).getUTCDay();
-  return diaSemana !== 0; // 0 = Domingo
+  return diaSemana !== 0;
+}
+
+// ✅ NUEVO: Parsear hora natural español ("11 de la mañana", "3 de la tarde", "8 de la noche")
+function parsearHoraNatural(texto) {
+  const t = texto.toLowerCase();
+  
+  // "11 de la mañana" → 11:00
+  const matchManana = t.match(/(\d{1,2})\s*(?::(\d{2}))?\s*de\s*la\s*mañana/);
+  if (matchManana) {
+    const h = parseInt(matchManana[1], 10);
+    const m = matchManana[2] ? parseInt(matchManana[2], 10) : 0;
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+  }
+  
+  // "3 de la tarde" → 15:00
+  const matchTarde = t.match(/(\d{1,2})\s*(?::(\d{2}))?\s*de\s*la\s*tarde/);
+  if (matchTarde) {
+    let h = parseInt(matchTarde[1], 10);
+    const m = matchTarde[2] ? parseInt(matchTarde[2], 10) : 0;
+    if (h < 12) h += 12;
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+  }
+  
+  // "8 de la noche" → 20:00
+  const matchNoche = t.match(/(\d{1,2})\s*(?::(\d{2}))?\s*de\s*la\s*noche/);
+  if (matchNoche) {
+    let h = parseInt(matchNoche[1], 10);
+    const m = matchNoche[2] ? parseInt(matchNoche[2], 10) : 0;
+    if (h < 12) h += 12;
+    return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+  }
+  
+  // Fallback al regex original
+  const match = t.match(/(?:a\s+las\s+)?(\d{1,2})(?::(\d{2}))?\s*(?:am|pm|a\.m\.|p\.m\.)?/i);
+  if (match) {
+    let hh = parseInt(match[1], 10);
+    const mm = match[2] ? parseInt(match[2], 10) : 0;
+    const sufijo = (match[0] || '').toLowerCase();
+    if (/pm|p\.m\./.test(sufijo) && hh < 12) hh += 12;
+    if (/am|a\.m\./.test(sufijo) && hh === 12) hh = 0;
+    return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  }
+  
+  return null;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -94,9 +161,10 @@ async function buscarCitaAirtable({ supabaseId, telefono, fecha, hora, especiali
     }
     if (telefono && fecha && hora) {
       const conds = [`{Teléfono} = '${telefono}'`, `{Hora} = '${hora}'`];
-      // Búsqueda por rango de fecha en vez de IS_SAME para evitar problemas de TZ
-      const fechaInicio = new Date(Date.UTC(...fecha.split('-').map(Number), 0, 0, 0)).toISOString();
-      const fechaFin    = new Date(Date.UTC(...fecha.split('-').map(Number), 23, 59, 59)).toISOString();
+      // ✅ CORREGIDO: Construir fechas manualmente sin spread frágil
+      const [anio, mes, dia] = fecha.split('-').map(Number);
+      const fechaInicio = new Date(Date.UTC(anio, mes - 1, dia, 0, 0, 0)).toISOString();
+      const fechaFin    = new Date(Date.UTC(anio, mes - 1, dia, 23, 59, 59)).toISOString();
       conds.push(`IS_AFTER({Fecha}, '${fechaInicio}')`);
       conds.push(`IS_BEFORE({Fecha}, '${fechaFin}')`);
       if (especialista) conds.push(`{Especialista} = '${especialista}'`);
@@ -105,8 +173,9 @@ async function buscarCitaAirtable({ supabaseId, telefono, fecha, hora, especiali
       if (r.data.records?.length) return { ok: true, record: r.data.records[0] };
     }
     if (telefono && fecha) {
-      const fechaInicio = new Date(Date.UTC(...fecha.split('-').map(Number), 0, 0, 0)).toISOString();
-      const fechaFin    = new Date(Date.UTC(...fecha.split('-').map(Number), 23, 59, 59)).toISOString();
+      const [anio, mes, dia] = fecha.split('-').map(Number);
+      const fechaInicio = new Date(Date.UTC(anio, mes - 1, dia, 0, 0, 0)).toISOString();
+      const fechaFin    = new Date(Date.UTC(anio, mes - 1, dia, 23, 59, 59)).toISOString();
       const f = encodeURIComponent(`AND({Teléfono} = '${telefono}', IS_AFTER({Fecha}, '${fechaInicio}'), IS_BEFORE({Fecha}, '${fechaFin}'))`);
       const r = await axios.get(`${url}?filterByFormula=${f}`, { headers: hdr });
       if (r.data.records?.length) return { ok: true, record: r.data.records[0] };
@@ -122,8 +191,7 @@ async function crearCitaAirtable(datos) {
   try {
     const url = `https://api.airtable.com/v0/${CONFIG.AIRTABLE_BASE_ID}/${encodeURIComponent(CONFIG.AIRTABLE_TABLE_NAME)}`;
     const [h, min] = datos.hora.split(':').map(Number);
-    const [anio, mes, dia] = datos.fecha.split('-').map(Number);
-    // Guardar como fecha local EC en formato ISO (Airtable interpretará según su TZ)
+    // ✅ CORREGIDO: Fecha ISO local sin offset forzado
     const fechaISO = `${datos.fecha}T${String(h).padStart(2,'0')}:${String(min).padStart(2,'0')}:00`;
     const r = await axios.post(url, {
       records: [{ fields: {
@@ -346,7 +414,6 @@ async function especialistasDisponibles(fecha, hora, duracion, todosEsps) {
   const inicio = horaAMin(hora);
   const fin    = inicio + (duracion || 60);
 
-  // Filtrar disponibles por horario
   const disponibles = todosEsps.filter(esp => {
     for (const c of citas) {
       if (c.especialista !== esp.nombre) continue;
@@ -358,7 +425,6 @@ async function especialistasDisponibles(fecha, hora, duracion, todosEsps) {
   });
   if (!disponibles.length) return [];
 
-  // Carga de los últimos 30 días
   const hace30 = getFechaEcuador(-30);
   const hoy    = getFechaEcuador(0);
   const { data: cargaData } = await supabase
@@ -373,8 +439,6 @@ async function especialistasDisponibles(fecha, hora, duracion, todosEsps) {
   disponibles.forEach(e => { carga[e.id] = 0; });
   (cargaData || []).forEach(c => { if (carga[c.especialista_id] !== undefined) carga[c.especialista_id]++; });
 
-  // ✅ CORRECCIÓN: Shuffle FISHER-YATES real + orden estable por carga
-  // Primero ordenamos por carga (menor primero), luego hacemos shuffle DENTRO de grupos de carga igual
   const agrupados = {};
   disponibles.forEach(e => {
     const c = carga[e.id] || 0;
@@ -385,7 +449,6 @@ async function especialistasDisponibles(fecha, hora, duracion, todosEsps) {
   const resultado = [];
   Object.keys(agrupados).map(Number).sort((a, b) => a - b).forEach(cargaKey => {
     const grupo = agrupados[cargaKey];
-    // Fisher-Yates shuffle para este grupo
     for (let i = grupo.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [grupo[i], grupo[j]] = [grupo[j], grupo[i]];
@@ -396,10 +459,9 @@ async function especialistasDisponibles(fecha, hora, duracion, todosEsps) {
   return resultado;
 }
 
-// Devuelve exactamente 2 especialistas recomendados (o 1 si solo hay 1)
 async function recomendarEspecialistas(fecha, hora, duracion, todosEsps) {
   const disponibles = await especialistasDisponibles(fecha, hora, duracion, todosEsps);
-  return disponibles.slice(0, 2); // Máximo 2, mínimo 0
+  return disponibles.slice(0, 2);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -443,7 +505,6 @@ async function notificarListaEspera(fecha, hora, especialistaId, servicioId) {
     for (const e of espera) {
       if (!e.clientes?.telefono) continue;
       const minDeseado = e.hora_preferida ? horaAMin(e.hora_preferida) : minLibre;
-      // ✅ CORRECCIÓN: Ventana de 2 horas en vez de 1 para mayor flexibilidad
       if (Math.abs(minLibre - minDeseado) > 120) continue;
       notificados.push({ id: e.id, telefono: e.clientes.telefono, nombre: e.clientes.nombre, servicio: e.servicio_aux });
     }
@@ -510,6 +571,31 @@ export default async function handler(req, res) {
            (m.contenido.toLowerCase().includes('nombre') || m.contenido.toLowerCase().includes('registr'))
     );
 
+    // ✅ NUEVO: Resolver fecha desde texto del usuario (lunes, martes, etc.)
+    const tLower = (textoUsuario || '').toLowerCase();
+    let fechaFinal = manana;
+    
+    if (tLower.includes('hoy')) fechaFinal = hoy;
+    else if (tLower.includes('pasado mañana')) fechaFinal = pasadoManana;
+    else if (tLower.includes('mañana')) fechaFinal = manana;
+    else {
+      // Buscar días de la semana
+      const diasSemana = ['lunes', 'martes', 'miércoles', 'miercoles', 'jueves', 'viernes', 'sábado', 'sabado', 'domingo'];
+      for (const dia of diasSemana) {
+        if (tLower.includes(dia)) {
+          const resuelta = resolverDiaSemana(dia);
+          if (resuelta) { fechaFinal = resuelta; break; }
+        }
+      }
+    }
+    if (datos.cita_fecha?.match(/^\d{4}-\d{2}-\d{2}$/)) fechaFinal = datos.cita_fecha;
+
+    // ✅ NUEVO: Parsear hora natural del texto si no viene en JSON
+    let horaDetectada = null;
+    if (!datos.cita_hora?.match(/^\d{2}:\d{2}$/)) {
+      horaDetectada = parsearHoraNatural(textoUsuario);
+    }
+
     // ── Catálogos para el prompt ──────────────────────────────
     const catalogoEsps = especialistas
       .map(e => `- ${e.nombre}${e.expertise ? ` (${e.expertise})` : ''}${e.rol ? ` — ${e.rol}` : ''}`)
@@ -524,6 +610,23 @@ export default async function handler(req, res) {
     const esRespuestaListaEspera =
       ultimoSystem.startsWith('LISTA_ESPERA_OFERTA:') &&
       /^s[ií]|dale|ok|confirmo|perfecto|agéndalo|sí/i.test(textoUsuario.trim());
+
+    // ✅ NUEVO: Pre-calcular recomendaciones de especialistas para inyectar en prompt
+    let recomendacionesPrompt = '';
+    if (datos.cita_servicio && (datos.cita_hora || horaDetectada)) {
+      const svc = servicios.find(s => s.nombre.toLowerCase().includes((datos.cita_servicio || '').toLowerCase()));
+      const horaParaRec = datos.cita_hora || horaDetectada;
+      if (svc && horaParaRec) {
+        const recs = await recomendarEspecialistas(fechaFinal, horaParaRec, svc.duracion, especialistas);
+        if (recs.length >= 2) {
+          recomendacionesPrompt = `\n\nRECOMENDACIONES PRECALCULADAS PARA ${svc.nombre} EL ${fechaFinal} A LAS ${horaParaRec}:\n• ${recs[0].nombre}${recs[0].expertise ? ` (${recs[0].expertise})` : ''}\n• ${recs[1].nombre}${recs[1].expertise ? ` (${recs[1].expertise})` : ''}\nDEBES presentar estos 2 especialistas EXACTOS. NO inventes otros.`;
+        } else if (recs.length === 1) {
+          recomendacionesPrompt = `\n\nRECOMENDACIÓN PRECALCULADA PARA ${svc.nombre} EL ${fechaFinal} A LAS ${horaParaRec}:\n• ${recs[0].nombre}${recs[0].expertise ? ` (${recs[0].expertise})` : ''}\nSOLO hay 1 disponible. Presenta este.`;
+        } else {
+          recomendacionesPrompt = `\n\nNO HAY ESPECIALISTAS DISPONIBLES para ${svc.nombre} el ${fechaFinal} a las ${horaParaRec}. Ofrece otro horario.`;
+        }
+      }
+    }
 
     // ═══════════════════════════════════════════════════════════
     // SYSTEM PROMPT
@@ -540,7 +643,7 @@ ESPECIALISTAS (solo estos existen):
 ${catalogoEsps}
 
 SERVICIOS (solo estos existen):
-${catalogoSvcs}
+${catalogoSvcs}${recomendacionesPrompt}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ESTADO DEL CLIENTE
@@ -692,13 +795,10 @@ REGLAS:
     let mensajeAccion  = '';
     let accionEjecutada = false;
 
-    // ── Resolver fecha final ──────────────────────────────────
-    const tLower = (textoUsuario || '').toLowerCase();
-    let fechaFinal = manana;
-    if (tLower.includes('hoy'))               fechaFinal = hoy;
-    else if (tLower.includes('pasado mañana')) fechaFinal = pasadoManana;
-    else if (tLower.includes('mañana'))        fechaFinal = manana;
-    if (datos.cita_fecha?.match(/^\d{4}-\d{2}-\d{2}$/)) fechaFinal = datos.cita_fecha;
+    // ✅ CORRECCIÓN: Si detectamos hora del texto pero no viene en JSON, inyectarla
+    if (!datos.cita_hora && horaDetectada) {
+      datos.cita_hora = horaDetectada;
+    }
 
     // ────────────────────────────────────────────────────────
     // 0 ── RESPUESTA A OFERTA DE LISTA DE ESPERA
@@ -712,7 +812,6 @@ REGLAS:
         if (!disponible.ok) {
           mensajeAccion = 'Ese horario ya fue tomado. ¿Quieres que busque otra opción? 🌸';
         } else if (cliente?.id) {
-          // ✅ CORRECCIÓN: Asignar especialista por rotación equitativa
           const recomendados = await recomendarEspecialistas(oferta.fecha, oferta.hora, svcData?.duracion || 60, especialistas);
           const espAsignado = recomendados[0] || null;
           
@@ -805,23 +904,18 @@ REGLAS:
         mensajeAccion   = 'Los domingos no atendemos. ¿Te funciona otro día? 📅';
         accionEjecutada = true;
       } else {
-        // Resolver servicio
         const svcData = servicios.find(s => s.nombre.toLowerCase() === (datos.cita_servicio || '').toLowerCase())
           || servicios.find(s => s.nombre.toLowerCase().includes((datos.cita_servicio || '').toLowerCase()))
           || { id: null, nombre: datos.cita_servicio || 'Servicio', precio: 0, duracion: 60 };
 
-        // ✅ CORRECCIÓN: Resolver especialista con lógica de rotación equitativa
         let espData = null;
         const recomendados = await recomendarEspecialistas(fechaFinal, datos.cita_hora, svcData.duracion, especialistas);
         
         if (datos.cita_especialista) {
-          // El cliente eligió uno específico
           espData = especialistas.find(e => e.nombre.toLowerCase() === datos.cita_especialista.toLowerCase())
             || especialistas.find(e => e.nombre.toLowerCase().includes(datos.cita_especialista.toLowerCase()))
             || null;
         } else if (recomendados.length >= 2) {
-          // El cliente no eligió → el prompt debería haber mostrado 2 opciones
-          // Si llega aquí sin elegir, asignamos el primero (menor carga)
           espData = recomendados[0];
         } else if (recomendados.length === 1) {
           espData = recomendados[0];
@@ -837,7 +931,6 @@ REGLAS:
             const ops = slots.map(s => `• ${formatearHora(s)}`).join('\n');
             mensajeAccion = `${disponible.mensaje}\n\nTengo estos horarios disponibles:\n${ops}\n\n¿Cuál te funciona? 🌸`;
           } else {
-            // Intentar otro especialista disponible
             const otrosDisp = await especialistasDisponibles(fechaFinal, datos.cita_hora, svcData.duracion, especialistas);
             const otro = otrosDisp.find(e => e.id !== espData?.id);
             if (otro) {
@@ -909,7 +1002,6 @@ REGLAS:
         const nomCliente = cliente?.nombre   || '';
         const apeCliente = cliente?.apellido || '';
 
-        // Buscar citas del cliente
         let todasCitas = [];
         if (clienteId) {
           const { data: c1 } = await supabase.from('citas')
@@ -931,15 +1023,12 @@ REGLAS:
           mensajeAccion   = 'No encontré citas confirmadas a tu nombre. ¿Quieres agendar una nueva? 💫';
           accionEjecutada = true;
         } else {
-          // Mapear especialistas
           const mapaEsp = {};
           especialistas.forEach(e => { mapaEsp[e.id] = e.nombre; });
           todasCitas = todasCitas.map(c => ({ ...c, espNombre: mapaEsp[c.especialista_id] || 'Asignar' }));
 
-          // ── Identificar cuál cita mover (4 estrategias) ──
           let citaAMover = null;
 
-          // Estrategia A: fecha_original + hora_original del JSON
           if (datos.cita_fecha_original && datos.cita_hora_original) {
             citaAMover = todasCitas.find(c =>
               c.fecha_hora?.split('T')[0] === datos.cita_fecha_original &&
@@ -947,14 +1036,12 @@ REGLAS:
             );
             if (citaAMover) console.log('✅ Reagendar: encontrada por fecha+hora original del JSON');
           }
-          // Estrategia B: servicio del JSON
           if (!citaAMover && datos.cita_servicio) {
             citaAMover = todasCitas.find(c =>
               c.servicio_aux?.toLowerCase().includes(datos.cita_servicio.toLowerCase())
             );
             if (citaAMover) console.log('✅ Reagendar: encontrada por servicio');
           }
-          // Estrategia C: fecha/hora extraída del texto del usuario
           if (!citaAMover) {
             let fMenc = null;
             if (tLower.includes('hoy'))               fMenc = hoy;
@@ -980,14 +1067,12 @@ REGLAS:
             }
             if (citaAMover) console.log('✅ Reagendar: encontrada por texto del usuario');
           }
-          // Estrategia D: única cita disponible
           if (!citaAMover && todasCitas.length === 1) {
             citaAMover = todasCitas[0];
             console.log('✅ Reagendar: única cita, fallback automático');
           }
 
           if (!citaAMover) {
-            // Pedir clarificación
             const lista = todasCitas.map((c, i) => {
               const f = c.fecha_hora?.split('T')[0];
               const h = c.fecha_hora?.substring(11, 16);
@@ -996,7 +1081,6 @@ REGLAS:
             mensajeAccion   = `Veo que tienes ${todasCitas.length} citas confirmadas:\n${lista}\n\n¿Cuál quieres mover? Responde con el número. 💫`;
             accionEjecutada = true;
           } else {
-            // ── Ejecutar reagendamiento ──
             const svcActual = servicios.find(s => s.id === citaAMover.servicio_id)
               || { id: null, nombre: citaAMover.servicio_aux, precio: 0, duracion: citaAMover.duracion_aux || 60 };
 
@@ -1005,7 +1089,6 @@ REGLAS:
             let   espFinalNombre = espOrigNombre;
             let   espFinalId     = espOrigId;
 
-            // Si el cliente quiere cambiar de especialista
             if (datos.cita_especialista) {
               const nuevoEsp = especialistas.find(e =>
                 e.nombre.toLowerCase() === datos.cita_especialista.toLowerCase()
@@ -1127,7 +1210,6 @@ REGLAS:
         } else {
           console.log('✅ Cita cancelada en Supabase:', citaACancelar.id);
 
-          // Notificar lista de espera
           const enEspera = await notificarListaEspera(fCita, hCita, citaACancelar.especialista_id, citaACancelar.servicio_id);
           for (const e of enEspera) {
             await supabase.from('conversaciones').insert([
