@@ -1,11 +1,7 @@
 {
   "version": 2,
   "builds": [
-    { "src": "api/webhook.js",                "use": "@vercel/node" },
-    { "src": "api/daily-report.js",           "use": "@vercel/node" },
-    { "src": "api/reminders_noche.js",        "use": "@vercel/node" },
-    { "src": "api/reminders_manana.js",       "use": "@vercel/node" },
-    { "src": "api/lista_espera_processor.js", "use": "@vercel/node" }
+    { "src": "api/*.js", "use": "@vercel/node" }
   ],
   "crons": [
     { "path": "/api/reporte-diario",   "schedule": "0 2 * * *"   },
