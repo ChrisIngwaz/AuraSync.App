@@ -1,20 +1,11 @@
 {
   "version": 2,
-  "functions": {
-    "api/webhook.js":                { "maxDuration": 30 },
-    "api/daily-report.js":           { "maxDuration": 30 },
-    "api/reminders_noche.js":        { "maxDuration": 30 },
-    "api/reminders_manana.js":       { "maxDuration": 30 },
-    "api/lista_espera_processor.js": { "maxDuration": 30 }
-  },
-  "routes": [
-    { "src": "/api/reporte-diario",   "dest": "api/daily-report.js" },
-    { "src": "/api/reminders-noche",  "dest": "api/reminders_noche.js" },
-    { "src": "/api/reminders-manana", "dest": "api/reminders_manana.js" },
-    { "src": "/api/lista-espera",     "dest": "api/lista_espera_processor.js" },
-    { "src": "/webhook",              "dest": "api/webhook.js" },
-    { "src": "/api/webhook",          "dest": "api/webhook.js" },
-    { "src": "/(.*)",                 "dest": "api/webhook.js" }
+  "builds": [
+    { "src": "api/webhook.js",                "use": "@vercel/node" },
+    { "src": "api/daily-report.js",           "use": "@vercel/node" },
+    { "src": "api/reminders_noche.js",        "use": "@vercel/node" },
+    { "src": "api/reminders_manana.js",       "use": "@vercel/node" },
+    { "src": "api/lista_espera_processor.js", "use": "@vercel/node" }
   ],
   "crons": [
     { "path": "/api/reporte-diario",   "schedule": "0 2 * * *"   },
